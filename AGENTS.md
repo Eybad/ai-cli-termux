@@ -33,6 +33,39 @@ Preguntar: ¿esto se puede implementar como?
 
 Si la respuesta es sí, no tocar `install.sh`.
 
+## Dónde pertenece cada cambio
+
+| Qué querés hacer | Dónde |
+|---|---|
+| Agregar/quitar un tool | `registry/<tool>.conf` + `sha256.txt` |
+| Cambiar ENV, flags, o parches de un tool | `registry/<tool>.conf` (WRAPPER_ENV, hooks) |
+| Modificar el pipeline de instalación | `install.sh` (solo si no se puede en .conf) |
+| Agregar/quitar pasos de verificación | `verify.sh` |
+| Actualizar hash de un release existente | `sha256.txt` |
+| Automatizar actualización de hashes en CI | `.github/workflows/update-hashes.yml` |
+
+## Invariants (nunca romper)
+
+- **Fail-closed en checksums.** Sin hash verificado → no se instala.
+- **Zero condicionales por tool en install.sh.** Ni `if`, ni `case $TOOL`, ni grep del nombre.
+- **El wrapper siempre limpia LD_PRELOAD y LD_LIBRARY_PATH.** Sin excepción.
+- **No bypassear verify.sh.** Si verify.sh falla, el cambio está incompleto.
+
+## Verificación antes de commit
+
+1. `shellcheck install.sh verify.sh` — cero warnings
+2. `bash install.sh <tool> -v <version>` — instalación limpia
+3. `bash verify.sh <tool>` — todos PASS
+4. Revisar `git diff` — sin cambios espurios
+
+## Archivos que leer antes de modificar
+
+- `README.md` — contexto general y ejemplos de uso
+- `registry/*.conf` — configuración existente (openicode.conf, agy.conf, kiro-cli.conf como referencia)
+- `install.sh` — pipeline completo (especialmente las funciones `resolve_version` y `download`)
+- `verify.sh` — pasos de verificación (si se toca verify.sh)
+- `sha256.txt` — formato y entradas existentes
+
 ## Estructura
 
 - `install.sh` — instalador genérico
