@@ -48,7 +48,7 @@ Si la respuesta es sí, no tocar `install.sh`.
 
 - **Fail-closed en checksums.** Sin hash verificado → no se instala.
 - **Zero condicionales por tool en install.sh.** Ni `if`, ni `case $TOOL`, ni grep del nombre.
-- **El wrapper siempre limpia LD_PRELOAD y LD_LIBRARY_PATH.** Sin excepción.
+- **La lógica específica de un tool vive en registry/*.conf o sus hooks.** No en install.sh.
 - **No bypassear verify.sh.** Si verify.sh falla, el cambio está incompleto.
 
 ## Verificación antes de commit
