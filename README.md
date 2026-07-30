@@ -36,7 +36,7 @@ Android OS / Kernel Linux (aarch64)
 
 | Herramienta | Distribución | Verificación de Integridad | Mitigaciones Específicas |
 |---|---|---|---|
-| **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | Hash SHA256 (`sha256.txt`) + GitHub Attestation (Sigstore) | patchelf + shims de escritorio |
+| **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | Hash SHA256 (`sha256.txt`) + GitHub Attestation (Sigstore) | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
 | **`agy`** *(Antigravity CLI)* | [Google Cloud Storage](https://antigravity.google) (Manifest JSON) | SHA512 dinámico desde el manifest remoto | Parche VA39 ARM64 + faccessat2 + shim libc.so + DNS cgo |
 
 ---
