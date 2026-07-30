@@ -1,0 +1,34 @@
+# sha256.txt — Hashes de tarballs por herramienta
+#
+# Formato:  <tool>/<tag>  <checksum>
+#
+# Este archivo es la fuente de verdad para herramientas con CHECKSUM_SOURCE=hashfile.
+# install.sh lee este archivo para verificar el tarball antes de instalarlo.
+#
+# ── Cómo agregar un hash nuevo ──────────────────────────────────────────────────
+#
+#   TAG=v1.18.9
+#   TOOL=opencode
+#   curl -fLO "https://github.com/anomalyco/opencode/releases/download/$TAG/opencode-linux-arm64.tar.gz"
+#   sha256sum opencode-linux-arm64.tar.gz
+#
+# Confirmá la attestation antes de agregar (requiere gh autenticado):
+#
+#   gh release verify-asset "$TAG" opencode-linux-arm64.tar.gz \
+#     --repo anomalyco/opencode
+#
+# ── Notas sobre colisiones de hash ─────────────────────────────────────────────
+#
+# patchelf modifica el ELF después de la extracción, por lo que el hash del
+# binario instalado NUNCA coincide con el del tarball. verify.sh compara el
+# binario parcheado contra el hash registrado en el manifest local, NO contra
+# este archivo. Este archivo cubre únicamente el tarball descargado.
+#
+# ── Entradas ───────────────────────────────────────────────────────────────────
+
+# opencode — https://github.com/anomalyco/opencode/releases
+opencode/v1.18.9  b16bd7593ea960a25d9c6849b3023bcd9b9244a6f51675341fd2052043b0670f
+
+# agy (Antigravity CLI) — hashes no requeridos; usa CHECKSUM_SOURCE=manifest
+# El instalador descarga el hash SHA512 dinámicamente del manifest JSON de Google.
+# No agregar entradas para agy acá.
