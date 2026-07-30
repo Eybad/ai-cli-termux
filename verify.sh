@@ -88,6 +88,11 @@ if [[ $# -lt 1 ]]; then
 fi
 
 TOOL="$1"
+if [[ ! "$TOOL" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  echo "ERROR: Nombre de herramienta inválido '$TOOL'."
+  exit 1
+fi
+
 CONF="$REGISTRY_DIR/$TOOL.conf"
 
 if [[ ! -f "$CONF" ]]; then

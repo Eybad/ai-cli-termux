@@ -144,6 +144,13 @@ distintos** para la misma versión: tarball, binario extraído, y binario post-p
 
 ### Limitaciones conocidas en Termux
 
+#### Fallos de TUI y Renderizado de Pseudo-terminal (PTY)
+
+Al ejecutar interfaces interactivas (como `agy login` con OAuth o salidas de ayuda extensas) bajo la mediación de `glibc-runner`, ocurren fallos en la capa de abstracción:
+1. **Crash por invocación de navegador (xdg-open):** Las librerías de Go fallan al buscar utilidades de escritorio estándar. El script `install.sh` mitiga esto automáticamente creando un *shim* local hacia `termux-open-url`.
+2. **STDOUT corrupto (Efecto escalera):** La capa de compatibilidad a menudo falla en traducir correctamente los caracteres de retorno de carro y salto de línea en el PTY, rompiendo la renderización de texto.
+* **Mitigación:** Para evitar bloqueos, forzá modos de ejecución desatendida en la autenticación (ej. `agy login --no-browser` o equivalentemente *headless*) y si tu terminal queda rota, ejecutá `stty sane`.
+
 #### Shebangs rotos en procesos hijos
 
 El wrapper hace `unset LD_PRELOAD` (necesario: `libtermux-exec.so` es bionic y

@@ -39,6 +39,9 @@ jobs:
         env:
           INPUT_TOOL: ${{ inputs.tool }}
         run: |
+          if [[ ! "${INPUT_TOOL}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            echo "ERROR: Nombre de herramienta inválido '${INPUT_TOOL}'"; exit 1
+          fi
           CONF="registry/${INPUT_TOOL}.conf"
           if [[ ! -f "$CONF" ]]; then
             echo "ERROR: No existe $CONF"; exit 1
