@@ -35,6 +35,7 @@ lógica del programa.
 
 - Android 10+ (aarch64) o Linux (x86_64)
 - Termux desde F-Droid o GitHub (**NO** Google Play, está desactualizado)
+- `python` y `ca-certificates` en Termux (`pkg install python ca-certificates -y`)
 - ~400 MB libres por herramienta
 
 ## Instalación
@@ -167,27 +168,29 @@ provoquen segfault al enlazar con glibc.
 
 #### DNS y TLS (Go)
 
-glibc necesita `nsswitch.conf`. `install.sh` lo crea automáticamente si falta.
-Si hay problemas de resolución DNS o validación TLS en binarios Go (como `agy`),
-el wrapper exporta `GODEBUG=netdns=go` y `SSL_CERT_FILE` apuntando a los
-certificados de Termux (`$PREFIX/etc/tls/cert.pem`).
+glibc necesita `nsswitch.conf` y un `resolv.conf` válido. `install.sh` crea automáticamente
+`$GLIBC_PREFIX/etc/nsswitch.conf` y `$GLIBC_PREFIX/etc/resolv.conf` (configurado con los
+DNS 8.8.8.8 / 1.1.1.1).
+Para que Go resuelva correctamente los dominios (ej: autenticación OAuth con `oauth2.googleapis.com`),
+el wrapper exporta `GODEBUG=netdns=cgo` (forzando la resolución mediante `getaddrinfo` de glibc) y
+`SSL_CERT_FILE` apuntando a los certificados de Termux (`$PREFIX/etc/tls/cert.pem`).
 
-#### Incompatibilidades de Kernel (TCMalloc y seccomp)
+#### Mitigación de Incompatibilidades de Kernel (TCMalloc y seccomp)
 
-Algunas herramientas precompiladas (como `agy`) pueden fallar incluso con el overlay
-glibc configurado correctamente, debido a diferencias a nivel de kernel:
+Las herramientas compiladas para Linux ARM64 estándar (como `agy`) presentan dos incompatibilidades severas en Android nativo:
 
-1. **TCMalloc y espacio de direcciones:** Binarios que usan TCMalloc a menudo asumen
-   un espacio de direcciones virtual de 48 bits. Muchos kernels de Android ARM64 exponen
-   solo 39 bits (`CONFIG_ARM64_VA_BITS=39`). Esto resulta en un crasheo inmediato
-   (`MmapAligned() failed` / `FATAL ERROR: Out of memory`) en la inicialización.
-2. **Syscalls y seccomp:** Go puede utilizar syscalls recientes (ej. `faccessat2`), que el
-   filtro seccomp de Android puede bloquear, resultando en `SIGSYS`.
+1. **TCMalloc y espacio de direcciones (VA39 vs VA48):** El allocador TCMalloc asume un espacio de
+   direcciones de 48 bits, pero la mayoría de los kernels de Android ARM64 exponen solo 39 bits
+   (`CONFIG_ARM64_VA_BITS=39`). Esto provoca un crash inmediato (`MmapAligned() failed` / `Out of memory`).
+2. **Syscalls bloqueadas por seccomp:** El runtime de Go utiliza la syscall `faccessat2` (nr 439), la cual es
+   bloqueada por la política seccomp de Android, resultando en un terminate por `SIGSYS`.
 
-Estas limitaciones no se pueden arreglar solo con `patchelf`, requieren compilar el binario
-específicamente para Android/Termux, o usar un entorno `proot` que emule o intercepte
-estas llamadas (aunque `proot` comparte el kernel, por lo que el problema de TCMalloc
-39-bit persiste a menos que se recompile o se haga `LD_PRELOAD` de otro allocador).
+**Solución integrada (sin proot y 100% auditable localmente):**
+El instalador incluye un hook automatizado `registry/patch_va39.py` (ejecutado transparentemente en `pre_wrapper_hook` vía Python 3). El script realiza un **hex-patching de instrucciones ARM64** directamente sobre el binario precompilado:
+- Reescribe las máscaras e instrucciones `ubfx`/`lsl` de TCMalloc para ajustar la extracción de tags de 42 a 35 bits (compatibilidad VA39).
+- Parchea el límite superior de `MmapAligned` de `1<<48` a `1<<39`.
+- Reemplaza el número de syscall `faccessat2` (439) por `faccessat` (48), compatible con seccomp.
+- Todo el proceso ocurre offline, localmente en el dispositivo, sin descargar ejecutables ni depender de repositorios de terceros.
 
 #### Fragilidad ante actualizaciones del stack glibc
 
