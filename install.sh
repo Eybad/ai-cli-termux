@@ -355,6 +355,18 @@ resolve_version() {
       TAG="v$VERSION"
       ;;
 
+    url_template)
+      if [[ -n "$REQUESTED_VERSION" ]]; then
+        VERSION=$(normalize_version "$REQUESTED_VERSION")
+        [[ -n "$VERSION" ]] || { err "Versión inválida: '$REQUESTED_VERSION'"; exit 2; }
+      else
+        err "$DISPLAY_NAME: se requiere -v <version> (url_template)"
+        err "Versiones disponibles en $HASH_FILE"
+        exit 1
+      fi
+      TAG="v$VERSION"
+      ;;
+
     *)
       err "RELEASE_SOURCE desconocido en $CONF: '$RELEASE_SOURCE'"
       exit 1
@@ -454,6 +466,9 @@ download() {
       ;;
     manifest_json)
       url="$DOWNLOAD_URL"
+      ;;
+    url_template)
+      url=$(expand_template "$DOWNLOAD_URL_TEMPLATE")
       ;;
   esac
 
