@@ -82,7 +82,7 @@ def main():
     # Mueve la extracción/inserción del tag de TCMalloc del bit 42 al 35.
     ubfx_count = 0
     lsl_count = 0
-    for off in range(lo, hi, 4):
+    for off in range(lo, hi - 3, 4):
         w = get(off)
         if (w & 0x7F800000) == 0x53000000:  # familia bitfield-move
             immr = (w >> 16) & 0x3F
@@ -112,7 +112,7 @@ def main():
     #   → mov x10, #-1; lsr x10, x10, #29
     # Resultado: x10 = 0x7ffffffff (máscara de 39 bits)
     mask_count = 0
-    for off in range(lo, hi - 4, 4):
+    for off in range(lo, hi - 7, 4):
         if get(off) == 0x92D3800A and get(off + 4) == 0xF2E0000A:
             put(off, 0x9280000A)      # mov x10, #-1
             put(off + 4, 0xD35DFD4A)  # lsr x10, x10, #29
@@ -122,7 +122,7 @@ def main():
 
     # ── Parche 3: MmapAlignedLocked upper bound: 1<<48 → 1<<39 ─────────
     mmap_count = 0
-    for off in range(lo, hi, 4):
+    for off in range(lo, hi - 3, 4):
         if get(off) == 0xF2E00029:
             put(off, 0xD3596129)  # 1<<39 en lugar de 1<<48
             mmap_count += 1
@@ -148,7 +148,7 @@ def main():
         0xD2C08008: 0xD2C00108,  # kTagFree: 1<<42 → 1<<35
     }
     counts = {old: 0 for old in word_rewrites}
-    for off in range(lo, hi, 4):
+    for off in range(lo, hi - 3, 4):
         w = get(off)
         if w in word_rewrites:
             put(off, word_rewrites[w])
@@ -160,7 +160,7 @@ def main():
     # Patrón: mov x5, #0; mov x6, #0; mov x0, #0x1b7 (439); bl <syscall>
     # Se reemplaza solo el mov x0 con el nr de syscall.
     faccessat2_count = 0
-    for off in range(0, len(data) - 12, 4):
+    for off in range(0, len(data) - 15, 4):
         if (
             get(off) == 0xAA1F03E5      # mov x5, xzr
             and get(off + 4) == 0xAA1F03E6   # mov x6, xzr
