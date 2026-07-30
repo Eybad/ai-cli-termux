@@ -6,7 +6,7 @@ Instalador y verificador unificado para ejecutar CLIs de Inteligencia Artificial
 
 ## 🎯 Por qué existe este proyecto
 
-Las herramientas CLI de IA modernas (como `opencode` o `antigravity`) se distribuyen como binarios ELF compilados dinámicamente para entornos Linux estándar (`glibc`). Por su parte, Android utiliza Bionic libc.
+Las herramientas CLI de IA modernas (como `opencode`, `kiro-cli` o `antigravity`) se distribuyen como binarios ELF compilados dinámicamente para entornos Linux estándar (`glibc`). Por su parte, Android utiliza Bionic libc.
 
 En lugar de requerir distribuciones completas virtualizadas vía `proot-distro` (con consumo elevado de memoria y almacenamiento) o mantener instaladores aislados por cada CLI, **`ai-cli-termux`** proporciona un framework modular y extensible accionado por registros de configuración en `registry/`.
 
@@ -38,6 +38,7 @@ Android OS / Kernel Linux (aarch64)
 |---|---|---|---|
 | **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | Hash SHA256 (`sha256.txt`) + GitHub Attestation (Sigstore) | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
 | **`agy`** *(Antigravity CLI)* | [Google Cloud Storage](https://antigravity.google) (Manifest JSON) | SHA512 dinámico desde el manifest remoto | Parche VA39 ARM64 + faccessat2 + shim libc.so + DNS cgo |
+| **`kiro-cli`** *(Kiro CLI)* | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 fijo desde `sha256.txt` | URL template con versión explícita (`-v`) |
 
 ---
 
@@ -62,6 +63,9 @@ git clone https://github.com/Eybad/ai-cli-termux.git
 cd ai-cli-termux
 ```
 
+> [!NOTE]
+> **`kiro-cli`** usa `RELEASE_SOURCE="url_template"`: requiere pasar `-v <version>` explícitamente. No hay resolución automática de última versión. Las versiones disponibles están en `sha256.txt`.
+
 ### 2. Comandos de instalación (`install.sh`)
 
 #### **OpenCode**
@@ -80,10 +84,18 @@ bash install.sh agy -r # Reinstalación forzada y re-aplicación de parches
 bash install.sh agy -u # Desinstalar
 ```
 
+#### **Kiro CLI (`kiro-cli`)**
+```bash
+bash install.sh kiro-cli -v 2.15.2   # Instala una versión específica (requiere -v)
+bash install.sh kiro-cli -v 2.15.2 -r # Reinstalación forzada
+bash install.sh kiro-cli -u          # Desinstalar
+```
+
 ### 3. Ejecutar las herramientas instaladas
 ```bash
-opencode  # Ejecuta OpenCode en el directorio actual
-agy       # Ejecuta Antigravity CLI
+opencode   # Ejecuta OpenCode en el directorio actual
+agy        # Ejecuta Antigravity CLI
+kiro-cli   # Ejecuta Kiro CLI
 ```
 
 ---
@@ -95,6 +107,7 @@ El proyecto incluye un motor de diagnóstico unificado para auditar cualquier he
 ```bash
 bash verify.sh opencode
 bash verify.sh agy
+bash verify.sh kiro-cli
 ```
 
 El script `verify.sh` realiza una auditoría completa en **9 pasos secuenciales**:
@@ -154,7 +167,7 @@ Para dar soporte a un nuevo CLI en este instalador:
    APP_NAME="mi-cli"
    DISPLAY_NAME="Mi CLI de IA"
    REPO="usuario/repo"
-   RELEASE_SOURCE="github"  # o "manifest_json"
+    RELEASE_SOURCE="github"  # o "manifest_json", "url_template"
    CHECKSUM_ALGO="sha256"
    ELF_NAME="mi-cli"
    NEEDS_PATCHELF=true
@@ -169,11 +182,13 @@ Para dar soporte a un nuevo CLI en este instalador:
 ```
 ai-cli-termux/
 ├── install.sh                  # Instalador unificado posix
+├── AGENTS.md                   # Instrucciones para AI agents que trabajen en este repo
 ├── verify.sh                   # Suite de verificación de 9 pasos
 ├── sha256.txt                  # Registro oficial de checksums verificados
 ├── registry/
 │   ├── opencode.conf           # Configuración de OpenCode CLI
 │   ├── agy.conf                # Configuración de Antigravity CLI
+│   ├── kiro-cli.conf           # Configuración de Kiro CLI (Amazon)
 │   └── patch_va39.py           # Script de hex-patching ARM64 para VA39 y faccessat2
 └── .github/workflows/
     └── update-hashes.yml       # Workflow CI/CD para verificar attestations y actualizar sha256.txt
@@ -187,7 +202,8 @@ ai-cli-termux/
 Debido a que `patchelf` y `patch_va39.py` modifican el binario durante la instalación, el sistema registra dos checksums:
 1. **Hash de distribución (Tarball)**: Verificado al descargar (Modelo *Fail-Closed*).
    - **Verificación contra Hash Independiente (`opencode`)**: El hash esperado está pineado en `sha256.txt` dentro del repositorio local. Protege contra assets o CDNs de descarga comprometidos en GitHub. Además soporta verificación opcional con GitHub Attestations (Sigstore/OIDC).
-   - **Verificación Autorreferencial (`agy`)**: El hash SHA512 se extrae dinámicamente del manifest JSON remoto de Google. Protege contra corrupción en tránsito y errores de descarga, pero confía implícitamente en el endpoint de origen de Google.
+    - **Verificación Autorreferencial (`agy`)**: El hash SHA512 se extrae dinámicamente del manifest JSON remoto de Google. Protege contra corrupción en tránsito y errores de descarga, pero confía implícitamente en el endpoint de origen de Google.
+    - **Verificación con hash fijo (`kiro-cli`)**: Similar a `opencode`, el hash SHA256 está pineado en `sha256.txt`. A diferencia de `opencode`, la URL de descarga se construye desde un template y la versión se especifica explícitamente con `-v`.
 2. **Hash local post-instalación (Binario en ejecución)**: Calculado inmediatamente después de aplicar los parches y guardado en `manifest.txt`. `verify.sh` utiliza este hash para asegurar que el binario instalado localmente no haya sido adulterado a posteriori.
 
 ---
