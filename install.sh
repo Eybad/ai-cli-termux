@@ -631,9 +631,9 @@ create_wrapper() {
     done <<< "$WRAPPER_ENV"
   fi
 
-  local exec_cmd="exec \\\"\\\$BIN\\\" \\\"\\\$@\\\""
+  local exec_cmd="exec \"\$BIN\" \"\$@\""
   if [[ "$NEEDS_PATCHELF" == false ]]; then
-    exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\\\$BIN\" \"\\\$@\""
+    exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$BIN\" \"\$@\""
   fi
 
   # El wrapper siempre se llama APP_NAME; el binario interno puede ser ELF_NAME
