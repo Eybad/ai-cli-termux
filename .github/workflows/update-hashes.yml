@@ -14,6 +14,14 @@ on:
       version:
         description: 'Versión (ej: 1.18.9)'
         required: true
+      arch:
+        description: 'Arquitectura (arm64, amd64)'
+        required: true
+        default: 'arm64'
+        type: choice
+        options:
+          - arm64
+          - amd64
 
 jobs:
   update-hash:
@@ -37,19 +45,30 @@ jobs:
           echo "repo=$REPO"                     >> "$GITHUB_OUTPUT"
           echo "archive_template=$ARCHIVE_TEMPLATE" >> "$GITHUB_OUTPUT"
           echo "checksum_algo=$CHECKSUM_ALGO"   >> "$GITHUB_OUTPUT"
-          echo "attest_predicate=$ATTEST_PREDICATE" >> "$GITHUB_OUTPUT"
-          echo "arch_override_aarch64=$ARCH_OVERRIDE_AARCH64" >> "$GITHUB_OUTPUT"
+          echo "attest_predicate=${ATTEST_PREDICATE:-}" >> "$GITHUB_OUTPUT"
+          echo "arch_override_aarch64=${ARCH_OVERRIDE_AARCH64:-}" >> "$GITHUB_OUTPUT"
+          echo "arch_override_x86_64=${ARCH_OVERRIDE_X86_64:-}" >> "$GITHUB_OUTPUT"
 
       - name: Construir URL y nombre del tarball
         id: url
         run: |
           TAG="v${{ inputs.version }}"
-          ARCH="arm64"
-          OVERRIDE="${{ steps.conf.outputs.arch_override_aarch64 }}"
-          if [[ -n "$OVERRIDE" ]]; then ARCH="$OVERRIDE"; fi
+          INPUT_ARCH="${{ inputs.arch }}"
+          ARCH="$INPUT_ARCH"
+          case "$INPUT_ARCH" in
+            arm64|aarch64)
+              OVERRIDE="${{ steps.conf.outputs.arch_override_aarch64 }}"
+              [[ -n "$OVERRIDE" ]] && ARCH="$OVERRIDE"
+              ;;
+            amd64|x86_64|x64)
+              OVERRIDE="${{ steps.conf.outputs.arch_override_x86_64 }}"
+              [[ -n "$OVERRIDE" ]] && ARCH="$OVERRIDE"
+              ;;
+          esac
           ARCHIVE="${{ steps.conf.outputs.archive_template }}"
           ARCHIVE="${ARCHIVE//\{VERSION\}/${{ inputs.version }}}"
           ARCHIVE="${ARCHIVE//\{ARCH\}/$ARCH}"
+          ARCHIVE="${ARCHIVE//\{PLATFORM\}/linux_$ARCH}"
           URL="https://github.com/${{ steps.conf.outputs.repo }}/releases/download/$TAG/$ARCHIVE"
           echo "url=$URL"         >> "$GITHUB_OUTPUT"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
@@ -58,7 +77,7 @@ jobs:
       - name: Descargar tarball
         run: |
           curl -fL --proto '=https' --tlsv1.2 \
-            -o tarball.tar.gz \
+            -o "${{ steps.url.outputs.archive }}" \
             "${{ steps.url.outputs.url }}"
 
       - name: Calcular hash
@@ -66,8 +85,8 @@ jobs:
         run: |
           ALGO="${{ steps.conf.outputs.checksum_algo }}"
           case "$ALGO" in
-            sha256) H=$(sha256sum tarball.tar.gz | cut -d' ' -f1) ;;
-            sha512) H=$(sha512sum tarball.tar.gz | cut -d' ' -f1) ;;
+            sha256) H=$(sha256sum "${{ steps.url.outputs.archive }}" | cut -d' ' -f1) ;;
+            sha512) H=$(sha512sum "${{ steps.url.outputs.archive }}" | cut -d' ' -f1) ;;
             *) echo "Algoritmo desconocido: $ALGO"; exit 1 ;;
           esac
           echo "hash=$H" >> "$GITHUB_OUTPUT"
@@ -88,7 +107,13 @@ jobs:
           TOOL="${{ inputs.tool }}"
           TAG="${{ steps.url.outputs.tag }}"
           HASH="${{ steps.hash.outputs.hash }}"
-          KEY="$TOOL/$TAG"
+          ARCH="${{ inputs.arch }}"
+
+          if [[ "$ARCH" == "arm64" ]]; then
+            KEY="$TOOL/$TAG"
+          else
+            KEY="$TOOL/$TAG:$ARCH"
+          fi
 
           # Eliminar entrada previa si existe
           sed -i "\|^$KEY |d" sha256.txt
@@ -102,5 +127,5 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add sha256.txt
-          git commit -m "chore: agregar ${{ inputs.tool }}/${{ steps.url.outputs.tag }} hash (${{ steps.conf.outputs.checksum_algo }})"
+          git commit -m "chore: agregar ${{ inputs.tool }}/${{ steps.url.outputs.tag }} (${{ inputs.arch }}) hash (${{ steps.conf.outputs.checksum_algo }})"
           git push

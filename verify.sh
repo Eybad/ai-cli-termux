@@ -63,7 +63,18 @@ manifest_get() {
 lookup_hashfile() {
   local key="$1"
   [[ -f "$HASH_FILE" ]] || return 0
-  awk -v t="$key" '{ sub(/\r$/, "") } $1==t { print $2; exit }' "$HASH_FILE"
+  local res="" arch_name=""
+  case "$(uname -m)" in
+    aarch64) arch_name="arm64" ;;
+    x86_64)  arch_name="amd64" ;;
+  esac
+  if [[ -n "$arch_name" ]]; then
+    res=$(awk -v t="${key}:${arch_name}" '{ sub(/\r$/, "") } $1==t { print $2; exit }' "$HASH_FILE")
+  fi
+  if [[ -z "$res" ]]; then
+    res=$(awk -v t="$key" '{ sub(/\r$/, "") } $1==t { print $2; exit }' "$HASH_FILE")
+  fi
+  printf '%s' "$res"
 }
 
 # ── Argumento ─────────────────────────────────────────────────────────────────

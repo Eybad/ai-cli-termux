@@ -188,7 +188,12 @@ normalize_version() {
 lookup_hashfile() {
   local key="$1"   # ej: opencode/v1.18.9
   [[ -f "$HASH_FILE" ]] || return 0
-  awk -v t="$key" '{ sub(/\r$/, "") } $1==t { print $2; exit }' "$HASH_FILE"
+  local res=""
+  res=$(awk -v t="${key}:${ARCH}" '{ sub(/\r$/, "") } $1==t { print $2; exit }' "$HASH_FILE")
+  if [[ -z "$res" ]]; then
+    res=$(awk -v t="$key" '{ sub(/\r$/, "") } $1==t { print $2; exit }' "$HASH_FILE")
+  fi
+  printf '%s' "$res"
 }
 
 # Parser JSON: usa jq (ya es dependencia instalada por install_deps).

@@ -15,9 +15,9 @@ Agregar una herramienta nueva = crear un archivo en `registry/`.
 ## Arquitectura
 
 ```
-Termux (bionic libc)
-  └─ glibc overlay ($PREFIX/glibc/lib/ld-linux-aarch64.so.1 + libs)
-       └─ binario oficial Linux ARM64 (patchelf'd PT_INTERP + DT_RUNPATH)
+Termux (bionic libc) / Linux Host
+  └─ glibc overlay ($PREFIX/glibc/lib/ld-linux-*.so + libs)
+       └─ binario oficial Linux (aarch64 / x86_64, patchelf'd PT_INTERP + DT_RUNPATH)
 ```
 
 `patchelf` reescribe los campos `PT_INTERP` y `DT_RUNPATH` del ELF para apuntar
@@ -33,7 +33,7 @@ lógica del programa.
 
 ## Requisitos
 
-- Android 10+ (aarch64)
+- Android 10+ (aarch64) o Linux (x86_64)
 - Termux desde F-Droid o GitHub (**NO** Google Play, está desactualizado)
 - ~400 MB libres por herramienta
 
@@ -78,7 +78,7 @@ bash verify.sh opencode
 bash verify.sh agy
 ```
 
-Comprueba: manifest, binario (presencia, permisos, formato ELF64 aarch64),
+Comprueba: manifest, binario (presencia, permisos, formato ELF64 aarch64 / x86-64),
 interpreter y rpath patcheados, integridad del binario instalado, coherencia con
 `sha256.txt`, estado de la attestation, wrapper (`LD_PRELOAD`/`LD_LIBRARY_PATH`),
 loader glibc, `nsswitch.conf`, y ejecución real. Sale con código 1 si hay fallos.
