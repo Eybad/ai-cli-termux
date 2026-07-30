@@ -41,7 +41,7 @@ lógica del programa.
 
 ```bash
 pkg install git -y
-git clone https://github.com/TU_USUARIO/ai-cli-termux.git
+git clone https://github.com/Eybad/ai-cli-termux.git
 cd ai-cli-termux
 bash install.sh <herramienta>
 ```
