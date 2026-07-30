@@ -82,6 +82,11 @@ list_tools() {
 
 TOOL="$1"; shift
 
+if [[ ! "$TOOL" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  err "Nombre de herramienta inválido: '$TOOL'"
+  exit 1
+fi
+
 REQUESTED_VERSION=""
 PINNED_CHECKSUM=""
 UNINSTALL=false
@@ -196,16 +201,10 @@ lookup_hashfile() {
   printf '%s' "$res"
 }
 
-# Parser JSON: usa jq (ya es dependencia instalada por install_deps).
-# Fallback a sed si jq no está disponible aún (ej: en resolve_version antes de
-# install_deps). Esto puede pasar si alguien tiene jq preinstalado o no.
+# Parser JSON: usa jq (dependencia obligatoria verificada en preflight).
 json_get() {
   local payload="$1" key="$2"
-  if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$payload" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null
-  else
-    printf '%s' "$payload" | grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/'
-  fi
+  printf '%s' "$payload" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null
 }
 
 manifest_get() {
@@ -264,7 +263,7 @@ preflight() {
   esac
 
   local missing=()
-  for c in curl tar awk; do
+  for c in curl tar awk jq; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
   command -v sha256sum >/dev/null 2>&1 || missing+=(sha256sum)
@@ -273,7 +272,7 @@ preflight() {
   fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     err "Faltan herramientas: ${missing[*]}"
-    err "Instalá con: pkg install curl tar coreutils gawk"
+    err "Instalá con: pkg install curl tar coreutils gawk jq"
     exit 1
   fi
 }
@@ -303,6 +302,7 @@ resolve_version() {
         [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer $token")
         body=$(mktemp)
         code=$(curl -sS --proto '=https' --tlsv1.2 -L \
+                 --connect-timeout 10 --max-time 300 \
                  -H 'Accept: application/vnd.github+json' \
                  "${auth_header[@]}" \
                  -o "$body" -w '%{http_code}' \
@@ -314,11 +314,7 @@ resolve_version() {
           *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$body"; exit 1 ;;
         esac
         local raw
-        if command -v jq >/dev/null 2>&1; then
-          raw=$(jq -r '.tag_name // empty' "$body" 2>/dev/null || true)
-        else
-          raw=$(awk -F'"' '/tag_name/ { print $4; exit }' "$body" || true)
-        fi
+        raw=$(jq -r '.tag_name // empty' "$body" 2>/dev/null || true)
         rm -f "$body"
         VERSION=$(normalize_version "$raw")
         [[ -n "$VERSION" ]] || { err "No se pudo extraer la versión de GitHub API"; exit 1; }
@@ -333,7 +329,7 @@ resolve_version() {
       expanded_url=$(expand_template "$MANIFEST_URL")
       info "Consultando manifest remoto..."
       local manifest_json
-      manifest_json=$(curl -fsSL --proto '=https' --tlsv1.2 "$expanded_url" 2>/dev/null || true)
+      manifest_json=$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 "$expanded_url" 2>/dev/null || true)
       [[ -n "$manifest_json" ]] || { err "No se pudo descargar el manifest desde $expanded_url"; exit 1; }
 
       VERSION=$(json_get "$manifest_json" "$MANIFEST_KEY_VERSION")
@@ -466,7 +462,7 @@ download() {
   TMP_FILE=$(mktemp "$tmp_dir/$APP_NAME-install-XXXXXX.tar.gz")
 
   info "Descargando $DISPLAY_NAME $VERSION..."
-  if ! curl -fL --proto '=https' --tlsv1.2 -o "$TMP_FILE" "$url"; then
+  if ! curl -fL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 -o "$TMP_FILE" "$url"; then
     err "Falló la descarga desde $url"
     exit 1
   fi
@@ -624,10 +620,14 @@ create_wrapper() {
   # Construir bloque de exports para variables de entorno del .conf
   local env_block=""
   if [[ -n "$WRAPPER_ENV" ]]; then
-    local line
+    local line var_name var_val
     while IFS= read -r line; do
       [[ -z "$line" || "$line" == \#* ]] && continue
-      env_block+="export $line"$'\n'
+      if [[ "$line" =~ ^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$ ]]; then
+        var_name="${BASH_REMATCH[1]}"
+        var_val="${BASH_REMATCH[2]}"
+        env_block+="export ${var_name}=${var_val@Q}"$'\n'
+      fi
     done <<< "$WRAPPER_ENV"
   fi
 
