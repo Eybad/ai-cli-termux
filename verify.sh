@@ -17,22 +17,6 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 GLIBC_PREFIX="$PREFIX/glibc"
 GLIBC_LIB="$GLIBC_PREFIX/lib"
 
-# Resolver loader según arquitectura
-case "$(uname -m)" in
-  aarch64)
-    LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1"
-    EXPECTED_ELF_ARCH="ARM aarch64"
-    ;;
-  x86_64)
-    LOADER="$GLIBC_LIB/ld-linux-x86-64.so.2"
-    EXPECTED_ELF_ARCH="x86-64"
-    ;;
-  *)
-    fail "Arquitectura no soportada: $(uname -m)"
-    exit 1
-    ;;
-esac
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY_DIR="$SCRIPT_DIR/registry"
 HASH_FILE="$SCRIPT_DIR/sha256.txt"
@@ -51,6 +35,22 @@ pass() { printf '%sPASS%s: %s\n' "$GREEN" "$NC" "$1"; }
 fail() { printf '%sFAIL%s: %s\n' "$RED"   "$NC" "$1"; FAILS=$((FAILS + 1)); }
 warn() { printf '%sWARN%s: %s\n' "$ORANGE" "$NC" "$1"; WARNS=$((WARNS + 1)); }
 note() { printf '%s      %s%s\n' "$MUTED" "$1" "$NC"; }
+
+# Resolver loader según arquitectura
+case "$(uname -m)" in
+  aarch64)
+    LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1"
+    EXPECTED_ELF_ARCH="ARM aarch64"
+    ;;
+  x86_64)
+    LOADER="$GLIBC_LIB/ld-linux-x86-64.so.2"
+    EXPECTED_ELF_ARCH="x86-64"
+    ;;
+  *)
+    fail "Arquitectura no soportada: $(uname -m)"
+    exit 1
+    ;;
+esac
 
 normalize_version() { grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<< "${1:-}" | head -1 || true; }
 
