@@ -19,9 +19,18 @@ GLIBC_LIB="$GLIBC_PREFIX/lib"
 
 # Resolver loader según arquitectura
 case "$(uname -m)" in
-  aarch64) LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1" ;;
-  x86_64)  LOADER="$GLIBC_LIB/ld-linux-x86-64.so.2" ;;
-  *)       LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1" ;;  # fallback
+  aarch64)
+    LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1"
+    EXPECTED_ELF_ARCH="ARM aarch64"
+    ;;
+  x86_64)
+    LOADER="$GLIBC_LIB/ld-linux-x86-64.so.2"
+    EXPECTED_ELF_ARCH="x86-64"
+    ;;
+  *)
+    LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1"
+    EXPECTED_ELF_ARCH="ARM aarch64"
+    ;;  # fallback
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,8 +131,8 @@ fi
 if [[ -f "$BIN_FILE" ]]; then
   if command -v file >/dev/null 2>&1; then
     FT=$(file "$BIN_FILE" 2>/dev/null || true)
-    if grep -qi 'ELF 64-bit.*ARM aarch64' <<< "$FT"; then
-      pass "Formato: ELF64 ARM aarch64"
+    if grep -qi "ELF 64-bit.*$EXPECTED_ELF_ARCH" <<< "$FT"; then
+      pass "Formato: ELF 64-bit $EXPECTED_ELF_ARCH"
     else
       fail "Formato inesperado: ${FT:-<desconocido>}"
     fi

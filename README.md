@@ -1,6 +1,6 @@
 # ai-cli-termux
 
-Instalador y verificador unificado de CLIs de IA en **Termux** (Android aarch64),
+Instalador y verificador unificado de CLIs de IA en **Termux** (Android aarch64 y entornos x86_64),
 sin proot, usando el overlay glibc del ecosistema Termux.
 
 ## Por qué existe
@@ -136,8 +136,8 @@ distintos** para la misma versión: tarball, binario extraído, y binario post-p
 - La attestation de GitHub (`--require-attestation`, solo para OpenCode) provee
   verificación criptográfica (Sigstore/OIDC): prueba que el tarball salió de
   un workflow de GitHub Actions de `anomalyco/opencode`.
-- Para `agy`, el hash SHA512 viene del manifest de Google (HTTPS + TLS mutual auth
-  contra `*.run.app`). No hay attestation adicional.
+- Para `agy`, el hash SHA512 viene del manifest de Google (HTTPS normal con
+  server auth contra `*.run.app`). No hay attestation adicional.
 - `manifest.txt` es un archivo **sin firmar** en el mismo directorio que el binario.
   Protege contra corrupción accidental y modificaciones oportunistas, pero no contra
   un atacante con permisos de escritura en ese path.
@@ -158,10 +158,29 @@ ELF (`git`, `node`, `rg`) no se ven afectadas.
 El wrapper hace `unset LD_LIBRARY_PATH` para evitar que librerías bionic heredadas
 provoquen segfault al enlazar con glibc.
 
-#### DNS
+#### DNS y TLS (Go)
 
 glibc necesita `nsswitch.conf`. `install.sh` lo crea automáticamente si falta.
-Si hay problemas de resolución, verificá que `$PREFIX/glibc/etc/nsswitch.conf` exista.
+Si hay problemas de resolución DNS o validación TLS en binarios Go (como `agy`),
+el wrapper exporta `GODEBUG=netdns=go` y `SSL_CERT_FILE` apuntando a los
+certificados de Termux (`$PREFIX/etc/tls/cert.pem`).
+
+#### Incompatibilidades de Kernel (TCMalloc y seccomp)
+
+Algunas herramientas precompiladas (como `agy`) pueden fallar incluso con el overlay
+glibc configurado correctamente, debido a diferencias a nivel de kernel:
+
+1. **TCMalloc y espacio de direcciones:** Binarios que usan TCMalloc a menudo asumen
+   un espacio de direcciones virtual de 48 bits. Muchos kernels de Android ARM64 exponen
+   solo 39 bits (`CONFIG_ARM64_VA_BITS=39`). Esto resulta en un crasheo inmediato
+   (`MmapAligned() failed` / `FATAL ERROR: Out of memory`) en la inicialización.
+2. **Syscalls y seccomp:** Go puede utilizar syscalls recientes (ej. `faccessat2`), que el
+   filtro seccomp de Android puede bloquear, resultando en `SIGSYS`.
+
+Estas limitaciones no se pueden arreglar solo con `patchelf`, requieren compilar el binario
+específicamente para Android/Termux, o usar un entorno `proot` que emule o intercepte
+estas llamadas (aunque `proot` comparte el kernel, por lo que el problema de TCMalloc
+39-bit persiste a menos que se recompile o se haga `LD_PRELOAD` de otro allocador).
 
 #### Fragilidad ante actualizaciones del stack glibc
 

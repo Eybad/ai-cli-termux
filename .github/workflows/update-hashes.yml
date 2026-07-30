@@ -38,12 +38,15 @@ jobs:
           echo "archive_template=$ARCHIVE_TEMPLATE" >> "$GITHUB_OUTPUT"
           echo "checksum_algo=$CHECKSUM_ALGO"   >> "$GITHUB_OUTPUT"
           echo "attest_predicate=$ATTEST_PREDICATE" >> "$GITHUB_OUTPUT"
+          echo "arch_override_aarch64=$ARCH_OVERRIDE_AARCH64" >> "$GITHUB_OUTPUT"
 
       - name: Construir URL y nombre del tarball
         id: url
         run: |
           TAG="v${{ inputs.version }}"
           ARCH="arm64"
+          OVERRIDE="${{ steps.conf.outputs.arch_override_aarch64 }}"
+          if [[ -n "$OVERRIDE" ]]; then ARCH="$OVERRIDE"; fi
           ARCHIVE="${{ steps.conf.outputs.archive_template }}"
           ARCHIVE="${ARCHIVE//\{VERSION\}/${{ inputs.version }}}"
           ARCHIVE="${ARCHIVE//\{ARCH\}/$ARCH}"
@@ -88,7 +91,7 @@ jobs:
           KEY="$TOOL/$TAG"
 
           # Eliminar entrada previa si existe
-          sed -i "/^$KEY /d" sha256.txt
+          sed -i "\|^$KEY |d" sha256.txt
 
           # Agregar nueva entrada
           echo "$KEY  $HASH" >> sha256.txt

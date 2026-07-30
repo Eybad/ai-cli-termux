@@ -123,6 +123,14 @@ RELEASE_SOURCE=""; ARCHIVE_TEMPLATE=""; MANIFEST_URL=""
 MANIFEST_KEY_VERSION="version"; MANIFEST_KEY_URL="url"; MANIFEST_KEY_CHECKSUM="sha512"
 CHECKSUM_ALGO="sha256"; CHECKSUM_SOURCE="hashfile"
 ATTEST_PREDICATE=""; ELF_NAME=""; NEEDS_PATCHELF=true
+# Overrides de nombre de arquitectura para templates de descarga.
+# Cada herramienta puede definir su propio mapping si los assets usan nombres
+# distintos al canónico de Termux (arm64/amd64).
+ARCH_OVERRIDE_AARCH64=""
+ARCH_OVERRIDE_X86_64=""
+# Variables de entorno extra para el wrapper (ej: GODEBUG, SSL_CERT_FILE).
+# Array asociativo no es portable en bash 3; se usa un string con newlines.
+WRAPPER_ENV=""
 
 # shellcheck source=/dev/null
 source "$CONF"
@@ -183,10 +191,16 @@ lookup_hashfile() {
   awk -v t="$key" '{ sub(/\r$/, "") } $1==t { print $2; exit }' "$HASH_FILE"
 }
 
-# Parser JSON mínimo POSIX: extrae el valor string de una clave.
+# Parser JSON: usa jq (ya es dependencia instalada por install_deps).
+# Fallback a sed si jq no está disponible aún (ej: en resolve_version antes de
+# install_deps). Esto puede pasar si alguien tiene jq preinstalado o no.
 json_get() {
   local payload="$1" key="$2"
-  printf '%s' "$payload" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$payload" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null
+  else
+    printf '%s' "$payload" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+  fi
 }
 
 manifest_get() {
@@ -205,10 +219,16 @@ checksum_of() {
 
 expand_template() {
   local tmpl="$1"
-  local arch="$ARCH"
+  # Resolver el arch label para esta herramienta: si el .conf definió un
+  # override para la arquitectura actual, usarlo; si no, usar ARCH canónico.
+  local arch_label="$ARCH"
+  case "$(uname -m)" in
+    aarch64) [[ -n "$ARCH_OVERRIDE_AARCH64" ]] && arch_label="$ARCH_OVERRIDE_AARCH64" ;;
+    x86_64)  [[ -n "$ARCH_OVERRIDE_X86_64" ]]  && arch_label="$ARCH_OVERRIDE_X86_64" ;;
+  esac
   tmpl="${tmpl//\{VERSION\}/$VERSION}"
-  tmpl="${tmpl//\{ARCH\}/$arch}"
-  tmpl="${tmpl//\{PLATFORM\}/linux_${arch}}"
+  tmpl="${tmpl//\{ARCH\}/$arch_label}"
+  tmpl="${tmpl//\{PLATFORM\}/linux_${arch_label}}"
   printf '%s' "$tmpl"
 }
 
@@ -228,8 +248,14 @@ preflight() {
 
   # Resolver el loader glibc según la arquitectura detectada
   case "$ARCH" in
-    arm64) LOADER="$GLIBC_PREFIX/lib/ld-linux-aarch64.so.1" ;;
-    amd64) LOADER="$GLIBC_PREFIX/lib/ld-linux-x86-64.so.2" ;;
+    arm64)
+      LOADER="$GLIBC_PREFIX/lib/ld-linux-aarch64.so.1"
+      EXPECTED_ELF_ARCH="ARM aarch64"
+      ;;
+    amd64)
+      LOADER="$GLIBC_PREFIX/lib/ld-linux-x86-64.so.2"
+      EXPECTED_ELF_ARCH="x86-64"
+      ;;
   esac
 
   local missing=()
@@ -267,10 +293,13 @@ resolve_version() {
         VERSION=$(normalize_version "$REQUESTED_VERSION")
         [[ -n "$VERSION" ]] || { err "Versión inválida: '$REQUESTED_VERSION'"; exit 2; }
       else
-        local body code
+        local body code auth_header=()
+        local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+        [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer $token")
         body=$(mktemp)
         code=$(curl -sS --proto '=https' --tlsv1.2 -L \
                  -H 'Accept: application/vnd.github+json' \
+                 "${auth_header[@]}" \
                  -o "$body" -w '%{http_code}' \
                  "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || echo 000)
         case "$code" in
@@ -500,17 +529,17 @@ extract_install() {
   tar -xzf "$TMP_FILE" -C "$EXTRACT_DIR"
   rm -f "$TMP_FILE"; TMP_FILE=""
 
-  # Buscar el binario ELF aarch64 por nombre exacto
+  # Buscar el binario ELF por nombre exacto y arquitectura
   local found=""
   local cand
   while IFS= read -r cand; do
-    if file "$cand" 2>/dev/null | grep -qi 'ELF 64-bit.*ARM aarch64'; then
+    if file "$cand" 2>/dev/null | grep -qi "ELF 64-bit.*$EXPECTED_ELF_ARCH"; then
       found="$cand"; break
     fi
   done < <(find "$EXTRACT_DIR" -type f -name "$ELF_NAME" 2>/dev/null)
 
   if [[ -z "$found" ]]; then
-    err "No se encontró un ELF aarch64 llamado '$ELF_NAME' en el tarball."
+    err "No se encontró un ELF 64-bit ($EXPECTED_ELF_ARCH) llamado '$ELF_NAME' en el tarball."
     err "Contenido del tarball:"
     find "$EXTRACT_DIR" -type f 2>/dev/null | head -20 >&2
     exit 1
@@ -586,6 +615,17 @@ run_pre_wrapper_hook() {
 # ── Paso 13: Crear wrapper ────────────────────────────────────────────────────
 create_wrapper() {
   mkdir -p "$(dirname "$WRAPPER")"
+
+  # Construir bloque de exports para variables de entorno del .conf
+  local env_block=""
+  if [[ -n "$WRAPPER_ENV" ]]; then
+    local line
+    while IFS= read -r line; do
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      env_block+="export $line"$'\n'
+    done <<< "$WRAPPER_ENV"
+  fi
+
   # El wrapper siempre se llama APP_NAME; el binario interno puede ser ELF_NAME
   cat > "$WRAPPER" <<WRAPPER_EOF
 #!/data/data/com.termux/files/usr/bin/bash
@@ -605,6 +645,8 @@ unset LD_PRELOAD
 # LD_LIBRARY_PATH heredada apuntando a bionic → segfault al enlazar glibc.
 unset LD_LIBRARY_PATH
 
+# Variables de entorno específicas de esta herramienta (definidas en el .conf)
+${env_block}
 exec "\$BIN" "\$@"
 WRAPPER_EOF
   chmod 755 "$WRAPPER"
