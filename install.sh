@@ -204,7 +204,7 @@ json_get() {
   if command -v jq >/dev/null 2>&1; then
     printf '%s' "$payload" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null
   else
-    printf '%s' "$payload" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+    printf '%s' "$payload" | grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/'
   fi
 }
 

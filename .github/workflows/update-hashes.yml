@@ -36,8 +36,10 @@ jobs:
 
       - name: Cargar configuración de la herramienta
         id: conf
+        env:
+          INPUT_TOOL: ${{ inputs.tool }}
         run: |
-          CONF="registry/${{ inputs.tool }}.conf"
+          CONF="registry/${INPUT_TOOL}.conf"
           if [[ ! -f "$CONF" ]]; then
             echo "ERROR: No existe $CONF"; exit 1
           fi
@@ -51,68 +53,80 @@ jobs:
 
       - name: Construir URL y nombre del tarball
         id: url
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_ARCH: ${{ inputs.arch }}
+          REPO: ${{ steps.conf.outputs.repo }}
+          ARCHIVE_TEMPLATE: ${{ steps.conf.outputs.archive_template }}
+          ARCH_OVERRIDE_AARCH64: ${{ steps.conf.outputs.arch_override_aarch64 }}
+          ARCH_OVERRIDE_X86_64: ${{ steps.conf.outputs.arch_override_x86_64 }}
         run: |
-          TAG="v${{ inputs.version }}"
-          INPUT_ARCH="${{ inputs.arch }}"
+          TAG="v${INPUT_VERSION}"
           ARCH="$INPUT_ARCH"
           case "$INPUT_ARCH" in
             arm64|aarch64)
-              OVERRIDE="${{ steps.conf.outputs.arch_override_aarch64 }}"
-              [[ -n "$OVERRIDE" ]] && ARCH="$OVERRIDE"
+              [[ -n "$ARCH_OVERRIDE_AARCH64" ]] && ARCH="$ARCH_OVERRIDE_AARCH64"
               ;;
             amd64|x86_64|x64)
-              OVERRIDE="${{ steps.conf.outputs.arch_override_x86_64 }}"
-              [[ -n "$OVERRIDE" ]] && ARCH="$OVERRIDE"
+              [[ -n "$ARCH_OVERRIDE_X86_64" ]] && ARCH="$ARCH_OVERRIDE_X86_64"
               ;;
           esac
-          ARCHIVE="${{ steps.conf.outputs.archive_template }}"
-          ARCHIVE="${ARCHIVE//\{VERSION\}/${{ inputs.version }}}"
-          ARCHIVE="${ARCHIVE//\{ARCH\}/$ARCH}"
-          ARCHIVE="${ARCHIVE//\{PLATFORM\}/linux_$ARCH}"
-          URL="https://github.com/${{ steps.conf.outputs.repo }}/releases/download/$TAG/$ARCHIVE"
+          ARCHIVE="$ARCHIVE_TEMPLATE"
+          ARCHIVE="${ARCHIVE//\{VERSION\}/${INPUT_VERSION}}"
+          ARCHIVE="${ARCHIVE//\{ARCH\}/${ARCH}}"
+          ARCHIVE="${ARCHIVE//\{PLATFORM\}/linux_${ARCH}}"
+          URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE}"
           echo "url=$URL"         >> "$GITHUB_OUTPUT"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
 
       - name: Descargar tarball
+        env:
+          URL: ${{ steps.url.outputs.url }}
+          ARCHIVE: ${{ steps.url.outputs.archive }}
         run: |
           curl -fL --proto '=https' --tlsv1.2 \
-            -o "${{ steps.url.outputs.archive }}" \
-            "${{ steps.url.outputs.url }}"
+            -o "$ARCHIVE" \
+            "$URL"
 
       - name: Calcular hash
         id: hash
+        env:
+          ARCHIVE: ${{ steps.url.outputs.archive }}
+          CHECKSUM_ALGO: ${{ steps.conf.outputs.checksum_algo }}
         run: |
-          ALGO="${{ steps.conf.outputs.checksum_algo }}"
-          case "$ALGO" in
-            sha256) H=$(sha256sum "${{ steps.url.outputs.archive }}" | cut -d' ' -f1) ;;
-            sha512) H=$(sha512sum "${{ steps.url.outputs.archive }}" | cut -d' ' -f1) ;;
-            *) echo "Algoritmo desconocido: $ALGO"; exit 1 ;;
+          case "$CHECKSUM_ALGO" in
+            sha256) H=$(sha256sum "$ARCHIVE" | cut -d' ' -f1) ;;
+            sha512) H=$(sha512sum "$ARCHIVE" | cut -d' ' -f1) ;;
+            *) echo "Algoritmo desconocido: $CHECKSUM_ALGO"; exit 1 ;;
           esac
           echo "hash=$H" >> "$GITHUB_OUTPUT"
-          echo "Hash ($ALGO): $H"
+          echo "Hash ($CHECKSUM_ALGO): $H"
 
       - name: Verificar attestation (si está configurada)
         if: steps.conf.outputs.attest_predicate != ''
-        run: |
-          gh release verify-asset \
-            "${{ steps.url.outputs.tag }}" \
-            "${{ steps.url.outputs.archive }}" \
-            --repo "${{ steps.conf.outputs.repo }}"
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.url.outputs.tag }}
+          ARCHIVE: ${{ steps.url.outputs.archive }}
+          REPO: ${{ steps.conf.outputs.repo }}
+        run: |
+          gh release verify-asset \
+            "$TAG" \
+            "$ARCHIVE" \
+            --repo "$REPO"
 
       - name: Actualizar sha256.txt
+        env:
+          INPUT_TOOL: ${{ inputs.tool }}
+          TAG: ${{ steps.url.outputs.tag }}
+          HASH: ${{ steps.hash.outputs.hash }}
+          INPUT_ARCH: ${{ inputs.arch }}
         run: |
-          TOOL="${{ inputs.tool }}"
-          TAG="${{ steps.url.outputs.tag }}"
-          HASH="${{ steps.hash.outputs.hash }}"
-          ARCH="${{ inputs.arch }}"
-
-          if [[ "$ARCH" == "arm64" ]]; then
-            KEY="$TOOL/$TAG"
+          if [[ "$INPUT_ARCH" == "arm64" ]]; then
+            KEY="${INPUT_TOOL}/${TAG}"
           else
-            KEY="$TOOL/$TAG:$ARCH"
+            KEY="${INPUT_TOOL}/${TAG}:${INPUT_ARCH}"
           fi
 
           # Eliminar entrada previa si existe
@@ -123,9 +137,14 @@ jobs:
           echo "Entrada agregada: $KEY  $HASH"
 
       - name: Commit y push
+        env:
+          INPUT_TOOL: ${{ inputs.tool }}
+          TAG: ${{ steps.url.outputs.tag }}
+          INPUT_ARCH: ${{ inputs.arch }}
+          CHECKSUM_ALGO: ${{ steps.conf.outputs.checksum_algo }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add sha256.txt
-          git commit -m "chore: agregar ${{ inputs.tool }}/${{ steps.url.outputs.tag }} (${{ inputs.arch }}) hash (${{ steps.conf.outputs.checksum_algo }})"
+          git commit -m "chore: agregar ${INPUT_TOOL}/${TAG} (${INPUT_ARCH}) hash (${CHECKSUM_ALGO})"
           git push
