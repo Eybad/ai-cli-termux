@@ -631,6 +631,11 @@ create_wrapper() {
     done <<< "$WRAPPER_ENV"
   fi
 
+  local exec_cmd="exec \\\"\\\$BIN\\\" \\\"\\\$@\\\""
+  if [[ "$NEEDS_PATCHELF" == false ]]; then
+    exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\\\$BIN\" \"\\\$@\""
+  fi
+
   # El wrapper siempre se llama APP_NAME; el binario interno puede ser ELF_NAME
   cat > "$WRAPPER" <<WRAPPER_EOF
 #!/data/data/com.termux/files/usr/bin/bash
@@ -638,7 +643,11 @@ set -euo pipefail
 
 BIN="$BIN_FILE"
 
-if [[ ! -x "\$BIN" ]]; then
+if [[ ! -x "\$BIN" && "$NEEDS_PATCHELF" == true ]]; then
+  echo "ERROR: $DISPLAY_NAME no encontrado en \$BIN" >&2
+  echo "Reinstalá con: bash install.sh $APP_NAME -r" >&2
+  exit 1
+elif [[ ! -f "\$BIN" ]]; then
   echo "ERROR: $DISPLAY_NAME no encontrado en \$BIN" >&2
   echo "Reinstalá con: bash install.sh $APP_NAME -r" >&2
   exit 1
@@ -652,7 +661,7 @@ unset LD_LIBRARY_PATH
 
 # Variables de entorno específicas de esta herramienta (definidas en el .conf)
 ${env_block}
-exec "\$BIN" "\$@"
+${exec_cmd}
 WRAPPER_EOF
   chmod 755 "$WRAPPER"
   info "Wrapper creado en $WRAPPER"
