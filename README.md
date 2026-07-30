@@ -167,13 +167,52 @@ Para dar soporte a un nuevo CLI en este instalador:
    APP_NAME="mi-cli"
    DISPLAY_NAME="Mi CLI de IA"
    REPO="usuario/repo"
-    RELEASE_SOURCE="github"  # o "manifest_json", "url_template"
+   RELEASE_SOURCE="github"  # o "manifest_json", "url_template"
    CHECKSUM_ALGO="sha256"
    ELF_NAME="mi-cli"
    NEEDS_PATCHELF=true
    ```
 3. Agrega los hashes de las versiones soportadas a `sha256.txt` (o usa el workflow de GitHub Actions `.github/workflows/update-hashes.yml`).
 4. Si la CLI requiere ajustes de entorno o parches, implementa la función `pre_wrapper_hook()` o `post_install_hook()`.
+5. Usar los registros existentes en `registry/` como ejemplos canónicos.
+
+### RELEASE_SOURCE
+
+| Tipo | Requiere | Checksum |
+|---|---|---|
+| `github` | `REPO`, `ARCHIVE_TEMPLATE` | `hashfile` vía `sha256.txt` o `--sha256` flag |
+| `manifest_json` | `MANIFEST_URL`, `MANIFEST_KEY_*` | `manifest` remoto (ej: agy) |
+| `url_template` | `DOWNLOAD_URL_TEMPLATE` | `hashfile` + versión explícita con `-v` |
+
+### Arch mapping
+
+Termux `uname -m` → internal `ARCH`:
+- `aarch64` → `arm64`; `x86_64` → `amd64`
+
+Si un tool usa nombres distintos (opencode usa `x64`, kiro usa `aarch64`), definir `ARCH_OVERRIDE_AARCH64` / `ARCH_OVERRIDE_X86_64` en el `.conf`.
+
+### sha256.txt
+
+```
+tool/vX.Y.Z         hash   # lookup sin arch (por defecto arm64)
+tool/vX.Y.Z:amd64   hash   # lookup con arch explícito
+```
+
+El lookup prueba `key:${ARCH}` primero, luego `key` solo.
+
+### Pipeline de instalación
+
+1. Preflight — detecta Termux, arquitectura, dependencias
+2. Resolve version — según `RELEASE_SOURCE`
+3. Resolve checksum — `sha256.txt` o manifest remoto
+4. Check current — salta si ya instalado
+5. Install deps — `pkg install` glibc-runner, patchelf, etc.
+6. Download → verify tarball — fail-closed si mismatch
+7. Verify attestation — solo si configurado, requiere `gh`
+8. Extract & install — busca el ELF por nombre + arquitectura
+9. Patch — modifica el binario para que ejecute contra el runtime glibc de Termux
+10. Wrapper — script en `$PREFIX/bin/$APP_NAME` que exporta `WRAPPER_ENV` y ejecuta el binario
+11. Verify install → write manifest → hooks
 
 ---
 
