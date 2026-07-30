@@ -129,7 +129,7 @@ Google distribuye binarios compilados para Linux servidor que asumen un espacio 
 
 En sistemas Android sin `proot`, el archivo `/etc/resolv.conf` no existe en la raíz del sistema.
 - **Resolver DNS**: Se configura `GODEBUG=netdns=cgo` en el wrapper para forzar a Go a usar la función `getaddrinfo` de glibc.
-- **Configuración de servidores DNS**: El instalador crea automáticamente el archivo `$GLIBC_PREFIX/etc/resolv.conf` apuntando a `8.8.8.8` y `1.1.1.1`.
+- **Configuración de servidores DNS**: El instalador consulta dinámicamente las propiedades de Android (`getprop net.dns1`/`net.dns2`) mediante `pre_wrapper_hook` para construir `$GLIBC_PREFIX/etc/resolv.conf`, respetando la red o VPN activa del usuario, con fallback a DNS públicos (`8.8.8.8`/`1.1.1.1`).
 - **Certificados SSL/TLS**: Se exporta `SSL_CERT_FILE` apuntando al almacén de certificados CA de Termux (`$PREFIX/etc/tls/cert.pem`).
 
 ### 3. Shim para Linker Script `libc.so` en glibc Termux
@@ -183,10 +183,12 @@ ai-cli-termux/
 
 ## 🔒 Modelo de Seguridad e Integridad
 
-### Doble capa de hashes
+### Doble capa de hashes y diferencias de garantía
 Debido a que `patchelf` y `patch_va39.py` modifican el binario durante la instalación, el sistema registra dos checksums:
-1. **Hash de distribución (Tarball)**: Verificado al descargar contra `sha256.txt` o el manifest JSON remoto de Google (Modelo *Fail-Closed*).
-2. **Hash local post-instalación (Binario en ejecucion)**: Calculado inmediatamente después de aplicar los parches y guardado en `manifest.txt`. `verify.sh` utiliza este hash para asegurar que el binario instalado no haya sido adulterado a posteriori.
+1. **Hash de distribución (Tarball)**: Verificado al descargar (Modelo *Fail-Closed*).
+   - **Verificación contra Hash Independiente (`opencode`)**: El hash esperado está pineado en `sha256.txt` dentro del repositorio local. Protege contra assets o CDNs de descarga comprometidos en GitHub. Además soporta verificación opcional con GitHub Attestations (Sigstore/OIDC).
+   - **Verificación Autorreferencial (`agy`)**: El hash SHA512 se extrae dinámicamente del manifest JSON remoto de Google. Protege contra corrupción en tránsito y errores de descarga, pero confía implícitamente en el endpoint de origen de Google.
+2. **Hash local post-instalación (Binario en ejecución)**: Calculado inmediatamente después de aplicar los parches y guardado en `manifest.txt`. `verify.sh` utiliza este hash para asegurar que el binario instalado localmente no haya sido adulterado a posteriori.
 
 ---
 

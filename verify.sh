@@ -28,9 +28,9 @@ case "$(uname -m)" in
     EXPECTED_ELF_ARCH="x86-64"
     ;;
   *)
-    LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1"
-    EXPECTED_ELF_ARCH="ARM aarch64"
-    ;;  # fallback
+    fail "Arquitectura no soportada: $(uname -m)"
+    exit 1
+    ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -240,20 +240,18 @@ else
 fi
 
 # ── 9. Loader glibc y DNS ─────────────────────────────────────────────────────
-[[ "$_needs_patchelf" == "true" ]] && {
-  if [[ -f "$LOADER" ]]; then
-    pass "Loader glibc presente: $LOADER"
-  else
-    fail "Loader glibc NO encontrado. Ejecutá: pkg install glibc-repo glibc-runner"
-  fi
+if [[ -f "$LOADER" ]]; then
+  pass "Loader glibc presente: $LOADER"
+else
+  fail "Loader glibc NO encontrado. Ejecutá: pkg install glibc-repo glibc-runner"
+fi
 
-  if [[ -f "$GLIBC_PREFIX/etc/nsswitch.conf" ]]; then
-    pass "nsswitch.conf presente (resolución DNS de glibc)"
-  else
-    warn "Falta $GLIBC_PREFIX/etc/nsswitch.conf; puede fallar la resolución DNS"
-    note "Solución: printf 'hosts: files dns\n' > $GLIBC_PREFIX/etc/nsswitch.conf"
-  fi
-}
+if [[ -f "$GLIBC_PREFIX/etc/nsswitch.conf" ]]; then
+  pass "nsswitch.conf presente (resolución DNS de glibc)"
+else
+  warn "Falta $GLIBC_PREFIX/etc/nsswitch.conf; puede fallar la resolución DNS"
+  note "Solución: printf 'hosts: files dns\n' > $GLIBC_PREFIX/etc/nsswitch.conf"
+fi
 
 # ── 10. Ejecución real ────────────────────────────────────────────────────────
 if [[ -x "$WRAPPER" ]]; then
