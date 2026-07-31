@@ -130,18 +130,17 @@ El script `verify.sh` realiza una auditoría completa en **10 pasos secuenciales
 
 ### 1. Parche de Kernel VA39 + Syscall `faccessat2` (Antigravity CLI)
 
-Google distribuye binarios compilados para Linux servidor que asumen un espacio de memoria virtual de 48 bits (**VA48**) y utilizan la syscall moderna `faccessat2`. En Android:
-- La mayoría de kernels ARM64 exponen únicamente 39 bits de dirección virtual (`CONFIG_ARM64_VA_BITS=39`), provocando un crash inmediato por memoria (`MmapAligned() failed`).
-- La política `seccomp` del kernel de Android bloquea `faccessat2` (syscall 439), matando el proceso con `SIGSYS`.
+Google distribuye binarios compilados para Linux servidor. En Android hay dos incompatibilidades posibles:
+- La política `seccomp` del kernel de Android bloquea `faccessat2` (syscall 439, usada por Go en `os/exec.LookPath`), matando el proceso con `SIGSYS` — **en todas las versiones** (probado en 1.1.8 y 1.1.9: el binario crudo crashea en `clipboard.init` antes de llegar al main).
+- La mayoría de kernels ARM64 exponen únicamente 39 bits de dirección virtual (`CONFIG_ARM64_VA_BITS=39`). Algunas versiones (ej. 1.1.8) usan TCMalloc compilado para **VA48**, provocando un crash por memoria (`MmapAligned() failed`). Desde 1.1.9 Google lo corrigió (el binario ya no contiene la maquinaria de tags en bit 42).
 
 > [!IMPORTANT]
 > **Solución nativa sin `proot`:** `ai-cli-termux` integra un script auditable de hex-patching local (`registry/patch_va39.py`), ejecutado automáticamente por Python 3 durante el `pre_wrapper_hook`.
-> - Reescribe instrucciones ARM64 (`ubfx`/`lsl` bit 42→35) para ajustar la asignación de tags de TCMalloc a 39 bits.
-> - Parchea el límite superior de `MmapAligned` de `1<<48` a `1<<39`.
-> - Reemplaza la syscall `faccessat2` (nr 439) por `faccessat` (nr 48), totalmente permitida por seccomp.
+> - **Fase A (siempre)**: reemplaza la syscall `faccessat2` (nr 439) por `faccessat` (nr 48), permitida por seccomp. Patrón estable generado por Go (`mov x0,#0x1b7` + `bl <thunk>`); se parchan **todos** los sitios (v1 solo cubría 1 de 5, dejando trampas SIGSYS latentes).
+> - **Fase B (adaptativa)**: solo si el binario muestra firmas fuertes de TCMalloc VA48 (constantes de tag `2<<42`, máscara random de mmap, masks de deallocación), reescribe instrucciones ARM64 (`ubfx`/`lsl` bit 42→35), el límite de `MmapAligned` (`1<<48`→`1<<39`) y las constantes de tag inlined. Escanea solo segmentos LOAD ejecutables para no tocar falsos positivos en `.rodata`. Si no hay firmas, el binario queda intacto (reescribir constantes que solo *parecen* tags — thresholds de size-class, floats, hashes — corrompería la versión).
 > - Todo el parche ocurre en memoria localmente, sin descargar binarios modificados de terceros.
 >
-> **Fail-closed del parche:** el script sale con código de error si los parches críticos (extracción de tag `ubfx` o la máscara random de mmap) no se encuentran. En ese caso el instalador conserva el binario sin parchear (puede funcionar en dispositivos VA48) y avisa con un error.
+> **Fail-closed:** si hay firmas de problemas pero el parche no puede resolverlas (cambio estructural a fondo), el script sale con error, el hook aborta la instalación y se restaura la versión anterior. Además, el hook ejecuta el binario parcheado (`--version`) como gate final: cualquier incompatibilidad no cubierta aborta antes de instalar. El resultado: `--update` funciona automáticamente entre versiones de agy sin mantenimiento manual, siempre que Google no reescriba a fondo el código de syscalls/TCMalloc.
 
 ### 2. Resolución DNS y TLS en binarios Go
 
@@ -272,7 +271,7 @@ Debido a que `patchelf` y `patch_va39.py` modifican el binario durante la instal
 
 ### Fail-closed en todos los caminos
 - Sin hash verificado → no se instala (incluye `--sha256`: se valida formato hex antes de usar).
-- Los parches críticos de `patch_va39.py` son obligatorios: si no se aplican, el binario parcheado no se usa.
+- Los parches de `patch_va39.py` son obligatorios: si hay firmas de problemas que el parche no puede resolver, la instalación aborta (el binario sin parche crashea en Android) y se restaura la versión anterior. Si no hay firmas, se instala el binario intacto (ya es compatible).
 - El wrapper falla rápido si el binario no existe o no es ejecutable.
 
 ---
