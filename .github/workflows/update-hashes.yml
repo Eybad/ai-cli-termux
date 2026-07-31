@@ -47,6 +47,11 @@ jobs:
             echo "ERROR: No existe $CONF"; exit 1
           fi
           source "$CONF"
+          if [[ "${RELEASE_SOURCE:-}" != "github" ]]; then
+            echo "ERROR: el workflow solo actualiza hashes para RELEASE_SOURCE=github"
+            echo "       (este tool usa '${RELEASE_SOURCE:-vacío}')."
+            exit 1
+          fi
           echo "repo=$REPO"                     >> "$GITHUB_OUTPUT"
           echo "archive_template=$ARCHIVE_TEMPLATE" >> "$GITHUB_OUTPUT"
           echo "checksum_algo=$CHECKSUM_ALGO"   >> "$GITHUB_OUTPUT"

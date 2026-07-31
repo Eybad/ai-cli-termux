@@ -5,15 +5,20 @@ Instalador de CLIs de IA para Termux (glibc overlay, sin proot).
 ## Comandos
 
 ```bash
-bash install.sh <tool>          # instalar
+bash install.sh <tool>          # instalar (última versión, checksum automático)
 bash install.sh <tool> -v X.Y.Z # versión específica
+bash install.sh <tool> --update # actualizar a la última versión si hay una anterior
 bash install.sh <tool> -r       # reinstalar
 bash install.sh <tool> -u       # desinstalar
 bash verify.sh <tool>           # verificar integridad post-instalación
 shellcheck install.sh verify.sh # lint obligatorio antes de commit
 ```
 
-El workflow `.github/workflows/update-hashes.yml` actualiza `sha256.txt` vía CI para tools con `RELEASE_SOURCE=github`.
+El workflow `.github/workflows/update-hashes.yml` actualiza `sha256.txt` vía CI (solo tools con `RELEASE_SOURCE=github`).
+
+## Checksums (fail-closed, sin mantenimiento manual)
+
+La versión y el checksum default se resuelven automáticamente: digest del asset desde la GitHub API (`CHECKSUM_SOURCE=release_digest`, opencode) o manifest JSON del vendor (`manifest`, agy y kiro-cli). `sha256.txt` es **pinning opcional**: si hay entrada para el tag instalado, el pin del repo gana. Nunca instalar sin hash verificado.
 
 ## Design principles
 

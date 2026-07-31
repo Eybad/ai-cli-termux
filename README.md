@@ -36,9 +36,9 @@ Android OS / Kernel Linux (aarch64)
 
 | Herramienta | Distribución | Verificación de Integridad | Mitigaciones Específicas |
 |---|---|---|---|
-| **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | Hash SHA256 (`sha256.txt`) + GitHub Attestation (Sigstore) | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
+| **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | SHA256 digest del asset desde la GitHub API + GitHub Attestation (Sigstore) | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
 | **`agy`** *(Antigravity CLI)* | [Google Cloud Storage](https://antigravity.google) (Manifest JSON) | SHA512 dinámico desde el manifest remoto | Parche VA39 ARM64 + faccessat2 + shim libc.so + DNS cgo |
-| **`kiro-cli`** *(Kiro CLI)* | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 fijo desde `sha256.txt` | URL template; última versión registrada por defecto |
+| **`kiro-cli`** *(Kiro CLI)* | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 desde `manifest.json` oficial del CDN | Manifest del CDN; última versión automática |
 
 ---
 
@@ -50,7 +50,7 @@ Android OS / Kernel Linux (aarch64)
   ```bash
   pkg install git python ca-certificates -y
   ```
-- **Almacenamiento libre**: ~400 MB por herramienta.
+- **Almacenamiento libre**: ~400 MB por herramienta (kiro-cli: ~1 GB, el tarball pesa ~500 MB).
 
 ---
 
@@ -64,16 +64,17 @@ cd ai-cli-termux
 ```
 
 > [!NOTE]
-> **`kiro-cli`** usa `RELEASE_SOURCE="url_template"`: sin `-v` instala la última versión registrada en `sha256.txt` (la URL del CDN siempre apunta a `stable/latest/`; si el CDN ya tiene una versión más nueva que la registrada, el hash no coincide y la instalación aborta en fail-closed — actualizá `sha256.txt` con el workflow `update-hashes.yml`). Con `-v <version>` se instala una versión específica (debe estar registrada en `sha256.txt`).
+> **Última versión automática:** desde la versión actual del instalador, ninguna herramienta requiere tocar `sha256.txt` para el flujo default. La versión y el checksum se resuelven automáticamente (fail-closed) desde el digest de la GitHub API (`opencode`), el manifest de Google (`agy`) o el manifest del CDN (`kiro-cli`). `sha256.txt` queda como **capa opcional de pinning** para verificaciones independientes del vendor o instalaciones reproducibles.
 
 ### 2. Comandos de instalación (`install.sh`)
 
 #### OpenCode
 ```bash
-bash install.sh opencode                     # Instala la última versión registrada
+bash install.sh opencode                     # Instala la última versión (digest SHA256 de GitHub)
 bash install.sh opencode -v 1.18.9           # Instala una versión específica
 bash install.sh opencode -r                  # Reinstalación forzada (clean install)
 bash install.sh opencode -u                  # Desinstalación completa
+bash install.sh opencode --update            # Actualiza a la última versión si hay una anterior
 bash install.sh opencode --require-attestation  # Exige verificación de firma GitHub Attestation
 ```
 
@@ -86,10 +87,10 @@ bash install.sh agy -u # Desinstalar
 
 #### Kiro CLI (`kiro-cli`)
 ```bash
-bash install.sh kiro-cli            # Instala la última versión registrada en sha256.txt
-bash install.sh kiro-cli -v 2.15.2  # Instala una versión específica registrada
-bash install.sh kiro-cli -r         # Reinstalación forzada
-bash install.sh kiro-cli -u         # Desinstalar
+bash install.sh kiro-cli          # Instala la última versión (manifest.json del CDN, fail-closed)
+bash install.sh kiro-cli --update # Actualiza a la última versión disponible
+bash install.sh kiro-cli -r       # Reinstalación forzada
+bash install.sh kiro-cli -u       # Desinstalar
 ```
 
 ### 3. Ejecutar las herramientas instaladas
@@ -184,9 +185,20 @@ Para dar soporte a un nuevo CLI en este instalador:
 
 | Tipo | Requiere | Checksum |
 |---|---|---|
-| `github` | `REPO`, `ARCHIVE_TEMPLATE` | `hashfile` vía `sha256.txt` o `--sha256` flag |
-| `manifest_json` | `MANIFEST_URL`, `MANIFEST_KEY_*` | `manifest` remoto (ej: agy) |
-| `url_template` | `DOWNLOAD_URL_TEMPLATE` | `hashfile`; sin `-v` usa la última versión registrada en `sha256.txt` |
+| `github` | `REPO`, `ARCHIVE_TEMPLATE` | `release_digest` (SHA256 del asset vía GitHub API) o `hashfile` |
+| `manifest_json` | `MANIFEST_URL`, `MANIFEST_KEY_*` | `manifest` remoto (agy: Google; kiro-cli: CDN de Amazon) |
+| `url_template` | `DOWNLOAD_URL_TEMPLATE` | `hashfile` (sin uso actual; disponible para CDNs sin manifest) |
+
+### CHECKSUM_SOURCE
+
+| Fuente | Descripción | Fail-closed |
+|---|---|---|
+| `release_digest` | SHA256 del asset publicado por GitHub (campo `digest` de la API) | Sí |
+| `manifest` | SHA256/SHA512 del manifest JSON remoto del vendor | Sí |
+| `hashfile` | Hash pineado en `sha256.txt` (pin independiente del vendor) | Sí |
+| `--sha256 <hash>` | Pin explícito por línea de comandos (valida formato hex) | Sí |
+
+Con `release_digest`, si existe una entrada en `sha256.txt` para el tag instalado, **el pin del repo gana** (verificación independiente del vendor sin llamada extra a la API).
 
 ### Arch mapping
 
@@ -195,7 +207,7 @@ Termux `uname -m` → internal `ARCH`:
 
 Si un tool usa nombres distintos (opencode usa `x64`, kiro usa `aarch64`), definir `ARCH_OVERRIDE_AARCH64` / `ARCH_OVERRIDE_X86_64` en el `.conf`.
 
-### sha256.txt
+### sha256.txt (pinning opcional)
 
 ```
 tool/vX.Y.Z         hash   # lookup sin arch (por defecto arm64)
@@ -204,12 +216,17 @@ tool/vX.Y.Z:amd64   hash   # lookup con arch explícito
 
 El lookup prueba `key:${ARCH}` primero, luego `key` solo. Convención de arquitectura: las entradas arm64 se registran **sin** sufijo; las amd64 con `:amd64`. El workflow `update-hashes.yml` sigue esta convención y limpia entradas previas con match exacto por campo (awk, sin regex).
 
+El flujo default de instalación **no requiere** este archivo (los checksums se resuelven automáticamente). Su rol es opcional:
+- **Pin independiente del vendor**: si una entrada existe para el tag instalado, `install.sh` la prefiere sobre el digest remoto.
+- **Reproducibilidad**: `-v <version>` con entrada registrada instala exactamente ese tag verificado.
+- **Herramientas con `CHECKSUM_SOURCE=hashfile`** (CDNs sin manifest) siguen dependiendo de él.
+
 ### Pipeline de instalación
 
 1. Preflight — detecta Termux, arquitectura, dependencias
-2. Resolve version — según `RELEASE_SOURCE` (`url_template` sin `-v` resuelve la última versión de `sha256.txt`)
-3. Resolve checksum — `sha256.txt` o manifest remoto; validación de formato hex también para `--sha256`
-4. Check current — salta si ya instalado
+2. Resolve version — según `RELEASE_SOURCE` (latest vía API/manifest, o `-v`)
+3. Resolve checksum — pin de `sha256.txt` (si existe), digest de la GitHub API o manifest remoto; validación de formato hex también para `--sha256`
+4. Check current — salta si ya instalado (`--update` avisa si ya estás al día)
 5. Install deps — `pkg install` glibc-runner, patchelf, etc.
 6. Download → verify tarball — fail-closed si mismatch
 7. Verify attestation — solo si configurado, requiere `gh`
@@ -248,9 +265,9 @@ ai-cli-termux/
 ### Doble capa de hashes y diferencias de garantía
 Debido a que `patchelf` y `patch_va39.py` modifican el binario durante la instalación, el sistema registra dos checksums:
 1. **Hash de distribución (Tarball)**: Verificado al descargar (Modelo *Fail-Closed*).
-   - **Verificación contra Hash Independiente (`opencode`)**: El hash esperado está pineado en `sha256.txt` dentro del repositorio local. Protege contra assets o CDNs de descarga comprometidos en GitHub. Además soporta verificación opcional con GitHub Attestations (Sigstore/OIDC).
-   - **Verificación Autorreferencial (`agy`)**: El hash SHA512 se extrae dinámicamente del manifest JSON remoto de Google. Protege contra corrupción en tránsito y errores de descarga, pero confía implícitamente en el endpoint de origen de Google.
-   - **Verificación con hash fijo (`kiro-cli`)**: Similar a `opencode`, el hash SHA256 está pineado en `sha256.txt`. La URL de descarga apunta a `stable/latest/` del CDN; la versión se resuelve desde `sha256.txt` (última registrada) o se pinea con `-v`.
+   - **Verificación contra Hash Independiente (`opencode` con pin)**: el hash esperado está pineado en `sha256.txt` dentro del repositorio local. Protege contra assets o CDNs de descarga comprometidos en GitHub. Además soporta verificación opcional con GitHub Attestations (Sigstore/OIDC).
+   - **Verificación Autorreferencial (`opencode` por defecto, `agy`, `kiro-cli`)**: el SHA256/SHA512 se extrae dinámicamente del digest de la GitHub API o del manifest JSON del vendor (Google / Amazon). Protege contra corrupción en tránsito y errores de descarga, pero confía implícitamente en el endpoint de origen del vendor.
+   - **Verificación con hash fijo (`kiro-cli` con pin)**: similar a `opencode`, el hash SHA256 está pineado en `sha256.txt` si se desea verificación independiente del CDN.
 2. **Hash local post-instalación (Binario en ejecución)**: Calculado inmediatamente después de aplicar los parches y guardado en `manifest.txt`. `verify.sh` utiliza este hash para asegurar que el binario instalado localmente no haya sido adulterado a posteriori.
 
 ### Fail-closed en todos los caminos

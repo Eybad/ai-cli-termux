@@ -102,7 +102,7 @@ fi
 
 # Cargar configuración
 APP_NAME=""; DISPLAY_NAME=""; ELF_NAME=""; CHECKSUM_ALGO="sha256"
-CHECKSUM_SOURCE="hashfile"; NEEDS_PATCHELF=true; ATTEST_PREDICATE=""; REPO=""
+CHECKSUM_SOURCE="hashfile"; NEEDS_PATCHELF=true
 # shellcheck source=/dev/null
 source "$CONF"
 
@@ -131,6 +131,16 @@ if [[ -f "$MANIFEST" ]]; then
   M_CHECKSUM_ALGO=$(manifest_get checksum_algo "$MANIFEST")
   M_CHECKSUM_SOURCE=$(manifest_get checksum_source "$MANIFEST")
   pass "Manifest presente (versión $M_VERSION, instalado $(manifest_get installed_at "$MANIFEST"))"
+
+  missing_fields=()
+  [[ -n "$M_VERSION" ]]               || missing_fields+=(version)
+  [[ -n "$M_TAG" ]]                   || missing_fields+=(tag)
+  [[ -n "$M_CHECKSUM_PATCHED" ]]      || missing_fields+=(binary_checksum_patched)
+  [[ -n "$M_CHECKSUM_ALGO" ]]         || missing_fields+=(checksum_algo)
+  if [[ ${#missing_fields[@]} -gt 0 ]]; then
+    fail "Manifest incompleto: faltan campos: ${missing_fields[*]}"
+    note "Reinstalá con: bash install.sh $APP_NAME -r"
+  fi
 else
   warn "No hay manifest en $MANIFEST"
   note "Instalación previa o manual. Reinstalá con 'bash install.sh $APP_NAME -r'."
@@ -139,8 +149,11 @@ fi
 # ── 2. Binario presente y ejecutable ──────────────────────────────────────────
 if [[ -f "$BIN_FILE" ]]; then
   pass "Binario presente: $BIN_FILE"
-  [[ -x "$BIN_FILE" ]] && pass "Binario ejecutable" || \
+  if [[ -x "$BIN_FILE" ]]; then
+    pass "Binario ejecutable"
+  else
     fail "Binario sin permiso de ejecución (chmod 755 $BIN_FILE)"
+  fi
 else
   fail "Binario NO encontrado: $BIN_FILE"
 fi
@@ -167,18 +180,21 @@ if [[ "$_needs_patchelf" == "true" && -f "$BIN_FILE" ]]; then
     EXPECTED_RPATH="${M_RPATH:-$GLIBC_LIB}"
 
     INTERP=$(patchelf --print-interpreter "$BIN_FILE" 2>/dev/null || true)
-    [[ "$INTERP" == "$EXPECTED_INTERP" ]] && \
-      pass "Interpreter: $INTERP" || {
-        fail "Interpreter incorrecto"
-        note "Esperado: $EXPECTED_INTERP"
-        note "Obtenido: ${INTERP:-<vacío>}"
-        note "Reaplicá con: bash install.sh $APP_NAME -r"
-      }
+    if [[ "$INTERP" == "$EXPECTED_INTERP" ]]; then
+      pass "Interpreter: $INTERP"
+    else
+      fail "Interpreter incorrecto"
+      note "Esperado: $EXPECTED_INTERP"
+      note "Obtenido: ${INTERP:-<vacío>}"
+      note "Reaplicá con: bash install.sh $APP_NAME -r"
+    fi
 
     RP=$(patchelf --print-rpath "$BIN_FILE" 2>/dev/null || true)
-    [[ "$RP" == *"$EXPECTED_RPATH"* ]] && \
-      pass "Rpath: $RP" || \
+    if [[ "$RP" == *"$EXPECTED_RPATH"* ]]; then
+      pass "Rpath: $RP"
+    else
       fail "Rpath incorrecto (esperado contener $EXPECTED_RPATH, obtenido: ${RP:-<vacío>})"
+    fi
   else
     warn "patchelf no instalado; no se puede verificar interpreter/rpath"
   fi
@@ -192,13 +208,14 @@ if [[ -f "$BIN_FILE" ]]; then
       sha512) ACTUAL=$(sha512sum "$BIN_FILE" | cut -d' ' -f1) ;;
       *)      ACTUAL="" ;;
     esac
-    [[ "$ACTUAL" == "$M_CHECKSUM_PATCHED" ]] && \
-      pass "Integridad del binario OK (${M_CHECKSUM_ALGO:-sha256} ${ACTUAL:0:16}...)" || {
-        fail "El binario instalado cambió desde la instalación"
-        note "Registrado: $M_CHECKSUM_PATCHED"
-        note "Actual:     $ACTUAL"
-        note "Puede ser una actualización del stack glibc, re-patchelf o manipulación."
-      }
+    if [[ "$ACTUAL" == "$M_CHECKSUM_PATCHED" ]]; then
+      pass "Integridad del binario OK (${M_CHECKSUM_ALGO:-sha256} ${ACTUAL:0:16}...)"
+    else
+      fail "El binario instalado cambió desde la instalación"
+      note "Registrado: $M_CHECKSUM_PATCHED"
+      note "Actual:     $ACTUAL"
+      note "Puede ser una actualización del stack glibc, re-patchelf o manipulación."
+    fi
   else
     warn "Sin checksum registrado; no se puede verificar la integridad del binario"
   fi
@@ -256,6 +273,13 @@ if [[ -f "$GLIBC_PREFIX/etc/nsswitch.conf" ]]; then
 else
   warn "Falta $GLIBC_PREFIX/etc/nsswitch.conf; puede fallar la resolución DNS"
   note "Solución: printf 'hosts: files dns\n' > $GLIBC_PREFIX/etc/nsswitch.conf"
+fi
+
+if [[ -s "$GLIBC_PREFIX/etc/resolv.conf" ]]; then
+  pass "resolv.conf de glibc presente (servidores DNS)"
+else
+  warn "Falta $GLIBC_PREFIX/etc/resolv.conf; puede fallar la resolución DNS de glibc"
+  note "Se regenera automáticamente al reinstalar: bash install.sh $APP_NAME -r"
 fi
 
 # ── 10. Ejecución real ────────────────────────────────────────────────────────

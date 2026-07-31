@@ -62,6 +62,8 @@ Opciones:
   -v, --version <version>    Instalar una versión específica (ej: 1.18.9)
   -u, --uninstall            Desinstalar
   -r, --reinstall            Forzar reinstalación
+      --update               Actualizar a la última versión disponible si
+                             ya hay una versión anterior instalada
       --sha256 <hash>        Pinear el checksum del tarball explícitamente
       --require-attestation  Abortar si no se puede verificar la attestation
                              de GitHub (solo herramientas con ATTEST_PREDICATE)
@@ -92,6 +94,7 @@ PINNED_CHECKSUM=""
 UNINSTALL=false
 REINSTALL=false
 REQUIRE_ATTEST=false
+UPDATE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -105,12 +108,18 @@ while [[ $# -gt 0 ]]; do
     --require-attestation) REQUIRE_ATTEST=true; shift ;;
     -u|--uninstall) UNINSTALL=true; shift ;;
     -r|--reinstall) REINSTALL=true; shift ;;
+    --update) UPDATE=true; shift ;;
     *)
       err "Opción desconocida: $1"
       err "Usá --help para ver las opciones."
       exit 2 ;;
   esac
 done
+
+[[ "$UPDATE" != true || -z "$REQUESTED_VERSION" ]] || {
+  err "--update es incompatible con -v (--update siempre va a la última versión)."
+  exit 2
+}
 
 # ── Cargar configuración de la herramienta ─────────────────────────────────────
 CONF="$REGISTRY_DIR/$TOOL.conf"
@@ -145,6 +154,22 @@ for _field in APP_NAME DISPLAY_NAME RELEASE_SOURCE CHECKSUM_ALGO CHECKSUM_SOURCE
   [[ -n "${!_field:-}" ]] || { err "$CONF: el campo '$_field' es obligatorio."; exit 1; }
 done
 
+# Validar campos específicos según el tipo de release (fail-fast en el .conf)
+case "$RELEASE_SOURCE" in
+  github)
+    [[ -n "$REPO" && -n "$ARCHIVE_TEMPLATE" ]] || {
+      err "$CONF: RELEASE_SOURCE=github requiere REPO y ARCHIVE_TEMPLATE."; exit 1; }
+    ;;
+  manifest_json)
+    [[ -n "$MANIFEST_URL" ]] || {
+      err "$CONF: RELEASE_SOURCE=manifest_json requiere MANIFEST_URL."; exit 1; }
+    ;;
+  url_template)
+    [[ -n "$DOWNLOAD_URL_TEMPLATE" ]] || {
+      err "$CONF: RELEASE_SOURCE=url_template requiere DOWNLOAD_URL_TEMPLATE."; exit 1; }
+    ;;
+esac
+
 # ── Rutas derivadas de la configuración ────────────────────────────────────────
 LIBEXEC_DIR="$PREFIX/libexec/$APP_NAME"
 BIN_FILE="$LIBEXEC_DIR/$ELF_NAME"
@@ -159,6 +184,8 @@ FRESH_INSTALL=false
 INSTALL_DONE=false
 VERSION=""; TAG=""; TARBALL_CHECKSUM=""; BIN_CHECKSUM_ORIG=""; BIN_CHECKSUM_PATCHED=""
 ATTEST_STATUS="omitida"
+# JSON del release de GitHub ya descargado (evita una segunda llamada a la API).
+RELEASE_JSON=""
 
 cleanup() {
   local rc=$?
@@ -220,9 +247,15 @@ latest_hashfile_version() {
 }
 
 # Parser JSON: usa jq (dependencia obligatoria verificada en preflight).
+# La key puede ser un nombre de campo del nivel raíz ("version") o un filtro
+# jq completo (".packages[] | select(...)") para manifests anidados.
 json_get() {
   local payload="$1" key="$2"
-  printf '%s' "$payload" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null
+  if [[ "$key" == .* ]]; then
+    printf '%s' "$payload" | jq -r "$key" 2>/dev/null || true
+  else
+    printf '%s' "$payload" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null || true
+  fi
 }
 
 manifest_get() {
@@ -307,6 +340,28 @@ uninstall() {
 [[ "$UNINSTALL" == true ]] && uninstall
 
 # ── Paso 2: Resolver versión ───────────────────────────────────────────────────
+# Descarga el JSON de un release de GitHub (ref: "latest" o "tags/vX.Y.Z").
+# El JSON se imprime por stdout para reusarlo (digest del asset, attestation).
+github_release_json() {
+  local ref="$1"
+  local body code auth_header=()
+  local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer $token")
+  body=$(mktemp)
+  code=$(curl -sS --proto '=https' --tlsv1.2 -L \
+           --connect-timeout 10 --max-time 300 \
+           -H 'Accept: application/vnd.github+json' \
+           "${auth_header[@]}" \
+           -o "$body" -w '%{http_code}' \
+           "https://api.github.com/repos/$REPO/releases/$ref" 2>/dev/null || echo 000)
+  case "$code" in
+    200) cat "$body"; rm -f "$body" ;;
+    403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$body"; exit 1 ;;
+    000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$body"; exit 1 ;;
+    *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$body"; exit 1 ;;
+  esac
+}
+
 resolve_version() {
   case "$RELEASE_SOURCE" in
 
@@ -315,25 +370,9 @@ resolve_version() {
         VERSION=$(normalize_version "$REQUESTED_VERSION")
         [[ -n "$VERSION" ]] || { err "Versión inválida: '$REQUESTED_VERSION'"; exit 2; }
       else
-        local body code auth_header=()
-        local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-        [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer $token")
-        body=$(mktemp)
-        code=$(curl -sS --proto '=https' --tlsv1.2 -L \
-                 --connect-timeout 10 --max-time 300 \
-                 -H 'Accept: application/vnd.github+json' \
-                 "${auth_header[@]}" \
-                 -o "$body" -w '%{http_code}' \
-                 "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || echo 000)
-        case "$code" in
-          200) : ;;
-          403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$body"; exit 1 ;;
-          000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$body"; exit 1 ;;
-          *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$body"; exit 1 ;;
-        esac
+        RELEASE_JSON=$(github_release_json "latest")
         local raw
-        raw=$(jq -r '.tag_name // empty' "$body" 2>/dev/null || true)
-        rm -f "$body"
+        raw=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
         VERSION=$(normalize_version "$raw")
         [[ -n "$VERSION" ]] || { err "No se pudo extraer la versión de GitHub API"; exit 1; }
       fi
@@ -341,24 +380,34 @@ resolve_version() {
       ;;
 
     manifest_json)
-      # La versión la provee el manifest remoto de Google.
+      # La versión la provee el manifest remoto (Google, CDN de Amazon, ...).
       # Si se pasó -v, se usa solo para verificación post-descarga.
-      local expanded_url
+      # Las claves MANIFEST_KEY_* pueden ser filtros jq con {ARCH} expandible.
+      local expanded_url version_key url_key checksum_key
       expanded_url=$(expand_template "$MANIFEST_URL")
       info "Consultando manifest remoto..."
       local manifest_json
       manifest_json=$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 "$expanded_url" 2>/dev/null || true)
       [[ -n "$manifest_json" ]] || { err "No se pudo descargar el manifest desde $expanded_url"; exit 1; }
 
-      VERSION=$(json_get "$manifest_json" "$MANIFEST_KEY_VERSION")
-      DOWNLOAD_URL=$(json_get "$manifest_json" "$MANIFEST_KEY_URL")
-      REMOTE_CHECKSUM=$(json_get "$manifest_json" "$MANIFEST_KEY_CHECKSUM")
+      version_key=$(expand_template "$MANIFEST_KEY_VERSION")
+      url_key=$(expand_template "$MANIFEST_KEY_URL")
+      checksum_key=$(expand_template "$MANIFEST_KEY_CHECKSUM")
+      VERSION=$(json_get "$manifest_json" "$version_key")
+      DOWNLOAD_URL=$(json_get "$manifest_json" "$url_key")
+      REMOTE_CHECKSUM=$(json_get "$manifest_json" "$checksum_key")
+      # Normalizar: el manifest puede venir con hex en mayúsculas.
+      REMOTE_CHECKSUM=$(printf '%s' "$REMOTE_CHECKSUM" | tr 'A-F' 'a-f')
 
-      [[ -n "$VERSION" && -n "$DOWNLOAD_URL" && -n "$REMOTE_CHECKSUM" ]] || {
+      [[ -n "$VERSION" && -n "$REMOTE_CHECKSUM" ]] || {
         err "El manifest remoto está incompleto o malformado."
-        err "  version: ${VERSION:-(vacío)}"
-        err "  url:     ${DOWNLOAD_URL:-(vacío)}"
+        err "  version:  ${VERSION:-(vacío)}"
         err "  checksum: ${REMOTE_CHECKSUM:-(vacío)}"
+        exit 1
+      }
+      [[ -n "$DOWNLOAD_URL" || -n "$DOWNLOAD_URL_TEMPLATE" ]] || {
+        err "El manifest remoto no provee URL de descarga."
+        err "  Definí DOWNLOAD_URL_TEMPLATE en $CONF para resolver la URL."
         exit 1
       }
 
@@ -367,7 +416,7 @@ resolve_version() {
         req=$(normalize_version "$REQUESTED_VERSION")
         [[ "$req" == "$VERSION" ]] || {
           warn "La versión disponible ($VERSION) no coincide con la solicitada ($req)."
-          warn "Solo está disponible la última versión en el manifest de Google."
+          warn "Solo está disponible la última versión en el manifest remoto."
         }
       fi
       TAG="v$VERSION"
@@ -423,6 +472,32 @@ resolve_expected_checksum() {
         EXPECTED_CHECKSUM="${REMOTE_CHECKSUM:-}"
         [[ -n "$EXPECTED_CHECKSUM" ]] || { err "El manifest remoto no tiene checksum"; exit 1; }
         ;;
+      release_digest)
+        # Checksum SHA256 del asset publicado por GitHub (digest de la API).
+        # Si hay un pin en sha256.txt para este tag, el pin del repo gana
+        # (verificación independiente del vendor, sin llamada extra a la API).
+        EXPECTED_CHECKSUM=$(lookup_hashfile "$APP_NAME/$TAG")
+        if [[ -n "$EXPECTED_CHECKSUM" ]]; then
+          warn "Usando hash pineado en sha256.txt para $APP_NAME/$TAG."
+        else
+          local release_json="$RELEASE_JSON"
+          if [[ -z "$release_json" ]]; then
+            release_json=$(github_release_json "tags/$TAG")
+          fi
+          local digest archive_name
+          archive_name=$(expand_template "$ARCHIVE_TEMPLATE")
+          digest=$(printf '%s' "$release_json" \
+            | jq -r --arg n "$archive_name" '.assets[]? | select(.name == $n) | .digest // empty' \
+              2>/dev/null | head -1 || true)
+          [[ -n "$digest" ]] || {
+            err "No se pudo obtener el digest SHA256 del asset '$archive_name' en $APP_NAME/$TAG."
+            err "Opciones: registrá el hash en sha256.txt o usá --sha256 <hash>."
+            exit 1
+          }
+          EXPECTED_CHECKSUM="${digest#sha256:}"
+          info "Digest SHA256 del release obtenido desde la GitHub API."
+        fi
+        ;;
       *)
         err "CHECKSUM_SOURCE desconocido en $CONF: '$CHECKSUM_SOURCE'"
         exit 1 ;;
@@ -451,7 +526,11 @@ check_current() {
   fi
 
   if [[ -n "$installed" && "$installed" == "$VERSION" && -x "$BIN_FILE" && -x "$WRAPPER" ]]; then
-    info "$DISPLAY_NAME $VERSION ya está instalado. Usá -r para reinstalar."
+    if [[ "$UPDATE" == true ]]; then
+      info "$DISPLAY_NAME ya está actualizado a la última versión ($VERSION)."
+    else
+      info "$DISPLAY_NAME $VERSION ya está instalado. Usá -r para reinstalar."
+    fi
     exit 0
   fi
   [[ -n "$installed" ]] && info "Versión instalada: $installed → actualizando a $VERSION"
@@ -487,7 +566,9 @@ download() {
       url="https://github.com/$REPO/releases/download/$TAG/$archive_name"
       ;;
     manifest_json)
-      url="$DOWNLOAD_URL"
+      # DOWNLOAD_URL_TEMPLATE (con {ARCH}) tiene prioridad: el path del
+      # manifest puede no ser descargable directo (ej: CDN de kiro-cli).
+      url=$(expand_template "${DOWNLOAD_URL_TEMPLATE:-$DOWNLOAD_URL}")
       ;;
     url_template)
       url=$(expand_template "$DOWNLOAD_URL_TEMPLATE")
@@ -685,7 +766,7 @@ if [[ ! -f "\$BIN" ]]; then
   echo "Reinstalá con: bash install.sh $APP_NAME -r" >&2
   exit 1
 fi
-if [[ "$NEEDS_PATCHELF" == true && ! -x "\$BIN" ]]; then
+if [[ ! -x "\$BIN" ]]; then
   echo "ERROR: $DISPLAY_NAME sin permiso de ejecución en \$BIN" >&2
   echo "Reinstalá con: bash install.sh $APP_NAME -r" >&2
   exit 1
