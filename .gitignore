@@ -6,3 +6,4 @@ opencode-linux-arm64.tar.gz
 test-*.tar.gz
 test_exec.sh
 test_wrapper.sh
+.gemini/
