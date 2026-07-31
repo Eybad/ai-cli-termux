@@ -201,6 +201,24 @@ lookup_hashfile() {
   printf '%s' "$res"
 }
 
+# Última versión de la herramienta registrada en sha256.txt.
+# Solo considera entradas compatibles con la arquitectura actual:
+#   tool/vX.Y.Z            (genérica, sirve para cualquier arch)
+#   tool/vX.Y.Z:$ARCH      (específica de la arquitectura detectada)
+# Requiere que ARCH esté resuelto (preflight corrió antes).
+latest_hashfile_version() {
+  [[ -f "$HASH_FILE" ]] || return 0
+  awk -v app="$APP_NAME" -v arch="${ARCH:-}" '
+    {
+      sub(/\r$/, "")
+      if ($1 !~ "^" app "/v[0-9]+\\.[0-9]+\\.[0-9]+($|:" arch "$)") next
+      v = $1
+      sub("^" app "/v", "", v)
+      sub(":.*$", "", v)
+      print v
+    }' "$HASH_FILE" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
+
 # Parser JSON: usa jq (dependencia obligatoria verificada en preflight).
 json_get() {
   local payload="$1" key="$2"
@@ -360,9 +378,13 @@ resolve_version() {
         VERSION=$(normalize_version "$REQUESTED_VERSION")
         [[ -n "$VERSION" ]] || { err "Versión inválida: '$REQUESTED_VERSION'"; exit 2; }
       else
-        err "$DISPLAY_NAME: se requiere -v <version> (url_template)"
-        err "Versiones disponibles en $HASH_FILE"
-        exit 1
+        VERSION=$(latest_hashfile_version)
+        if [[ -z "$VERSION" ]]; then
+          err "$DISPLAY_NAME: no hay ninguna versión registrada en $HASH_FILE."
+          err "Agregá el hash de la versión actual (ver update-hashes.yml) o usá -v <version>."
+          exit 1
+        fi
+        info "$DISPLAY_NAME: usando última versión registrada ($VERSION)."
       fi
       TAG="v$VERSION"
       ;;
@@ -381,34 +403,34 @@ resolve_expected_checksum() {
   if [[ -n "$PINNED_CHECKSUM" ]]; then
     EXPECTED_CHECKSUM=$(printf '%s' "$PINNED_CHECKSUM" | tr 'A-F' 'a-f' | tr -d '[:space:]')
     warn "Usando checksum pasado con --sha256 (verificalo vos mismo)."
-    return
+  else
+    case "$CHECKSUM_SOURCE" in
+      hashfile)
+        EXPECTED_CHECKSUM=$(lookup_hashfile "$APP_NAME/$TAG")
+        if [[ -z "$EXPECTED_CHECKSUM" ]]; then
+          err "No hay $CHECKSUM_ALGO registrado para $APP_NAME/$TAG en $HASH_FILE."
+          [[ ! -f "$HASH_FILE" ]] && err "Tampoco existe $HASH_FILE (¿clonaste el repo completo?)."
+          err ""
+          err "Fail-closed: no se instala sin verificar. Opciones:"
+          err "  1. Agregá el hash a sha256.txt (instrucciones dentro del archivo)."
+          err "  2. Instalá una versión registrada: -v <version>"
+          err "  3. Pineá el hash: --sha256 <hash>"
+          exit 1
+        fi
+        ;;
+      manifest)
+        # Ya se obtuvo en resolve_version() al descargar el manifest JSON
+        EXPECTED_CHECKSUM="${REMOTE_CHECKSUM:-}"
+        [[ -n "$EXPECTED_CHECKSUM" ]] || { err "El manifest remoto no tiene checksum"; exit 1; }
+        ;;
+      *)
+        err "CHECKSUM_SOURCE desconocido en $CONF: '$CHECKSUM_SOURCE'"
+        exit 1 ;;
+    esac
   fi
 
-  case "$CHECKSUM_SOURCE" in
-    hashfile)
-      EXPECTED_CHECKSUM=$(lookup_hashfile "$APP_NAME/$TAG")
-      if [[ -z "$EXPECTED_CHECKSUM" ]]; then
-        err "No hay $CHECKSUM_ALGO registrado para $APP_NAME/$TAG en sha256.txt."
-        [[ ! -f "$HASH_FILE" ]] && err "Tampoco existe $HASH_FILE (¿clonaste el repo completo?)."
-        err ""
-        err "Fail-closed: no se instala sin verificar. Opciones:"
-        err "  1. Agregá el hash a sha256.txt (instrucciones dentro del archivo)."
-        err "  2. Instalá una versión registrada: -v <version>"
-        err "  3. Pineá el hash: --sha256 <hash>"
-        exit 1
-      fi
-      ;;
-    manifest)
-      # Ya se obtuvo en resolve_version() al descargar el manifest JSON
-      EXPECTED_CHECKSUM="${REMOTE_CHECKSUM:-}"
-      [[ -n "$EXPECTED_CHECKSUM" ]] || { err "El manifest remoto no tiene checksum"; exit 1; }
-      ;;
-    *)
-      err "CHECKSUM_SOURCE desconocido en $CONF: '$CHECKSUM_SOURCE'"
-      exit 1 ;;
-  esac
-
-  # Validar formato: 64 hex (sha256) o 128 hex (sha512)
+  # Validar formato: 64 hex (sha256) o 128 hex (sha512).
+  # Aplica también al checksum pineado con --sha256 (fail-closed).
   local expected_len
   case "$CHECKSUM_ALGO" in sha256) expected_len=64 ;; sha512) expected_len=128 ;; esac
   if [[ ! "$EXPECTED_CHECKSUM" =~ ^[0-9a-f]{${expected_len}}$ ]]; then
@@ -658,12 +680,13 @@ set -euo pipefail
 
 BIN="$BIN_FILE"
 
-if [[ ! -x "\$BIN" && "$NEEDS_PATCHELF" == true ]]; then
+if [[ ! -f "\$BIN" ]]; then
   echo "ERROR: $DISPLAY_NAME no encontrado en \$BIN" >&2
   echo "Reinstalá con: bash install.sh $APP_NAME -r" >&2
   exit 1
-elif [[ ! -f "\$BIN" ]]; then
-  echo "ERROR: $DISPLAY_NAME no encontrado en \$BIN" >&2
+fi
+if [[ "$NEEDS_PATCHELF" == true && ! -x "\$BIN" ]]; then
+  echo "ERROR: $DISPLAY_NAME sin permiso de ejecución en \$BIN" >&2
   echo "Reinstalá con: bash install.sh $APP_NAME -r" >&2
   exit 1
 fi
@@ -695,6 +718,7 @@ version=$VERSION
 tag=$TAG
 release_source=$RELEASE_SOURCE
 checksum_algo=$CHECKSUM_ALGO
+checksum_source=$CHECKSUM_SOURCE
 tarball_checksum=$TARBALL_CHECKSUM
 binary_checksum_original=$BIN_CHECKSUM_ORIG
 binary_checksum_patched=${BIN_CHECKSUM_PATCHED:-${BIN_CHECKSUM_ORIG}}

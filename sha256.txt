@@ -30,7 +30,8 @@
 opencode/v1.18.9  b16bd7593ea960a25d9c6849b3023bcd9b9244a6f51675341fd2052043b0670f
 
 # kiro-cli (Amazon Kiro CLI) — https://prod.download.cli.kiro.dev/stable/latest/
-kiro-cli/v2.15.2:arm64  8fa63f55925e9c77aa58bdfcba7b1d714dbf6a630c752883333bb715417bc142
+# Convención: arm64 sin sufijo (default), amd64 con ":amd64".
+kiro-cli/v2.15.2  8fa63f55925e9c77aa58bdfcba7b1d714dbf6a630c752883333bb715417bc142
 kiro-cli/v2.15.2:amd64  4a3ad88ebfa6c34b0b8349f07058d765448aa65a1f3269665ef8613f6c10978f
 
 # agy (Antigravity CLI) — hashes no requeridos; usa CHECKSUM_SOURCE=manifest

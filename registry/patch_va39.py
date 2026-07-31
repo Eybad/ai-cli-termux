@@ -192,18 +192,34 @@ def main():
     )
 
     if total == 0:
-        print("⛔ NINGÚN parche aplicado — la estructura del binario cambió.")
+        print("[ERROR] NINGÚN parche aplicado — la estructura del binario cambió.")
         print("   NO uses el binario generado.")
         sys.exit(1)
-    if ubfx_count == 0:
-        print("⚠️  No se encontraron parches ubfx (tag extraction).")
-    if mask_count == 0:
-        print("⚠️  No se encontró la máscara random de mmap.")
-    
-    print("✓ Parche aplicado (con los patrones encontrados).")
-    return 0
 
-    return 1
+    # Los parches ubfx (tag extraction) y la máscara random de mmap son
+    # críticos: sin ellos el binario crashea con "MmapAligned() failed" en
+    # kernels VA39 (la mayoría de los dispositivos Android). Si faltan,
+    # el binario generado no es confiable → fallar.
+    missing_critical = []
+    if ubfx_count == 0:
+        missing_critical.append("ubfx (tag extraction, esperado ~15)")
+    if mask_count == 0:
+        missing_critical.append("máscara random de mmap (esperado ~3)")
+
+    if missing_critical:
+        print("[ERROR] Faltan parches críticos:")
+        for m in missing_critical:
+            print(f"   - {m}")
+        print("   El binario generado puede crashear en kernels VA39; no se usa.")
+        return 1
+
+    if lsl_count == 0:
+        print("[WARN] No se encontraron parches lsl (tag insertion).")
+    if mmap_count == 0:
+        print("[WARN] No se encontró el límite de MmapAlignedLocked.")
+
+    print("[OK] Parche aplicado (con los patrones encontrados).")
+    return 0
 
 
 if __name__ == "__main__":

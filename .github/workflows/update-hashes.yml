@@ -132,8 +132,9 @@ jobs:
             KEY="${INPUT_TOOL}/${TAG}:${INPUT_ARCH}"
           fi
 
-          # Eliminar entrada previa si existe
-          sed -i "\|^$KEY |d" sha256.txt
+          # Eliminar entrada previa si existe (match exacto por campo, sin regex)
+          awk -v k="$KEY" '$1 != k' sha256.txt > sha256.txt.tmp
+          mv sha256.txt.tmp sha256.txt
 
           # Agregar nueva entrada
           echo "$KEY  $HASH" >> sha256.txt

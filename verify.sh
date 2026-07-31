@@ -117,6 +117,7 @@ printf '=== Verificación de %s en Termux ===\n\n' "$DISPLAY_NAME"
 M_VERSION=""; M_TAG=""; M_CHECKSUM_PATCHED=""; M_CHECKSUM_TARBALL=""
 M_INTERP=""; M_RPATH=""; M_ATTEST=""; M_NEEDS_PATCHELF=""
 M_CHECKSUM_ALGO="$CHECKSUM_ALGO"
+M_CHECKSUM_SOURCE=""
 
 if [[ -f "$MANIFEST" ]]; then
   M_VERSION=$(manifest_get version "$MANIFEST")
@@ -128,6 +129,7 @@ if [[ -f "$MANIFEST" ]]; then
   M_ATTEST=$(manifest_get attestation "$MANIFEST")
   M_NEEDS_PATCHELF=$(manifest_get needs_patchelf "$MANIFEST")
   M_CHECKSUM_ALGO=$(manifest_get checksum_algo "$MANIFEST")
+  M_CHECKSUM_SOURCE=$(manifest_get checksum_source "$MANIFEST")
   pass "Manifest presente (versión $M_VERSION, instalado $(manifest_get installed_at "$MANIFEST"))"
 else
   warn "No hay manifest en $MANIFEST"
@@ -203,7 +205,10 @@ if [[ -f "$BIN_FILE" ]]; then
 fi
 
 # ── 6. Cross-check tarball contra sha256.txt (solo CHECKSUM_SOURCE=hashfile) ──
-if [[ "$CHECKSUM_SOURCE" == "hashfile" && -n "$M_CHECKSUM_TARBALL" && -n "$M_TAG" ]]; then
+# El source se toma del manifest (si está registrado) para no depender de
+# cambios posteriores en el .conf. Fallback al .conf por compatibilidad.
+CHECKSUM_SOURCE_INSTALLED="${M_CHECKSUM_SOURCE:-$CHECKSUM_SOURCE}"
+if [[ "$CHECKSUM_SOURCE_INSTALLED" == "hashfile" && -n "$M_CHECKSUM_TARBALL" && -n "$M_TAG" ]]; then
   REG=$(lookup_hashfile "$APP_NAME/$M_TAG")
   if [[ -z "$REG" ]]; then
     warn "sha256.txt no tiene entrada para $APP_NAME/$M_TAG"

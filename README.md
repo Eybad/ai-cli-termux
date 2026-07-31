@@ -4,7 +4,7 @@ Instalador y verificador unificado para ejecutar CLIs de Inteligencia Artificial
 
 ---
 
-## 🎯 Por qué existe este proyecto
+## Por qué existe este proyecto
 
 Las herramientas CLI de IA modernas (como `opencode`, `kiro-cli` o `antigravity`) se distribuyen como binarios ELF compilados dinámicamente para entornos Linux estándar (`glibc`). Por su parte, Android utiliza Bionic libc.
 
@@ -15,34 +15,34 @@ En lugar de requerir distribuciones completas virtualizadas vía `proot-distro` 
 
 ---
 
-## 🏗️ Arquitectura de Ejecución Nativa
+## Arquitectura de ejecución nativa
 
 ```
 Android OS / Kernel Linux (aarch64)
-  │
-  ├─ Termux Environment (Bionic libc)
-  │    └─ Overlay glibc ($PREFIX/glibc/lib/ld-linux-aarch64.so.1)
-  │         │
-  │         ├─ 1. patchelf (Reescritura de PT_INTERP y DT_RUNPATH)
-  │         ├─ 2. pre_wrapper_hook (Hex-patching de kernel, shims de navegador/clipboard)
-  │         └─ 3. Executable Wrapper (Environment: SSL_CERT_FILE, GODEBUG, LD_LIBRARY_PATH)
-  │
-  └─ Binario ejecutado nativamente en Android (Sin VM, sin proot, rendimiento 1:1)
+  |
+  +- Termux Environment (Bionic libc)
+       +- Overlay glibc ($PREFIX/glibc/lib/ld-linux-aarch64.so.1)
+            |
+            +- 1. patchelf (Reescritura de PT_INTERP y DT_RUNPATH)
+            +- 2. pre_wrapper_hook (Hex-patching de kernel, shims de navegador/clipboard)
+            +- 3. Executable Wrapper (Environment: SSL_CERT_FILE, GODEBUG, LD_LIBRARY_PATH)
+            |
+            +- Binario ejecutado nativamente en Android (Sin VM, sin proot, rendimiento 1:1)
 ```
 
 ---
 
-## 📦 Herramientas Soportadas
+## Herramientas soportadas
 
 | Herramienta | Distribución | Verificación de Integridad | Mitigaciones Específicas |
 |---|---|---|---|
 | **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | Hash SHA256 (`sha256.txt`) + GitHub Attestation (Sigstore) | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
 | **`agy`** *(Antigravity CLI)* | [Google Cloud Storage](https://antigravity.google) (Manifest JSON) | SHA512 dinámico desde el manifest remoto | Parche VA39 ARM64 + faccessat2 + shim libc.so + DNS cgo |
-| **`kiro-cli`** *(Kiro CLI)* | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 fijo desde `sha256.txt` | URL template con versión explícita (`-v`) |
+| **`kiro-cli`** *(Kiro CLI)* | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 fijo desde `sha256.txt` | URL template; última versión registrada por defecto |
 
 ---
 
-## 📋 Requisitos del Sistema
+## Requisitos del sistema
 
 - **Dispositivo**: Android 10+ (`aarch64`) o Host Linux (`x86_64`).
 - **Termux**: Instalado exclusivamente desde **F-Droid** o **GitHub Releases** (*NO usar la versión de Google Play Store, está obsoleta*).
@@ -54,7 +54,7 @@ Android OS / Kernel Linux (aarch64)
 
 ---
 
-## 🚀 Instalación y Uso
+## Instalación y uso
 
 ### 1. Clonar el repositorio
 ```bash
@@ -64,11 +64,11 @@ cd ai-cli-termux
 ```
 
 > [!NOTE]
-> **`kiro-cli`** usa `RELEASE_SOURCE="url_template"`: requiere pasar `-v <version>` explícitamente. No hay resolución automática de última versión. Las versiones disponibles están en `sha256.txt`.
+> **`kiro-cli`** usa `RELEASE_SOURCE="url_template"`: sin `-v` instala la última versión registrada en `sha256.txt` (la URL del CDN siempre apunta a `stable/latest/`; si el CDN ya tiene una versión más nueva que la registrada, el hash no coincide y la instalación aborta en fail-closed — actualizá `sha256.txt` con el workflow `update-hashes.yml`). Con `-v <version>` se instala una versión específica (debe estar registrada en `sha256.txt`).
 
 ### 2. Comandos de instalación (`install.sh`)
 
-#### **OpenCode**
+#### OpenCode
 ```bash
 bash install.sh opencode                     # Instala la última versión registrada
 bash install.sh opencode -v 1.18.9           # Instala una versión específica
@@ -77,18 +77,19 @@ bash install.sh opencode -u                  # Desinstalación completa
 bash install.sh opencode --require-attestation  # Exige verificación de firma GitHub Attestation
 ```
 
-#### **Antigravity CLI (`agy`)**
+#### Antigravity CLI (`agy`)
 ```bash
 bash install.sh agy    # Obtiene e instala el último release del manifest oficial de Google
 bash install.sh agy -r # Reinstalación forzada y re-aplicación de parches
 bash install.sh agy -u # Desinstalar
 ```
 
-#### **Kiro CLI (`kiro-cli`)**
+#### Kiro CLI (`kiro-cli`)
 ```bash
-bash install.sh kiro-cli -v 2.15.2   # Instala una versión específica (requiere -v)
-bash install.sh kiro-cli -v 2.15.2 -r # Reinstalación forzada
-bash install.sh kiro-cli -u          # Desinstalar
+bash install.sh kiro-cli            # Instala la última versión registrada en sha256.txt
+bash install.sh kiro-cli -v 2.15.2  # Instala una versión específica registrada
+bash install.sh kiro-cli -r         # Reinstalación forzada
+bash install.sh kiro-cli -u         # Desinstalar
 ```
 
 ### 3. Ejecutar las herramientas instaladas
@@ -100,7 +101,7 @@ kiro-cli   # Ejecuta Kiro CLI
 
 ---
 
-## 🔍 Verificación y Auditoría de Integridad (`verify.sh`)
+## Verificación y auditoría de integridad (`verify.sh`)
 
 El proyecto incluye un motor de diagnóstico unificado para auditar cualquier herramienta:
 
@@ -110,20 +111,21 @@ bash verify.sh agy
 bash verify.sh kiro-cli
 ```
 
-El script `verify.sh` realiza una auditoría completa en **9 pasos secuenciales**:
-1. **Comprobación de manifiesto local**: Verifica la existencia de `manifest.txt`.
-2. **Formato del binario**: Confirma formato ELF64 `aarch64` / `x86_64`.
+El script `verify.sh` realiza una auditoría completa en **10 pasos secuenciales**:
+1. **Comprobación de manifiesto local**: Verifica la existencia de `manifest.txt` y sus campos.
+2. **Binario presente y ejecutable**: Presencia, permisos y formato ELF64 `aarch64` / `x86_64`.
 3. **Validación patchelf**: Verifica que `PT_INTERP` apunte al loader glibc y `DT_RUNPATH` contenga las librerías glibc.
 4. **Integridad post-modificación**: Compara el SHA256/SHA512 del binario instalado contra el registrado.
-5. **Consistencia de registro**: Valida coincidencia contra `sha256.txt` (si aplica).
-6. **Verificación Attestation**: Revisa la firma criptográfica de GitHub Actions (Sigstore).
-7. **Entorno de ejecución**: Valida `ld-linux-aarch64.so.1`, `nsswitch.conf` y shims.
-8. **Prueba de ejecución directa**: Evalúa la invocación `--version` del binario con `glibc-runner`.
-9. **Prueba del Wrapper**: Verifica que el wrapper final ejecute sin errores ni fugas de memoria.
+5. **Consistencia de registro**: Valida el tarball instalado contra `sha256.txt` (solo `CHECKSUM_SOURCE=hashfile`). El source se lee del manifest (con fallback al `.conf`) para no depender de cambios posteriores en la configuración.
+6. **Verificación Attestation**: Revisa el estado de la firma criptográfica registrada al instalar.
+7. **Wrapper**: Presencia, ejecutabilidad y limpieza de `LD_PRELOAD`/`LD_LIBRARY_PATH`.
+8. **Entorno de ejecución**: Valida `ld-linux-aarch64.so.1`, `nsswitch.conf` y el resolver DNS de glibc.
+9. **Prueba de ejecución real**: Evalúa la invocación `--version` y la compara contra la versión del manifest.
+10. **Resultado**: Resumen de fallos y advertencias; exit code 1 si hay fallos.
 
 ---
 
-## 🔬 Soluciones Técnicas e Incompatibilidades de Android
+## Soluciones técnicas e incompatibilidades de Android
 
 ### 1. Parche de Kernel VA39 + Syscall `faccessat2` (Antigravity CLI)
 
@@ -137,6 +139,8 @@ Google distribuye binarios compilados para Linux servidor que asumen un espacio 
 > - Parchea el límite superior de `MmapAligned` de `1<<48` a `1<<39`.
 > - Reemplaza la syscall `faccessat2` (nr 439) por `faccessat` (nr 48), totalmente permitida por seccomp.
 > - Todo el parche ocurre en memoria localmente, sin descargar binarios modificados de terceros.
+>
+> **Fail-closed del parche:** el script sale con código de error si los parches críticos (extracción de tag `ubfx` o la máscara random de mmap) no se encuentran. En ese caso el instalador conserva el binario sin parchear (puede funcionar en dispositivos VA48) y avisa con un error.
 
 ### 2. Resolución DNS y TLS en binarios Go
 
@@ -157,7 +161,7 @@ En la distribución glibc de Termux, `/data/data/com.termux/files/usr/glibc/lib/
 
 ---
 
-## 🛠️ Cómo agregar una nueva CLI (`registry/`)
+## Cómo agregar una nueva CLI (`registry/`)
 
 Para dar soporte a un nuevo CLI en este instalador:
 
@@ -182,7 +186,7 @@ Para dar soporte a un nuevo CLI en este instalador:
 |---|---|---|
 | `github` | `REPO`, `ARCHIVE_TEMPLATE` | `hashfile` vía `sha256.txt` o `--sha256` flag |
 | `manifest_json` | `MANIFEST_URL`, `MANIFEST_KEY_*` | `manifest` remoto (ej: agy) |
-| `url_template` | `DOWNLOAD_URL_TEMPLATE` | `hashfile` + versión explícita con `-v` |
+| `url_template` | `DOWNLOAD_URL_TEMPLATE` | `hashfile`; sin `-v` usa la última versión registrada en `sha256.txt` |
 
 ### Arch mapping
 
@@ -198,31 +202,35 @@ tool/vX.Y.Z         hash   # lookup sin arch (por defecto arm64)
 tool/vX.Y.Z:amd64   hash   # lookup con arch explícito
 ```
 
-El lookup prueba `key:${ARCH}` primero, luego `key` solo.
+El lookup prueba `key:${ARCH}` primero, luego `key` solo. Convención de arquitectura: las entradas arm64 se registran **sin** sufijo; las amd64 con `:amd64`. El workflow `update-hashes.yml` sigue esta convención y limpia entradas previas con match exacto por campo (awk, sin regex).
 
 ### Pipeline de instalación
 
 1. Preflight — detecta Termux, arquitectura, dependencias
-2. Resolve version — según `RELEASE_SOURCE`
-3. Resolve checksum — `sha256.txt` o manifest remoto
+2. Resolve version — según `RELEASE_SOURCE` (`url_template` sin `-v` resuelve la última versión de `sha256.txt`)
+3. Resolve checksum — `sha256.txt` o manifest remoto; validación de formato hex también para `--sha256`
 4. Check current — salta si ya instalado
 5. Install deps — `pkg install` glibc-runner, patchelf, etc.
 6. Download → verify tarball — fail-closed si mismatch
 7. Verify attestation — solo si configurado, requiere `gh`
 8. Extract & install — busca el ELF por nombre + arquitectura
 9. Patch — modifica el binario para que ejecute contra el runtime glibc de Termux
-10. Wrapper — script en `$PREFIX/bin/$APP_NAME` que exporta `WRAPPER_ENV` y ejecuta el binario
+10. Wrapper — script en `$PREFIX/bin/$APP_NAME` que exporta `WRAPPER_ENV` y ejecuta el binario; valida presencia y permisos del binario (fail-fast)
 11. Verify install → write manifest → hooks
+
+### Manifest de integridad
+
+`write_manifest()` registra: `version`, `tag`, `release_source`, `checksum_algo`, `checksum_source`, `tarball_checksum`, `binary_checksum_original`, `binary_checksum_patched`, `needs_patchelf`, `interpreter`, `rpath`, `attestation`, `installed_at`. `verify.sh` lee estos valores del manifest (no del `.conf`) para detectar manipulación o cambios de configuración posteriores.
 
 ---
 
-## 📁 Estructura del Repositorio
+## Estructura del repositorio
 
 ```
 ai-cli-termux/
 ├── install.sh                  # Instalador unificado posix
 ├── AGENTS.md                   # Instrucciones para AI agents que trabajen en este repo
-├── verify.sh                   # Suite de verificación de 9 pasos
+├── verify.sh                   # Suite de verificación de 10 pasos
 ├── sha256.txt                  # Registro oficial de checksums verificados
 ├── registry/
 │   ├── opencode.conf           # Configuración de OpenCode CLI
@@ -235,18 +243,23 @@ ai-cli-termux/
 
 ---
 
-## 🔒 Modelo de Seguridad e Integridad
+## Modelo de seguridad e integridad
 
 ### Doble capa de hashes y diferencias de garantía
 Debido a que `patchelf` y `patch_va39.py` modifican el binario durante la instalación, el sistema registra dos checksums:
 1. **Hash de distribución (Tarball)**: Verificado al descargar (Modelo *Fail-Closed*).
    - **Verificación contra Hash Independiente (`opencode`)**: El hash esperado está pineado en `sha256.txt` dentro del repositorio local. Protege contra assets o CDNs de descarga comprometidos en GitHub. Además soporta verificación opcional con GitHub Attestations (Sigstore/OIDC).
-    - **Verificación Autorreferencial (`agy`)**: El hash SHA512 se extrae dinámicamente del manifest JSON remoto de Google. Protege contra corrupción en tránsito y errores de descarga, pero confía implícitamente en el endpoint de origen de Google.
-    - **Verificación con hash fijo (`kiro-cli`)**: Similar a `opencode`, el hash SHA256 está pineado en `sha256.txt`. A diferencia de `opencode`, la URL de descarga se construye desde un template y la versión se especifica explícitamente con `-v`.
+   - **Verificación Autorreferencial (`agy`)**: El hash SHA512 se extrae dinámicamente del manifest JSON remoto de Google. Protege contra corrupción en tránsito y errores de descarga, pero confía implícitamente en el endpoint de origen de Google.
+   - **Verificación con hash fijo (`kiro-cli`)**: Similar a `opencode`, el hash SHA256 está pineado en `sha256.txt`. La URL de descarga apunta a `stable/latest/` del CDN; la versión se resuelve desde `sha256.txt` (última registrada) o se pinea con `-v`.
 2. **Hash local post-instalación (Binario en ejecución)**: Calculado inmediatamente después de aplicar los parches y guardado en `manifest.txt`. `verify.sh` utiliza este hash para asegurar que el binario instalado localmente no haya sido adulterado a posteriori.
+
+### Fail-closed en todos los caminos
+- Sin hash verificado → no se instala (incluye `--sha256`: se valida formato hex antes de usar).
+- Los parches críticos de `patch_va39.py` son obligatorios: si no se aplican, el binario parcheado no se usa.
+- El wrapper falla rápido si el binario no existe o no es ejecutable.
 
 ---
 
-## 📄 Licencia
+## Licencia
 
 Este proyecto está distribuido bajo la licencia [MIT](LICENSE).
