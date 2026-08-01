@@ -191,10 +191,9 @@ jobs:
           export PATH="$NDK_TC:$PATH"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_TC/aarch64-linux-android29-clang"
           # El Cargo.lock del tag upstream a veces está desincronizado con su
-          # Cargo.toml (mantenimiento de openai): regenerar el lock primero
-          # (resuelve solo semver de lo ya declarado) y --locked después valida
-          # que quede consistente (fail-closed ante cualquier otro desajuste).
-          cargo update
+          # Cargo.toml (mantenimiento de openai): actualizar solo openssl-sys para que
+          # openssl-src quede registrado sin tocar versiones probadas de otras deps (ej. rama-*).
+          cargo update -p openssl-sys
           # --locked: falla si el Cargo.lock (ya regenerado) necesita cambios.
           cargo build --locked --release -p codex-cli --target aarch64-linux-android
 
