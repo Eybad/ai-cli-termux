@@ -172,6 +172,10 @@ jobs:
           curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/rusty_v8.a.gz" "$V8_URL"
           gzip -d "$RUNNER_TEMP/rusty_v8.a.gz"
           echo "RUSTY_V8_ARCHIVE=$RUNNER_TEMP/rusty_v8.a" >> "$GITHUB_ENV"
+          # v8 busca src_binding_release_aarch64-linux-android.rs en su gen/
+          # Copiar el binding aarch64-unknown-linux-gnu (FFI idéntico en aarch64)
+          cargo fetch --manifest-path upstream/codex-rs/Cargo.toml
+          find ~/.cargo/registry/src/ -path '*/v8-*/gen' -exec sh -c 'cp "$1/src_binding_release_aarch64-unknown-linux-gnu.rs" "$1/src_binding_release_aarch64-linux-android.rs"' _ {} \;
 
       - name: Parchear openssl-sys (vendored) para bionic
         # El crate raíz declara openssl-sys = "*" (native-tls) y bionic no trae
