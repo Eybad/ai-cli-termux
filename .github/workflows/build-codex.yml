@@ -165,6 +165,14 @@ jobs:
           unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP"
           echo "ANDROID_NDK_HOME=$RUNNER_TEMP/android-ndk-$NDK_VER" >> "$GITHUB_ENV"
 
+      - name: Descargar prebuilt rusty_v8 para aarch64
+        run: |
+          set -euo pipefail
+          V8_URL="https://github.com/denoland/rusty_v8/releases/download/v149.2.0/librusty_v8_release_aarch64-unknown-linux-gnu.a.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/rusty_v8.a.gz" "$V8_URL"
+          gzip -d "$RUNNER_TEMP/rusty_v8.a.gz"
+          echo "RUSTY_V8_ARCHIVE=$RUNNER_TEMP/rusty_v8.a" >> "$GITHUB_ENV"
+
       - name: Parchear openssl-sys (vendored) para bionic
         # El crate raíz declara openssl-sys = "*" (native-tls) y bionic no trae
         # libssl: sin parche, el cross-build no encuentra OpenSSL para el target.
