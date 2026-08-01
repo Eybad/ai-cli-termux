@@ -102,7 +102,7 @@ fi
 
 # Cargar configuración
 APP_NAME=""; DISPLAY_NAME=""; ELF_NAME=""; CHECKSUM_ALGO="sha256"
-CHECKSUM_SOURCE="hashfile"; NEEDS_PATCHELF=true
+CHECKSUM_SOURCE="hashfile"; NEEDS_PATCHELF=true; EXEC_DIRECT=false
 # shellcheck source=/dev/null
 source "$CONF"
 
@@ -307,25 +307,36 @@ else
   fail "Wrapper no encontrado o no ejecutable: $WRAPPER"
 fi
 
-# ── 9. Loader glibc y DNS ─────────────────────────────────────────────────────
-if [[ -f "$LOADER" ]]; then
-  pass "Loader glibc presente: $LOADER"
-else
-  fail "Loader glibc NO encontrado. Ejecutá: pkg install glibc-repo glibc-runner"
-fi
+# ── 9. Loader glibc y DNS (solo modo overlay; ejecución directa no lo usa) ─────
+# EXEC_DIRECT=true: el binario corre nativo (estático musl o bionic/Android),
+# sin loader glibc ni resolv.conf de glibc. Fuente de verdad: el .conf actual
+# con fallback al manifest (instalaciones previas no lo registran).
+EXEC_DIRECT_CONF="${EXEC_DIRECT:-false}"
+M_EXEC_DIRECT=$(manifest_get exec_direct "$MANIFEST")
+_EXEC_DIRECT="${M_EXEC_DIRECT:-$EXEC_DIRECT_CONF}"
 
-if [[ -f "$GLIBC_PREFIX/etc/nsswitch.conf" ]]; then
-  pass "nsswitch.conf presente (resolución DNS de glibc)"
+if [[ "$_EXEC_DIRECT" == "true" ]]; then
+  pass "Ejecución directa (EXEC_DIRECT): loader glibc y DNS de glibc N/A"
 else
-  warn "Falta $GLIBC_PREFIX/etc/nsswitch.conf; puede fallar la resolución DNS"
-  note "Solución: printf 'hosts: files dns\n' > $GLIBC_PREFIX/etc/nsswitch.conf"
-fi
+  if [[ -f "$LOADER" ]]; then
+    pass "Loader glibc presente: $LOADER"
+  else
+    fail "Loader glibc NO encontrado. Ejecutá: pkg install glibc-repo glibc-runner"
+  fi
 
-if [[ -s "$GLIBC_PREFIX/etc/resolv.conf" ]]; then
-  pass "resolv.conf de glibc presente (servidores DNS)"
-else
-  warn "Falta $GLIBC_PREFIX/etc/resolv.conf; puede fallar la resolución DNS de glibc"
-  note "Se regenera automáticamente al reinstalar: bash install.sh $APP_NAME -r"
+  if [[ -f "$GLIBC_PREFIX/etc/nsswitch.conf" ]]; then
+    pass "nsswitch.conf presente (resolución DNS de glibc)"
+  else
+    warn "Falta $GLIBC_PREFIX/etc/nsswitch.conf; puede fallar la resolución DNS"
+    note "Solución: printf 'hosts: files dns\n' > $GLIBC_PREFIX/etc/nsswitch.conf"
+  fi
+
+  if [[ -s "$GLIBC_PREFIX/etc/resolv.conf" ]]; then
+    pass "resolv.conf de glibc presente (servidores DNS)"
+  else
+    warn "Falta $GLIBC_PREFIX/etc/resolv.conf; puede fallar la resolución DNS de glibc"
+    note "Se regenera automáticamente al reinstalar: bash install.sh $APP_NAME -r"
+  fi
 fi
 
 # ── 10. Ejecución real ────────────────────────────────────────────────────────

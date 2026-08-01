@@ -45,6 +45,7 @@ Android (kernel aarch64 + seccomp)
 | **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | SHA256 del asset vía GitHub API + [Attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) (Sigstore) | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
 | **`agy`** (Antigravity CLI) | [Google Cloud Storage](https://antigravity.google) (manifest JSON) | SHA512 dinámico del manifest | Parche adaptativo VA39 + `faccessat2`, shim `libc.so`, DNS cgo |
 | **`kiro-cli`** (Kiro CLI) | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 del `manifest.json` oficial | Última versión automática del manifest |
+| **`codex`** (OpenAI Codex) | [GitHub Releases](https://github.com/openai/codex) — **build propio en CI** desde el código oficial (Apache-2.0) | SHA256 del asset vía GitHub API + attestation SLSA del workflow | Binario nativo bionic (arm64, sin proot) o musl verificado (amd64); `EXEC_DIRECT` |
 
 ## Requisitos
 
@@ -92,6 +93,21 @@ bash install.sh kiro-cli -r                 # reinstalación forzada
 bash install.sh kiro-cli -u                 # desinstalar
 ```
 
+### codex (OpenAI Codex)
+
+```bash
+bash install.sh codex                    # última versión (release propio generado por CI)
+bash install.sh codex -v 0.146.0         # versión específica
+bash install.sh codex --update           # actualizar a la última versión
+bash install.sh codex -u                 # desinstalar
+```
+
+**Por qué no se instala el binario oficial de OpenAI**: los assets Linux oficiales son **musl estáticos**, que en Android no resuelven DNS (leen `/etc/resolv.conf` de la raíz del sistema, inexistente sin proot) — el login y la API fallan. Por eso el workflow [build-codex.yml](.github/workflows/build-codex.yml) compila el CLI en CI desde el código oficial (`openai/codex`, Apache-2.0) para **bionic nativo** (`aarch64-linux-android`, NDK API 29): DNS (netd) y TLS (rustls/webpki) funcionan sin proot. En `amd64` (host Linux) se re-empaqueta el asset oficial musl con su digest SHA256 verificado contra la API upstream (fail-closed).
+
+- **Escalable**: el CI detecta cada release nuevo de OpenAI (cron diario) y publica el asset propio con digest y attestation. `--update` funciona sin tocar nada. Si un release upstream rompe el build bionic, no se publica y la última versión buena sigue instalable.
+- **Sandbox**: codex usa `landlock` por defecto. Si tu kernel Android no lo soporta, configurá `sandbox_mode = "off"` en `~/.codex/config.toml`.
+- **Ripgrep**: si codex reporta la falta de `rg`, instalalo con `pkg install ripgrep` (se busca por PATH, como los shims de agy).
+
 #### TUI en Termux: fix del runtime bun
 
 El TUI de `kiro-cli` (sin argumentos) delega el render en un runtime [bun](https://bun.sh) que el cliente descarga a `~/.local/share/kiro-cli/` (`bun` + `tui.js`). El build que descarga es glibc y no puede ejecutarse en Termux (interpreter del sistema inexistente): el TUI muestra `Launching...` y falla con `error: No such file or directory (os error 2)`.
@@ -137,6 +153,7 @@ bash install.sh <tool> --update
 - **opencode**: última release de GitHub; digest SHA256 verificado contra la GitHub API (el pin de `sha256.txt` gana si existe).
 - **agy**: última versión del manifest de Google. El parche adaptativo (`registry/patch_va39.py`) resuelve los cambios de estructura por pattern-matching de instrucciones ARM64, y el hook ejecuta un smoke test (`--version`) post-parche: si algo no se puede resolver, la instalación aborta y se restaura la versión anterior.
 - **kiro-cli**: última versión del `manifest.json` del CDN de Amazon.
+- **codex**: última versión publicada por el build propio de CI (repo de este proyecto, `build-codex.yml`); digest + attestation del workflow propio.
 
 > [!NOTE]
 > Ninguna herramienta requiere tocar `sha256.txt` para el flujo default: la versión y el checksum se resuelven automáticamente y fail-closed desde la fuente del vendor. El archivo queda como capa opcional de pinning.

@@ -137,6 +137,10 @@ RELEASE_SOURCE=""; ARCHIVE_TEMPLATE=""; MANIFEST_URL=""
 MANIFEST_KEY_VERSION="version"; MANIFEST_KEY_URL="url"; MANIFEST_KEY_CHECKSUM="sha512"
 CHECKSUM_ALGO="sha256"; CHECKSUM_SOURCE="hashfile"
 ATTEST_PREDICATE=""; ELF_NAME=""; NEEDS_PATCHELF=true
+# Ejecución directa sin overlay glibc: el binario corre nativo (ELF estático
+# musl o bionic/Android). El wrapper hace `exec "$BIN"` sin loader glibc.
+# Requiere NEEDS_PATCHELF=false (se valida al cargar el .conf).
+EXEC_DIRECT=false
 # Overrides de nombre de arquitectura para templates de descarga.
 # Cada herramienta puede definir su propio mapping si los assets usan nombres
 # distintos al canónico de Termux (arm64/amd64).
@@ -173,6 +177,14 @@ if [[ -n "$EXTRA_BINS" ]]; then
         exit 1 ;;
     esac
   done
+fi
+
+# Validar EXEC_DIRECT (fail-fast en el .conf): ejecución directa es incompatible
+# con patchelf — el overlay glibc no aplica a binarios nativos (estáticos musl
+# o bionic/Android), y el wrapper elegiría mal el modo de ejecución.
+if [[ "$EXEC_DIRECT" == true && "$NEEDS_PATCHELF" == true ]]; then
+  err "$CONF: EXEC_DIRECT=true requiere NEEDS_PATCHELF=false (el binario corre nativo, sin overlay glibc)."
+  exit 1
 fi
 
 # Validar campos específicos según el tipo de release (fail-fast en el .conf)
@@ -307,6 +319,23 @@ _remove_extra_wrappers() {
   done
 }
 
+# Elimina los shims registrados por el pre_wrapper_hook en
+# $LIBEXEC_DIR/shims.txt (una ruta por línea). Guardia: solo borra archivos
+# que sigan siendo nuestros shims — un binario real que el usuario haya
+# instalado después con el mismo nombre no se toca.
+_remove_registered_shims() {
+  local shims_file="$LIBEXEC_DIR/shims.txt"
+  [[ -f "$shims_file" ]] || return 0
+  local name shim
+  while IFS= read -r name; do
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    shim="$PREFIX/bin/$name"
+    if [[ -f "$shim" ]] && grep -qE 'termux-(open-url|clipboard-set)' "$shim" 2>/dev/null; then
+      rm -f "$shim"
+    fi
+  done < "$shims_file"
+}
+
 checksum_of() {
   case "$CHECKSUM_ALGO" in
     sha256) sha256sum "$1" | cut -d' ' -f1 ;;
@@ -376,6 +405,7 @@ uninstall() {
   # Derivar los extras del manifest ANTES de borrar libexec (donde vive).
   local extras
   extras=$(installed_extra_bins)
+  _remove_registered_shims
   rm -rf "$LIBEXEC_DIR"
   rm -f "$WRAPPER"
   _remove_extra_wrappers "$extras"
@@ -823,7 +853,7 @@ _write_wrapper() {
   fi
 
   local exec_cmd="exec \"\$BIN\" \"\$@\""
-  if [[ "$NEEDS_PATCHELF" == false ]]; then
+  if [[ "$NEEDS_PATCHELF" == false && "$EXEC_DIRECT" != true ]]; then
     exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$BIN\" \"\$@\""
   fi
 
@@ -897,6 +927,7 @@ tarball_checksum=$TARBALL_CHECKSUM
 binary_checksum_original=$BIN_CHECKSUM_ORIG
 binary_checksum_patched=${BIN_CHECKSUM_PATCHED:-${BIN_CHECKSUM_ORIG}}
 needs_patchelf=$NEEDS_PATCHELF
+exec_direct=${EXEC_DIRECT:-false}
 interpreter=${LOADER}
 rpath=${RPATH}
 attestation=$ATTEST_STATUS

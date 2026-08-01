@@ -18,7 +18,7 @@ El workflow `.github/workflows/update-hashes.yml` actualiza `sha256.txt` vía CI
 
 ## Checksums (fail-closed, sin mantenimiento manual)
 
-La versión y el checksum default se resuelven automáticamente: digest del asset desde la GitHub API (`CHECKSUM_SOURCE=release_digest`, opencode) o manifest JSON del vendor (`manifest`, agy y kiro-cli). `sha256.txt` es **pinning opcional**: si hay entrada para el tag instalado, el pin del repo gana. Nunca instalar sin hash verificado.
+La versión y el checksum default se resuelven automáticamente: digest del asset desde la GitHub API (`CHECKSUM_SOURCE=release_digest`, opencode y codex) o manifest JSON del vendor (`manifest`, agy y kiro-cli). `sha256.txt` es **pinning opcional**: si hay entrada para el tag instalado, el pin del repo gana. Nunca instalar sin hash verificado.
 
 ## Design principles
 
@@ -48,6 +48,15 @@ Si la respuesta es sí, no tocar `install.sh`.
 | Agregar/quitar pasos de verificación | `verify.sh` |
 | Actualizar hash de un release existente | `sha256.txt` |
 | Automatizar actualización de hashes en CI | `.github/workflows/update-hashes.yml` |
+| Build propio de un tool (sin builds compatibles con Android) | `.github/workflows/build-codex.yml` (patrón codex) |
+
+## EXEC_DIRECT (binarios nativos sin overlay glibc)
+
+`EXEC_DIRECT=true` (requiere `NEEDS_PATCHELF=false`) marca un binario que corre **nativo** sin el overlay glibc de Termux: ELF estático (musl) o compilado bionic/Android. El wrapper hace `exec "$BIN" "$@"` (sin loader glibc) y `verify.sh` omite los checks de loader/interpreter/rpath. Casos de uso: `codex` (arm64 bionic build propio, amd64 musl verificado).
+
+## Patrón "build en CI" (codex)
+
+Si un vendor solo publica builds incompatibles con Android (ej. musl estático sin DNS en Android), no se instala ese binario: se compila en CI desde el código oficial (pin por tag + commit SHA, `Cargo.lock` del repo upstream) y se publica un release propio `vX.Y.Z` con digest + attestation del workflow. El instalador queda igual (`RELEASE_SOURCE=github` + `release_digest` apuntando al repo propio) y `--update` sobrevive a cada release upstream: el cron del workflow rebuilda solo cuando hay versión nueva. Si el build falla, no se publica (fail-closed: la última buena sigue instalable). Ver `.github/workflows/build-codex.yml`.
 
 ## Invariants (nunca romper)
 

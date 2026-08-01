@@ -1,0 +1,297 @@
+name: Build codex (bionic arm64 + musl amd64 verificado)
+
+# Pipeline de compilación de OpenAI Codex CLI para Termux, sin depender de
+# binarios de terceros:
+#
+#   arm64 (Android/Termux): build propio desde el código oficial
+#       (openai/codex, Apache-2.0) con target aarch64-linux-android (bionic,
+#       NDK API 29). Resuelve los dos problemas del asset oficial musl en
+#       Android: DNS (bionic → netd) y arranque nativo sin proot.
+#   amd64 (host Linux): re-empaque del asset oficial musl VERIFICADO contra el
+#       digest SHA256 de la API de openai/codex (fail-closed: si no coincide,
+#       no se publica).
+#
+# Resultado: release propio con tags estándar vX.Y.Z en este repo. El
+# instalador (registry/codex.conf, RELEASE_SOURCE=github + release_digest)
+# resuelve versión y checksum automáticamente → `--update` sobrevive a cada
+# release nuevo de OpenAI sin tocar nada.
+#
+# Idempotente: si vX.Y.Z ya está publicado, el job de chequeo termina sin
+# trabajo. Si el build falla, no se publica nada (fail-closed: la última
+# versión buena sigue instalable).
+#
+# Seguridad: valores del upstream validados por charset y normalizados a
+# commit SHA inmutable antes de usarse; actions pineadas por SHA; NDK
+# verificado contra el checksum oficial de Google; permisos mínimos por job.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión específica de OpenAI Codex (ej: 0.146.0). Vacío = última.'
+        required: false
+        default: ''
+  schedule:
+    - cron: '17 4 * * *'   # diario 04:17 UTC
+
+env:
+  UPSTREAM_REPO: openai/codex
+  # Checksum MD5 oficial de Google para android-ndk-r26d-linux.zip
+  # (fuente: https://dl.google.com/android/repository/repository2-1.xml,
+  # package "ndk;26.3.11579264"). Google no publica SHA-256 para estos zips.
+  NDK_VER: r26d
+  NDK_URL: https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+  NDK_MD5: fcdad75a765a46a9cf6560353f480db251d14765
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+    steps:
+      - name: Resolver versión upstream y estado del release propio
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Tag upstream: el release pedido, o el latest (tag_name "rust-vX.Y.Z")
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            RELEASE_JSON=$(gh api "repos/${UPSTREAM_REPO}/releases/tags/rust-v${INPUT_VERSION}")
+          else
+            RELEASE_JSON=$(gh api "repos/${UPSTREAM_REPO}/releases/latest")
+          fi
+
+          UPSTREAM_TAG=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name')
+          # Fail-closed: charset estricto de git ref (evita inyección en shell).
+          [[ "$UPSTREAM_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+            echo "ERROR: tag upstream inválido: '$UPSTREAM_TAG'"; exit 1; }
+
+          VERSION=$(printf '%s' "$UPSTREAM_TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          [[ -n "$VERSION" ]] || { echo "ERROR: versión no extraída de '$UPSTREAM_TAG'"; exit 1; }
+
+          # target_commitish de la API suele ser un nombre de rama ("main"), no
+          # un SHA. Resolver el commit inmutable del tag (puede ser anotado).
+          SHA=$(printf '%s' "$RELEASE_JSON" | jq -r '.target_commitish // empty')
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            REF_JSON=$(gh api "repos/${UPSTREAM_REPO}/git/ref/tags/${UPSTREAM_TAG}")
+            SHA=$(printf '%s' "$REF_JSON" | jq -r '.object.sha')
+            if [[ "$(printf '%s' "$REF_JSON" | jq -r '.object.type')" == "tag" ]]; then
+              SHA=$(gh api "repos/${UPSTREAM_REPO}/git/tags/${SHA}" --jq '.object.sha')
+            fi
+          fi
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "ERROR: SHA del commit no resuelto para $UPSTREAM_TAG"; exit 1; }
+
+          echo "version=$VERSION"           >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$SHA"          >> "$GITHUB_OUTPUT"
+
+          # Idempotencia: si el release propio ya existe, no rebuildear.
+          if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v${VERSION} ya publicado en $GITHUB_REPOSITORY; nada que hacer."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-arm64:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout código oficial de OpenAI (pin por commit SHA)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.check.outputs.upstream_sha }}
+          path: upstream
+
+      - name: Cache cargo (registro + target)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            upstream/codex-rs/target
+          key: codex-rs-${{ runner.os }}-${{ hashFiles('upstream/codex-rs/Cargo.lock') }}
+          restore-keys: |
+            codex-rs-${{ runner.os }}-
+
+      - name: Toolchain Rust (rust-toolchain.toml del repo pinnea la versión)
+        working-directory: upstream/codex-rs
+        run: |
+          rustup target add aarch64-linux-android
+          rustc --version && rustup target list --installed
+
+      - name: Descargar NDK oficial de Google y verificar checksum (fail-closed)
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/ndk.zip" "$NDK_URL"
+          GOT=$(md5sum "$RUNNER_TEMP/ndk.zip" | cut -d' ' -f1)
+          if [[ "$GOT" != "$NDK_MD5" ]]; then
+            echo "ERROR: checksum del NDK no coincide: esperado $NDK_MD5, obtenido $GOT"
+            exit 1
+          fi
+          echo "Checksum del NDK verificado: $GOT"
+          unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP"
+          echo "ANDROID_NDK_HOME=$RUNNER_TEMP/android-ndk-$NDK_VER" >> "$GITHUB_ENV"
+
+      - name: Compilar codex-cli para aarch64-linux-android (bionic)
+        working-directory: upstream/codex-rs
+        env:
+          ANDROID_NDK_HOME: ${{ runner.temp }}/android-ndk-r26d
+        run: |
+          set -euo pipefail
+          NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$NDK_TC/aarch64-linux-android29-clang"
+          export AR_aarch64_linux_android="$NDK_TC/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_TC/aarch64-linux-android29-clang"
+          # --locked: falla si el Cargo.lock del repo upstream necesita cambios
+          # (dependencias reproducibles entre corridas).
+          cargo build --locked --release -p codex-cli --target aarch64-linux-android
+
+      - name: Instalar patchelf (verificación de RUNPATH)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf
+
+      - name: Empaquetar binario + libc++_shared.so (RUNPATH $ORIGIN)
+        run: |
+          set -euo pipefail
+          BIN=upstream/codex-rs/target/aarch64-linux-android/release/codex
+          [[ -f "$BIN" ]] || { echo "ERROR: binario no generado"; exit 1; }
+
+          # Fail-closed: debe ser ELF bionic (dinámico) de aarch64.
+          file "$BIN" | grep -qE 'ELF 64-bit.*ARM aarch64' || { file "$BIN"; exit 1; }
+
+          LIB="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          [[ -f "$LIB" ]] || { echo "ERROR: libc++_shared.so no encontrado en NDK"; exit 1; }
+
+          mkdir -p stage
+          cp "$BIN" stage/codex
+          cp "$LIB" stage/libc++_shared.so
+          # RUNPATH=$ORIGIN: el loader bionic encuentra libc++_shared.so junto al binario.
+          patchelf --set-rpath '$ORIGIN' stage/codex
+          patchelf --print-rpath stage/codex | grep -q '\$ORIGIN' || { echo "ERROR: rpath no aplicado"; exit 1; }
+          file stage/codex
+          ls -la stage/codex stage/libc++_shared.so
+
+          tar -C stage -czf codex-arm64.tar.gz codex libc++_shared.so
+          sha256sum codex-arm64.tar.gz
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-arm64
+          path: codex-arm64.tar.gz
+          if-no-files-found: error
+
+  build-amd64:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      UPSTREAM_ASSET: codex-x86_64-unknown-linux-musl.tar.gz
+      UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
+    steps:
+      - name: Descargar asset oficial musl y verificar digest (fail-closed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Digest esperado desde la API del release upstream (sha256 del asset).
+          EXPECTED=$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${UPSTREAM_TAG}" \
+            --jq ".assets[] | select(.name == \"$UPSTREAM_ASSET\") | .digest" | sed 's/^sha256://')
+          [[ -n "$EXPECTED" ]] || { echo "ERROR: asset $UPSTREAM_ASSET no encontrado upstream"; exit 1; }
+
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$UPSTREAM_ASSET" \
+            "https://github.com/${UPSTREAM_REPO}/releases/download/${UPSTREAM_TAG}/$UPSTREAM_ASSET"
+
+          GOT=$(sha256sum "$UPSTREAM_ASSET" | cut -d' ' -f1)
+          if [[ "$GOT" != "$EXPECTED" ]]; then
+            echo "ERROR: digest mismatch del asset oficial: esperado $EXPECTED, obtenido $GOT"
+            exit 1
+          fi
+          echo "Digest verificado: $GOT"
+
+      - name: Re-empaquetar como codex-amd64.tar.gz
+        run: |
+          set -euo pipefail
+          tar -xzf "$UPSTREAM_ASSET"
+          INNER=$(find . -maxdepth 1 -type f -name 'codex-*' ! -name '*.tar.gz' | head -1)
+          [[ -n "$INNER" ]] || { echo "ERROR: binario no encontrado en el tarball"; exit 1; }
+          file "$INNER" | grep -qE 'ELF 64-bit.*x86-64' || { file "$INNER"; exit 1; }
+          mkdir -p stage
+          mv "$INNER" stage/codex
+          tar -C stage -czf codex-amd64.tar.gz codex
+          sha256sum codex-amd64.tar.gz
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-amd64
+          path: codex-amd64.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [build-arm64, build-amd64]
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
+      UPSTREAM_SHA: ${{ needs.check.outputs.upstream_sha }}
+    steps:
+      - name: Descargar assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: codex-*
+          path: assets
+          merge-multiple: true
+
+      - name: Publicar release propio
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd assets
+          ls -la
+          NOTES_FILE="$RUNNER_TEMP/codex-notes.md"
+          # printf evita heredocs con indentación YAML (quedaría como bloque markdown).
+          printf '%s\n' \
+            "OpenAI Codex CLI v${VERSION} — build propio para Termux." \
+            "" \
+            "- **codex-arm64.tar.gz**: compilado en este workflow desde el código oficial (openai/codex@${UPSTREAM_TAG}, commit ${UPSTREAM_SHA}) con target aarch64-linux-android (bionic, NDK API 29). DNS y TLS nativos; sin proot." \
+            "- **codex-amd64.tar.gz**: asset oficial musl de OpenAI, digest SHA256 verificado contra la API upstream (fail-closed). Para host Linux." \
+            "" \
+            "Instalación: \`bash install.sh codex\` (repo Eybad/ai-cli-termux)." \
+            > "$NOTES_FILE"
+          gh release create "v${VERSION}" \
+            codex-arm64.tar.gz codex-amd64.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "OpenAI Codex v${VERSION}" \
+            --notes-file "$NOTES_FILE"
+          sha256sum codex-arm64.tar.gz codex-amd64.tar.gz
+
+      - name: Attestation de provenance (SLSA) de ambos assets
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: |
+            assets/codex-arm64.tar.gz
+            assets/codex-amd64.tar.gz
