@@ -118,6 +118,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      RUSTUP_TOOLCHAIN: '1.96.0'
     steps:
       - name: Checkout código oficial de OpenAI (pin por commit SHA)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -142,10 +144,8 @@ jobs:
         # regenerado (desincronizado en el tag upstream) resuelve rama-* 0.3.0,
         # que requiere rustc 1.96.0. Nuestro build controla el toolchain.
         working-directory: upstream/codex-rs
-        env:
-          RUSTUP_TOOLCHAIN: '1.96.0'
         run: |
-          rustup toolchain install 1.96.0 --profile minimal --target aarch64-linux-android
+          rustup toolchain install ${{ env.RUSTUP_TOOLCHAIN }} --profile minimal --target aarch64-linux-android
           rustc --version && rustup target list --installed
 
       - name: Descargar NDK oficial de Google y verificar checksum (fail-closed)
@@ -168,18 +168,19 @@ jobs:
       - name: Parchear openssl-sys (vendored) para bionic
         # El crate raíz declara openssl-sys = "*" (native-tls) y bionic no trae
         # libssl: sin parche, el cross-build no encuentra OpenSSL para el target.
-        # Con vendored, openssl-src compila OpenSSL estático usando el NDK
-        # (ANDROID_NDK_HOME ya exportado), como hace el release musl oficial.
+        # Con vendored en workspace y en cli/Cargo.toml, openssl-src compila OpenSSL
+        # estático usando el NDK (ANDROID_NDK_HOME ya exportado).
         working-directory: upstream/codex-rs
         run: |
           set -euo pipefail
-          cargo add openssl-sys --features vendored -p codex-cli
+          sed -i 's|^openssl-sys = "\*"|openssl-sys = { version = "*", features = ["vendored"] }|' Cargo.toml
+          echo 'openssl-sys = { workspace = true, features = ["vendored"] }' >> cli/Cargo.toml
+          grep -n 'openssl-sys' Cargo.toml cli/Cargo.toml
 
       - name: Compilar codex-cli para aarch64-linux-android (bionic)
         working-directory: upstream/codex-rs
         env:
-          ANDROID_NDK_HOME: ${{ runner.temp }}/android-ndk-r26d
-          RUSTUP_TOOLCHAIN: '1.96.0'
+          ANDROID_NDK_HOME: ${{ runner.temp }}/android-ndk-${{ env.NDK_VER }}
         run: |
           set -euo pipefail
           NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
