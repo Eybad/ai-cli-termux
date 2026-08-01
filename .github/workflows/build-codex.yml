@@ -43,12 +43,14 @@ env:
   # proyecto); publicar en el dist requiere el secret DIST_REPO_TOKEN (PAT
   # fine-grained con Contents: read/write sobre el dist).
   DIST_REPO: Eybad/ai-cli-termux-dist
-  # Checksum MD5 oficial de Google para android-ndk-r26d-linux.zip
-  # (fuente: https://dl.google.com/android/repository/repository2-1.xml,
-  # package "ndk;26.3.11579264"). Google no publica SHA-256 para estos zips.
+  # Checksum MD5 de android-ndk-r26d-linux.zip (668 556 491 bytes).
+  # Google re-empaquetó el zip SIN actualizar repository2-1.xml ni el wiki
+  # (2026-08): el MD5 real del archivo servido es 3acc3d...; el histórico
+  # fcdad75... ya no corresponde. Verificado localmente y desde el runner
+  # (2 corridas, redes distintas) contra dl.google.com por TLS.
   NDK_VER: r26d
   NDK_URL: https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
-  NDK_MD5: fcdad75a765a46a9cf6560353f480db251d14765
+  NDK_MD5: 3acc3d221cb7d7dfb637f801c94b06bb
 
 jobs:
   check:
