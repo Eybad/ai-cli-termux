@@ -353,7 +353,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [build-arm64, build-amd64]
+    needs: [check, build-arm64, build-amd64]
     if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
