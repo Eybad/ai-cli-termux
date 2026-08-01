@@ -165,6 +165,17 @@ jobs:
           unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP"
           echo "ANDROID_NDK_HOME=$RUNNER_TEMP/android-ndk-$NDK_VER" >> "$GITHUB_ENV"
 
+      - name: Parchear openssl-sys (vendored) para bionic
+        # El crate raíz declara openssl-sys = "*" (native-tls) y bionic no trae
+        # libssl: sin parche, el cross-build no encuentra OpenSSL para el target.
+        # Con vendored, openssl-src compila OpenSSL estático usando el NDK
+        # (ANDROID_NDK_HOME ya exportado), como hace el release musl oficial.
+        working-directory: upstream/codex-rs
+        run: |
+          set -euo pipefail
+          sed -i 's|^openssl-sys = "\*"|openssl-sys = { version = "*", features = ["vendored"] }|' Cargo.toml
+          grep -n 'openssl-sys' Cargo.toml | head -2
+
       - name: Compilar codex-cli para aarch64-linux-android (bionic)
         working-directory: upstream/codex-rs
         env:
