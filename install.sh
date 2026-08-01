@@ -136,7 +136,7 @@ APP_NAME=""; DISPLAY_NAME=""; REPO=""
 RELEASE_SOURCE=""; ARCHIVE_TEMPLATE=""; MANIFEST_URL=""
 MANIFEST_KEY_VERSION="version"; MANIFEST_KEY_URL="url"; MANIFEST_KEY_CHECKSUM="sha512"
 CHECKSUM_ALGO="sha256"; CHECKSUM_SOURCE="hashfile"
-ATTEST_PREDICATE=""; ELF_NAME=""; NEEDS_PATCHELF=true
+ATTEST_PREDICATE=""; ATTEST_REPO=""; ELF_NAME=""; NEEDS_PATCHELF=true
 # Ejecución directa sin overlay glibc: el binario corre nativo (ELF estático
 # musl o bionic/Android). El wrapper hace `exec "$BIN"` sin loader glibc.
 # Requiere NEEDS_PATCHELF=false (se valida al cargar el .conf).
@@ -439,6 +439,33 @@ github_release_json() {
   esac
 }
 
+# Última versión instalable: el release más reciente cuyo asset coincida con
+# el nombre esperado (ARCHIVE_TEMPLATE expandido). En los repos de distribución
+# (p. ej. ai-cli-termux-dist) conviven releases de varios tools y releases del
+# proyecto sin assets; el "latest" de GitHub no distingue. Devuelve el JSON
+# completo del release elegido para que el digest del asset sea el mismo objeto.
+github_latest_release_with_asset() {
+  local asset_name="$1"
+  local body code auth_header=()
+  local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer $token")
+  body=$(mktemp)
+  code=$(curl -sS --proto '=https' --tlsv1.2 -L \
+           --connect-timeout 10 --max-time 300 \
+           -H 'Accept: application/vnd.github+json' \
+           "${auth_header[@]}" \
+           -o "$body" -w '%{http_code}' \
+           "https://api.github.com/repos/$REPO/releases?per_page=100" 2>/dev/null || echo 000)
+  case "$code" in
+    200) jq -c --arg a "$asset_name" \
+            '[.[] | select(([.assets[]?.name] | index($a)) != null)][0] // empty' "$body"
+         rm -f "$body" ;;
+    403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$body"; exit 1 ;;
+    000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$body"; exit 1 ;;
+    *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$body"; exit 1 ;;
+  esac
+}
+
 resolve_version() {
   case "$RELEASE_SOURCE" in
 
@@ -447,7 +474,16 @@ resolve_version() {
         VERSION=$(normalize_version "$REQUESTED_VERSION")
         [[ -n "$VERSION" ]] || { err "Versión inválida: '$REQUESTED_VERSION'"; exit 2; }
       else
-        RELEASE_JSON=$(github_release_json "latest")
+        # Última versión instalable = release más reciente con el asset esperado.
+        # Fail-closed: si ningún release lo tiene, error claro (no instalar mal).
+        local asset_name
+        asset_name=$(expand_template "$ARCHIVE_TEMPLATE")
+        RELEASE_JSON=$(github_latest_release_with_asset "$asset_name")
+        if [[ -z "$RELEASE_JSON" ]]; then
+          err "Ningún release de $REPO contiene el asset '$asset_name'."
+          err "Usá -v <version> para instalar una versión específica."
+          exit 1
+        fi
         local raw
         raw=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
         VERSION=$(normalize_version "$raw")
@@ -700,7 +736,7 @@ verify_attestation() {
   info "Verificando release attestation de GitHub..."
   local out
   if out=$(gh attestation verify "$TMP_FILE" \
-             --repo "$REPO" \
+             --repo "${ATTEST_REPO:-$REPO}" \
              --predicate-type "$ATTEST_PREDICATE" 2>&1); then
     ATTEST_STATUS="verificada"
     info "Attestation válida: tarball publicado por $REPO."

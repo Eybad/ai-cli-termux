@@ -11,8 +11,10 @@ name: Build codex (bionic arm64 + musl amd64 verificado)
 #       digest SHA256 de la API de openai/codex (fail-closed: si no coincide,
 #       no se publica).
 #
-# Resultado: release propio con tags estándar vX.Y.Z en este repo. El
-# instalador (registry/codex.conf, RELEASE_SOURCE=github + release_digest)
+# Resultado: release de distribución con tags estándar vX.Y.Z en el repo de
+# distribución Eybad/ai-cli-termux-dist (el workflow corre en este repo, el
+# publish va al repo de dist con un PAT fine-grained — secret DIST_REPO_TOKEN).
+# El instalador (registry/codex.conf, RELEASE_SOURCE=github + release_digest)
 # resuelve versión y checksum automáticamente → `--update` sobrevive a cada
 # release nuevo de OpenAI sin tocar nada.
 #
@@ -36,6 +38,11 @@ on:
 
 env:
   UPSTREAM_REPO: openai/codex
+  # Repo de distribución: solo releases de binarios compilados en CI.
+  # El GITHUB_TOKEN del workflow solo tiene permisos sobre este repo (el del
+  # proyecto); publicar en el dist requiere el secret DIST_REPO_TOKEN (PAT
+  # fine-grained con Contents: read/write sobre el dist).
+  DIST_REPO: Eybad/ai-cli-termux-dist
   # Checksum MD5 oficial de Google para android-ndk-r26d-linux.zip
   # (fuente: https://dl.google.com/android/repository/repository2-1.xml,
   # package "ndk;26.3.11579264"). Google no publica SHA-256 para estos zips.
@@ -94,9 +101,10 @@ jobs:
           echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=$SHA"          >> "$GITHUB_OUTPUT"
 
-          # Idempotencia: si el release propio ya existe, no rebuildear.
-          if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "v${VERSION} ya publicado en $GITHUB_REPOSITORY; nada que hacer."
+          # Idempotencia: si el release de distribución ya existe, no rebuildear.
+          # Lectura de repo público: no requiere el PAT del dist.
+          if gh release view "v${VERSION}" --repo "$DIST_REPO" >/dev/null 2>&1; then
+            echo "v${VERSION} ya publicado en $DIST_REPO; nada que hacer."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
             echo "should_build=true" >> "$GITHUB_OUTPUT"
@@ -265,9 +273,11 @@ jobs:
           path: assets
           merge-multiple: true
 
-      - name: Publicar release propio
+      - name: Publicar release de distribución (repo ai-cli-termux-dist)
+        # GH_TOKEN del workflow no puede escribir en otro repo; se usa el PAT
+        # fine-grained del dist (secret DIST_REPO_TOKEN, Contents: read/write).
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
         run: |
           set -euo pipefail
           cd assets
@@ -284,7 +294,7 @@ jobs:
             > "$NOTES_FILE"
           gh release create "v${VERSION}" \
             codex-arm64.tar.gz codex-amd64.tar.gz \
-            --repo "$GITHUB_REPOSITORY" \
+            --repo "$DIST_REPO" \
             --title "OpenAI Codex v${VERSION}" \
             --notes-file "$NOTES_FILE"
           sha256sum codex-arm64.tar.gz codex-amd64.tar.gz
