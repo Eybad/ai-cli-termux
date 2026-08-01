@@ -173,8 +173,7 @@ jobs:
         working-directory: upstream/codex-rs
         run: |
           set -euo pipefail
-          sed -i 's|^openssl-sys = "\*"|openssl-sys = { version = "*", features = ["vendored"] }|' Cargo.toml
-          grep -n 'openssl-sys' Cargo.toml | head -2
+          cargo add openssl-sys --features vendored -p codex-cli
 
       - name: Compilar codex-cli para aarch64-linux-android (bionic)
         working-directory: upstream/codex-rs
