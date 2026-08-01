@@ -177,6 +177,21 @@ jobs:
           cargo fetch --manifest-path upstream/codex-rs/Cargo.toml
           find ~/.cargo/registry/src/ -path '*/v8-*/gen' -exec sh -c 'cp "$1/src_binding_release_aarch64-unknown-linux-gnu.rs" "$1/src_binding_release_aarch64-linux-android.rs"' _ {} \;
 
+      - name: Crear shim bionic_compat para símbolos glibc de v8
+        run: |
+          set -euo pipefail
+          NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          printf '%s\n' \
+            '#include <stdio.h>' \
+            '#include <stdarg.h>' \
+            'void *__libc_stack_end = 0;' \
+            'char **backtrace_symbols(void *const *buffer, int size) { return 0; }' \
+            'void backtrace_symbols_fd(void *const *buffer, int size, int fd) {}' \
+            'int __vfprintf_chk(FILE *stream, int flag, const char *format, va_list ap) { return vfprintf(stream, format, ap); }' \
+            > "$RUNNER_TEMP/bionic_compat.c"
+          "$NDK_TC/aarch64-linux-android29-clang" -c "$RUNNER_TEMP/bionic_compat.c" -o "$RUNNER_TEMP/bionic_compat.o"
+          "$NDK_TC/llvm-ar" rcs "$RUNNER_TEMP/libbionic_compat.a" "$RUNNER_TEMP/bionic_compat.o"
+
       - name: Parchear openssl-sys (vendored) para bionic
         # El crate raíz declara openssl-sys = "*" (native-tls) y bionic no trae
         # libssl: sin parche, el cross-build no encuentra OpenSSL para el target.
@@ -202,6 +217,7 @@ jobs:
           export RANLIB="$NDK_TC/llvm-ranlib"
           export PATH="$NDK_TC:$PATH"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_TC/aarch64-linux-android29-clang"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L native=${{ runner.temp }} -l static=bionic_compat"
           # El Cargo.lock del tag upstream a veces está desincronizado con su
           # Cargo.toml (mantenimiento de openai): actualizar solo openssl-sys para que
           # openssl-src quede registrado sin tocar versiones probadas de otras deps (ej. rama-*).
