@@ -144,10 +144,14 @@ jobs:
       - name: Descargar NDK oficial de Google y verificar checksum (fail-closed)
         run: |
           set -euo pipefail
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/ndk.zip" "$NDK_URL"
+          # -w: si el checksum no coincide, el tamaño descargado ayuda a
+          # distinguir una descarga truncada de un archivo distinto.
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/ndk.zip" "$NDK_URL" \
+            -w 'Descargados: %{size_download} bytes\n'
           GOT=$(md5sum "$RUNNER_TEMP/ndk.zip" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$RUNNER_TEMP/ndk.zip")
           if [[ "$GOT" != "$NDK_MD5" ]]; then
-            echo "ERROR: checksum del NDK no coincide: esperado $NDK_MD5, obtenido $GOT"
+            echo "ERROR: checksum del NDK no coincide: esperado $NDK_MD5, obtenido $GOT (tamaño $SIZE bytes)"
             exit 1
           fi
           echo "Checksum del NDK verificado: $GOT"
