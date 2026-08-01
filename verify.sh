@@ -201,24 +201,70 @@ if [[ "$_needs_patchelf" == "true" && -f "$BIN_FILE" ]]; then
 fi
 
 # ── 5. Integridad del binario post-patchelf ───────────────────────────────────
-if [[ -f "$BIN_FILE" ]]; then
-  if [[ -n "$M_CHECKSUM_PATCHED" ]]; then
-    case "${M_CHECKSUM_ALGO:-sha256}" in
-      sha256) ACTUAL=$(sha256sum "$BIN_FILE" | cut -d' ' -f1) ;;
-      sha512) ACTUAL=$(sha512sum "$BIN_FILE" | cut -d' ' -f1) ;;
-      *)      ACTUAL="" ;;
-    esac
-    if [[ "$ACTUAL" == "$M_CHECKSUM_PATCHED" ]]; then
-      pass "Integridad del binario OK (${M_CHECKSUM_ALGO:-sha256} ${ACTUAL:0:16}...)"
-    else
-      fail "El binario instalado cambió desde la instalación"
-      note "Registrado: $M_CHECKSUM_PATCHED"
-      note "Actual:     $ACTUAL"
-      note "Puede ser una actualización del stack glibc, re-patchelf o manipulación."
-    fi
-  else
-    warn "Sin checksum registrado; no se puede verificar la integridad del binario"
+# Helper compartido por el binario principal y los compañeros (EXTRA_BINS):
+# compara el checksum actual contra el registrado en el manifest.
+_verify_checksum() {
+  local f="$1" expected="$2" desc="$3" actual="" algo="${M_CHECKSUM_ALGO:-sha256}"
+  if [[ -z "$expected" ]]; then
+    warn "Sin checksum registrado; no se puede verificar la integridad de $desc"
+    note "Reinstalá con: bash install.sh $APP_NAME -r"
+    return 0
   fi
+  case "$algo" in
+    sha256) actual=$(sha256sum "$f" | cut -d' ' -f1) ;;
+    sha512) actual=$(sha512sum "$f" | cut -d' ' -f1) ;;
+    *)      fail "Algoritmo de checksum desconocido en el manifest: $algo"
+            return 0 ;;
+  esac
+  if [[ "$actual" == "$expected" ]]; then
+    pass "Integridad $desc OK ($algo ${actual:0:16}...)"
+  else
+    fail "$desc cambió desde la instalación"
+    note "Registrado: $expected"
+    note "Actual:     $actual"
+    note "Reinstalá con: bash install.sh $APP_NAME -r"
+  fi
+}
+
+if [[ -f "$BIN_FILE" ]]; then
+  _verify_checksum "$BIN_FILE" "$M_CHECKSUM_PATCHED" "del binario"
+fi
+
+# ── 5.2. Binarios compañeros (EXTRA_BINS) ─────────────────────────────────────
+# El binario principal invoca a estos por PATH (ej: kiro-cli → kiro-cli-chat).
+# El manifest registra su checksum post-patchelf. La lista de extras sale del
+# manifest (fuente de verdad instalada): instalaciones previas a esta feature
+# no la registran y solo emiten WARN, sin auditar nada.
+M_EXTRA_BINS=""
+[[ -f "$MANIFEST" ]] && M_EXTRA_BINS=$(manifest_get extra_bins "$MANIFEST")
+
+if [[ -z "$M_EXTRA_BINS" ]]; then
+  warn "Manifest sin extra_bins (instalación previa a esta feature); auditoría de binarios compañeros omitida"
+  note "Reinstalá con: bash install.sh $APP_NAME -r para auditar también los binarios compañeros"
+else
+  for extra in $M_EXTRA_BINS; do
+    extra_bin="$LIBEXEC_DIR/$extra"
+    extra_wrapper="$PREFIX/bin/$extra"
+    extra_sum=$(manifest_get "extra_checksum_$extra" "$MANIFEST")
+
+    if [[ -f "$extra_bin" && -x "$extra_bin" ]]; then
+      pass "Binario compañero presente y ejecutable: $extra"
+      _verify_checksum "$extra_bin" "$extra_sum" "del binario compañero $extra"
+    else
+      fail "Binario compañero no encontrado o no ejecutable: $extra_bin"
+    fi
+
+    if [[ -x "$extra_wrapper" ]]; then
+      pass "Wrapper del binario compañero: $extra_wrapper"
+      if grep -q 'unset LD_PRELOAD' "$extra_wrapper" && grep -q 'unset LD_LIBRARY_PATH' "$extra_wrapper"; then
+        pass "El wrapper de $extra limpia LD_PRELOAD y LD_LIBRARY_PATH"
+      else
+        fail "El wrapper de $extra no limpia LD_PRELOAD/LD_LIBRARY_PATH (riesgo de crash sobre glibc)"
+      fi
+    else
+      fail "Falta wrapper del binario compañero: $extra_wrapper"
+    fi
+  done
 fi
 
 # ── 6. Cross-check tarball contra sha256.txt (solo CHECKSUM_SOURCE=hashfile) ──

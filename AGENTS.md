@@ -70,7 +70,10 @@ Si la respuesta es sí, no tocar `install.sh`.
 2. Campos obligatorios: `APP_NAME`, `DISPLAY_NAME`, `RELEASE_SOURCE`, `CHECKSUM_ALGO`, `CHECKSUM_SOURCE`, `ELF_NAME`
 3. `APP_NAME` = nombre del wrapper. `ELF_NAME` = nombre del binario real dentro del tarball.
 4. Si `CHECKSUM_SOURCE=hashfile`, agregar entrada en `sha256.txt`
-5. Hooks opcionales: `pre_wrapper_hook` (antes del wrapper), `post_install_hook` (después de verify)
+5. Campos opcionales: `EXTRA_BINS` (binarios compañeros del bundle que el binario
+   principal invoca por PATH — se patchean igual que `ELF_NAME` y reciben wrapper
+   propio en `$PREFIX/bin`, auditados por verify.sh)
+6. Hooks opcionales: `pre_wrapper_hook` (antes del wrapper), `post_install_hook` (después de verify)
 
 > Ver `registry/opencode.conf`, `agy.conf`, `kiro-cli.conf` como ejemplos canónicos.
 

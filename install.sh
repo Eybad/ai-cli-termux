@@ -145,6 +145,10 @@ ARCH_OVERRIDE_X86_64=""
 # Variables de entorno extra para el wrapper (ej: GODEBUG, SSL_CERT_FILE).
 # Array asociativo no es portable en bash 3; se usa un string con newlines.
 WRAPPER_ENV=""
+# Binarios compañeros del bundle que el binario principal invoca por PATH
+# (ej: kiro-cli delega el TUI a kiro-cli-chat). Se patchean igual que ELF_NAME,
+# reciben su propio wrapper en $PREFIX/bin y quedan auditados en el manifest.
+EXTRA_BINS=""
 
 # shellcheck source=/dev/null
 source "$CONF"
@@ -153,6 +157,23 @@ source "$CONF"
 for _field in APP_NAME DISPLAY_NAME RELEASE_SOURCE CHECKSUM_ALGO CHECKSUM_SOURCE ELF_NAME; do
   [[ -n "${!_field:-}" ]] || { err "$CONF: el campo '$_field' es obligatorio."; exit 1; }
 done
+
+# Validar EXTRA_BINS (fail-fast en el .conf): nombres de archivo simples y solo
+# con sentido si se aplica patchelf — los compañeros del bundle glibc sin
+# overlay no pueden ejecutarse y verify.sh no podría auditar su integridad.
+if [[ -n "$EXTRA_BINS" ]]; then
+  if [[ "$NEEDS_PATCHELF" != true ]]; then
+    err "$CONF: EXTRA_BINS requiere NEEDS_PATCHELF=true (los binarios compañeros también necesitan el overlay glibc)."
+    exit 1
+  fi
+  for _extra in $EXTRA_BINS; do
+    case "$_extra" in
+      *=*|*/*|*" "*)
+        err "$CONF: EXTRA_BINS inválido: '$_extra' (solo nombre de archivo, sin '=' ni '/')."
+        exit 1 ;;
+    esac
+  done
+fi
 
 # Validar campos específicos según el tipo de release (fail-fast en el .conf)
 case "$RELEASE_SOURCE" in
@@ -183,6 +204,8 @@ BACKUP_DIR=""
 FRESH_INSTALL=false
 INSTALL_DONE=false
 VERSION=""; TAG=""; TARBALL_CHECKSUM=""; BIN_CHECKSUM_ORIG=""; BIN_CHECKSUM_PATCHED=""
+# Checksums post-patchelf de los binarios compañeros, como "nombre=hash ".
+EXTRA_PATCHED=""
 ATTEST_STATUS="omitida"
 # JSON del release de GitHub ya descargado (evita una segunda llamada a la API).
 RELEASE_JSON=""
@@ -204,6 +227,7 @@ cleanup() {
     warn "Instalación fallida ($DISPLAY_NAME): limpiando archivos incompletos..."
     rm -rf "$LIBEXEC_DIR"
     rm -f "$WRAPPER"
+    _remove_extra_wrappers "$(installed_extra_bins)"
   fi
   exit $rc
 }
@@ -262,6 +286,25 @@ manifest_get() {
   local key="$1"
   [[ -f "$MANIFEST" ]] || return 0
   awk -F= -v k="$key" '{ sub(/\r$/, "") } $1==k { sub(/^[^=]*=/,""); print; exit }' "$MANIFEST"
+}
+
+# Lista de binarios compañeros efectivamente instalados. Fuente de verdad: el
+# manifest (uninstall/cleanup lo usan para no dejar wrappers huérfanos si el
+# .conf cambió después de la instalación). Solo si no hay manifest (instalación
+# manual o fallida a mitad) se cae al .conf actual.
+installed_extra_bins() {
+  local list=""
+  [[ -f "$MANIFEST" ]] && list=$(manifest_get extra_bins "$MANIFEST")
+  [[ -z "$list" ]] && list="$EXTRA_BINS"
+  printf '%s' "$list"
+}
+
+# Elimina los wrappers de binarios compañeros del bundle.
+_remove_extra_wrappers() {
+  local list="$1" extra
+  for extra in $list; do
+    rm -f "$PREFIX/bin/$extra"
+  done
 }
 
 checksum_of() {
@@ -330,8 +373,12 @@ preflight() {
 
 uninstall() {
   info "Desinstalando $DISPLAY_NAME..."
+  # Derivar los extras del manifest ANTES de borrar libexec (donde vive).
+  local extras
+  extras=$(installed_extra_bins)
   rm -rf "$LIBEXEC_DIR"
   rm -f "$WRAPPER"
+  _remove_extra_wrappers "$extras"
   info "$DISPLAY_NAME eliminado."
   info "Para remover dependencias si no las necesitás: pkg remove glibc-runner patchelf glibc-repo"
   exit 0
@@ -689,28 +736,51 @@ extract_install() {
 }
 
 # ── Paso 10: patchelf ─────────────────────────────────────────────────────────
+# Aplica interpreter + rpath → overlay glibc a un ELF y verifica el resultado.
+# Fail-closed: cualquier desvío aborta la instalación.
+_patch_elf() {
+  local target="$1"
+  file "$target" 2>/dev/null | grep -qi "ELF 64-bit.*$EXPECTED_ELF_ARCH" || {
+    err "No es un ELF 64-bit ($EXPECTED_ELF_ARCH) lo que se intenta parchear: $target"
+    err "Revisá ELF_NAME/EXTRA_BINS en registry/$APP_NAME.conf"
+    exit 1
+  }
+  patchelf --set-interpreter "$LOADER" --set-rpath "$RPATH" "$target" || {
+    err "Falló patchelf sobre $target"; exit 1
+  }
+  local got_interp got_rpath
+  got_interp=$(patchelf --print-interpreter "$target" 2>/dev/null || true)
+  got_rpath=$(patchelf --print-rpath "$target" 2>/dev/null || true)
+  [[ "$got_interp" == "$LOADER" ]] || {
+    err "patchelf no aplicó el interpreter correctamente a $target."
+    err "  Esperado: $LOADER"; err "  Obtenido: ${got_interp:-<vacío>}"; exit 1
+  }
+  [[ "$got_rpath" == *"$RPATH"* ]] || {
+    err "patchelf no aplicó el rpath correctamente a $target."
+    err "  Esperado contener: $RPATH"; err "  Obtenido: ${got_rpath:-<vacío>}"; exit 1
+  }
+}
+
 patch_interpreter() {
   [[ "$NEEDS_PATCHELF" == true ]] || return 0
 
   info "Aplicando patchelf (interpreter + rpath → overlay glibc)..."
-  patchelf --set-interpreter "$LOADER" --set-rpath "$RPATH" "$BIN_FILE" || {
-    err "Falló patchelf sobre $BIN_FILE"; exit 1
-  }
-
-  local got_interp got_rpath
-  got_interp=$(patchelf --print-interpreter "$BIN_FILE" 2>/dev/null || true)
-  got_rpath=$(patchelf --print-rpath "$BIN_FILE" 2>/dev/null || true)
-
-  [[ "$got_interp" == "$LOADER" ]] || {
-    err "patchelf no aplicó el interpreter correctamente."
-    err "  Esperado: $LOADER"; err "  Obtenido: ${got_interp:-<vacío>}"; exit 1
-  }
-  [[ "$got_rpath" == *"$RPATH"* ]] || {
-    err "patchelf no aplicó el rpath correctamente."
-    err "  Esperado contener: $RPATH"; err "  Obtenido: ${got_rpath:-<vacío>}"; exit 1
-  }
-
+  _patch_elf "$BIN_FILE"
   BIN_CHECKSUM_PATCHED=$(checksum_of "$BIN_FILE")
+
+  # Binarios compañeros del bundle (EXTRA_BINS en el .conf): el binario
+  # principal los invoca por PATH (ej: kiro-cli → kiro-cli-chat), así que
+  # deben quedar con el mismo overlay glibc o crashean/fallan con ENOENT.
+  local extra
+  for extra in $EXTRA_BINS; do
+    [[ -f "$LIBEXEC_DIR/$extra" ]] || {
+      err "EXTRA_BINS: '$extra' no existe en el tarball instalado ($LIBEXEC_DIR)."
+      err "Revisá registry/$APP_NAME.conf."; exit 1
+    }
+    _patch_elf "$LIBEXEC_DIR/$extra"
+    EXTRA_PATCHED+="$extra=$(checksum_of "$LIBEXEC_DIR/$extra") "
+  done
+
   info "Interpreter y rpath verificados."
 }
 
@@ -732,8 +802,11 @@ run_pre_wrapper_hook() {
 }
 
 # ── Paso 13: Crear wrapper ────────────────────────────────────────────────────
-create_wrapper() {
-  mkdir -p "$(dirname "$WRAPPER")"
+# Plantilla común: limpia LD_PRELOAD/LD_LIBRARY_PATH (bionic rompería un
+# proceso glibc) y aplica WRAPPER_ENV del .conf. Usada para el binario
+# principal y para cada EXTRA_BINS.
+_write_wrapper() {
+  local wrapper_path="$1" bin_path="$2"
 
   # Construir bloque de exports para variables de entorno del .conf
   local env_block=""
@@ -754,12 +827,11 @@ create_wrapper() {
     exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$BIN\" \"\$@\""
   fi
 
-  # El wrapper siempre se llama APP_NAME; el binario interno puede ser ELF_NAME
-  cat > "$WRAPPER" <<WRAPPER_EOF
+  cat > "$wrapper_path" <<WRAPPER_EOF
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-BIN="$BIN_FILE"
+BIN="$bin_path"
 
 if [[ ! -f "\$BIN" ]]; then
   echo "ERROR: $DISPLAY_NAME no encontrado en \$BIN" >&2
@@ -782,12 +854,33 @@ unset LD_LIBRARY_PATH
 ${env_block}
 ${exec_cmd}
 WRAPPER_EOF
-  chmod 755 "$WRAPPER"
+  chmod 755 "$wrapper_path"
+}
+
+create_wrapper() {
+  mkdir -p "$(dirname "$WRAPPER")"
+
+  _write_wrapper "$WRAPPER" "$BIN_FILE"
   info "Wrapper creado en $WRAPPER"
+
+  local extra
+  for extra in $EXTRA_BINS; do
+    _write_wrapper "$PREFIX/bin/$extra" "$LIBEXEC_DIR/$extra"
+    info "Wrapper creado en $PREFIX/bin/$extra"
+  done
 }
 
 # ── Paso 14: Escribir manifest ────────────────────────────────────────────────
 write_manifest() {
+  # Líneas de integridad de los binarios compañeros ("name=hash"), ya que el
+  # heredoc no puede iterar. Vacío si no hay EXTRA_BINS.
+  local extra_line="" pair name hash
+  for pair in $EXTRA_PATCHED; do
+    name="${pair%%=*}"
+    hash="${pair#*=}"
+    extra_line+="extra_checksum_${name}=${hash}"$'\n'
+  done
+
   cat > "$MANIFEST" <<EOF
 # Generado por install.sh. No editar a mano.
 # verify.sh compara el estado instalado contra estos valores.
@@ -807,7 +900,8 @@ needs_patchelf=$NEEDS_PATCHELF
 interpreter=${LOADER}
 rpath=${RPATH}
 attestation=$ATTEST_STATUS
-installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+extra_bins=$EXTRA_BINS
+${extra_line}installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   chmod 644 "$MANIFEST"
   info "Manifest de integridad escrito en $MANIFEST"

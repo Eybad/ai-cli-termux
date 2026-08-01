@@ -92,6 +92,28 @@ bash install.sh kiro-cli -r                 # reinstalación forzada
 bash install.sh kiro-cli -u                 # desinstalar
 ```
 
+#### TUI en Termux: fix del runtime bun
+
+El TUI de `kiro-cli` (sin argumentos) delega el render en un runtime [bun](https://bun.sh) que el cliente descarga a `~/.local/share/kiro-cli/` (`bun` + `tui.js`). El build que descarga es glibc y no puede ejecutarse en Termux (interpreter del sistema inexistente): el TUI muestra `Launching...` y falla con `error: No such file or directory (os error 2)`.
+
+Fix (una sola vez; repetir si el cliente re-descarga el build glibc):
+
+1. Ejecutar `timeout 5 kiro-cli` una vez para que el cliente descargue `bun` + `tui.js` y registre `bun.sha256` (hash esperado por el launcher; sin él re-descarga el build glibc en cada arranque).
+2. Reemplazar el runtime por la build Android oficial de bun (bionic PIE, corre nativa en Termux):
+
+```bash
+curl -fsSL -o /tmp/bun-android.zip \
+  https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64-android.zip
+unzip -o /tmp/bun-android.zip -d /tmp/bun-android
+cp /tmp/bun-android/bun-linux-aarch64-android/bun ~/.local/share/kiro-cli/bun
+chmod 755 ~/.local/share/kiro-cli/bun
+# Fail-closed: debe ser la build Android (bionic, interpreter /system/bin/linker64).
+file ~/.local/share/kiro-cli/bun | grep -q 'linker64' \
+  || { echo "ERROR: el binario descargado no es la build Android de bun"; exit 1; }
+```
+
+`bun.sha256` no se toca: el launcher compara ese archivo contra el hash del build glibc v1.3.13 que espera, y solo re-descarga si difieren; el binario en sí no se valida. Por eso el binario queda en v1.3.14 (la build Android más cercana; las builds Android de bun existen desde v1.3.14, no hay build Android de v1.3.13) con el sha file de v1.3.13.
+
 ### Opciones comunes
 
 | Opción | Descripción |
@@ -160,8 +182,9 @@ En la glibc de Termux, `/usr/glibc/lib/libc.so` es un script ASCII del linker, n
 
 1. Crear `registry/<tool>.conf` con los campos obligatorios: `APP_NAME`, `DISPLAY_NAME`, `RELEASE_SOURCE`, `CHECKSUM_ALGO`, `CHECKSUM_SOURCE`, `ELF_NAME`.
 2. Si `CHECKSUM_SOURCE=hashfile`, agregar la entrada correspondiente en `sha256.txt`.
-3. Si la CLI necesita entorno o parches, implementar `pre_wrapper_hook` o `post_install_hook` (ver `registry/agy.conf`).
-4. Usar `registry/opencode.conf`, `registry/agy.conf` y `registry/kiro-cli.conf` como ejemplos canónicos.
+3. Si la CLI delega el TUI a binarios compañeros del mismo bundle (ej: `kiro-cli` → `kiro-cli-chat`), listarlos en `EXTRA_BINS`: se patchean igual que el binario principal y reciben wrapper propio en `$PREFIX/bin`.
+4. Si la CLI necesita entorno o parches, implementar `pre_wrapper_hook` o `post_install_hook` (ver `registry/agy.conf`).
+5. Usar `registry/opencode.conf`, `registry/agy.conf` y `registry/kiro-cli.conf` como ejemplos canónicos.
 
 | `RELEASE_SOURCE` | Requiere | Checksum |
 |---|---|---|
