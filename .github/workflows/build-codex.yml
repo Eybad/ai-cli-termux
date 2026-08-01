@@ -196,7 +196,7 @@ jobs:
             'char **backtrace_symbols(void *const *b, int s) { return 0; }' \
             'void backtrace_symbols_fd(void *const *b, int s, int f) {}' \
             'int *__errno_location(void) { return __errno(); }' \
-            'void __clear_cache(char *beg, char *end) { __builtin___clear_cache(beg, end); }' \
+            'void __clear_cache(void *beg, void *end) { __builtin___clear_cache(beg, end); }' \
             'int memfd_create(const char *name, unsigned int flags) { return syscall(__NR_memfd_create, name, flags); }' \
             'int __fxstat64(int ver, int fd, struct stat *buf) { return fstat(fd, buf); }' \
             'int __vfprintf_chk(FILE *st, int fl, const char *fmt, va_list ap) { return vfprintf(st, fmt, ap); }' \
