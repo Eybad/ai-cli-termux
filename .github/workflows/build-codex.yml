@@ -168,13 +168,13 @@ jobs:
       - name: Parchear openssl-sys (vendored) para bionic
         # El crate raíz declara openssl-sys = "*" (native-tls) y bionic no trae
         # libssl: sin parche, el cross-build no encuentra OpenSSL para el target.
-        # Con vendored en workspace y en cli/Cargo.toml, openssl-src compila OpenSSL
-        # estático usando el NDK (ANDROID_NDK_HOME ya exportado).
+        # Con vendored en workspace y bajo [dependencies] en cli/Cargo.toml,
+        # openssl-src compila OpenSSL estático usando el NDK (ANDROID_NDK_HOME exportado).
         working-directory: upstream/codex-rs
         run: |
           set -euo pipefail
           sed -i 's|^openssl-sys = "\*"|openssl-sys = { version = "*", features = ["vendored"] }|' Cargo.toml
-          echo 'openssl-sys = { workspace = true, features = ["vendored"] }' >> cli/Cargo.toml
+          sed -i '/^\[dependencies\]/a openssl-sys = { workspace = true, features = ["vendored"] }' cli/Cargo.toml
           grep -n 'openssl-sys' Cargo.toml cli/Cargo.toml
 
       - name: Compilar codex-cli para aarch64-linux-android (bionic)
@@ -193,7 +193,7 @@ jobs:
           # que quede consistente (fail-closed ante cualquier otro desajuste).
           cargo update
           # --locked: falla si el Cargo.lock (ya regenerado) necesita cambios.
-          cargo build --locked --release -p codex-cli --features openssl-sys/vendored --target aarch64-linux-android
+          cargo build --locked --release -p codex-cli --target aarch64-linux-android
 
       - name: Instalar patchelf (verificación de RUNPATH)
         run: |
