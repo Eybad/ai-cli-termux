@@ -137,10 +137,15 @@ jobs:
           restore-keys: |
             codex-rs-${{ runner.os }}-
 
-      - name: Toolchain Rust (rust-toolchain.toml del repo pinnea la versión)
+      - name: Toolchain Rust (el lock regenerado exige rustc >= 1.96)
+        # rust-toolchain.toml del upstream pinnea 1.95.0, pero el Cargo.lock
+        # regenerado (desincronizado en el tag upstream) resuelve rama-* 0.3.0,
+        # que requiere rustc 1.96.0. Nuestro build controla el toolchain.
         working-directory: upstream/codex-rs
+        env:
+          RUSTUP_TOOLCHAIN: '1.96.0'
         run: |
-          rustup target add aarch64-linux-android
+          rustup toolchain install 1.96.0 --profile minimal --target aarch64-linux-android
           rustc --version && rustup target list --installed
 
       - name: Descargar NDK oficial de Google y verificar checksum (fail-closed)
@@ -164,6 +169,7 @@ jobs:
         working-directory: upstream/codex-rs
         env:
           ANDROID_NDK_HOME: ${{ runner.temp }}/android-ndk-r26d
+          RUSTUP_TOOLCHAIN: '1.96.0'
         run: |
           set -euo pipefail
           NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
