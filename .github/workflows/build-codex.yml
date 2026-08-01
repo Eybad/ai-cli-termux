@@ -184,10 +184,21 @@ jobs:
           printf '%s\n' \
             '#include <stdio.h>' \
             '#include <stdarg.h>' \
+            '#include <wchar.h>' \
+            '#include <stdint.h>' \
             'void *__libc_stack_end = 0;' \
-            'char **backtrace_symbols(void *const *buffer, int size) { return 0; }' \
-            'void backtrace_symbols_fd(void *const *buffer, int size, int fd) {}' \
-            'int __vfprintf_chk(FILE *stream, int flag, const char *format, va_list ap) { return vfprintf(stream, format, ap); }' \
+            'int backtrace(void **b, int s) { return 0; }' \
+            'char **backtrace_symbols(void *const *b, int s) { return 0; }' \
+            'void backtrace_symbols_fd(void *const *b, int s, int f) {}' \
+            'int __vfprintf_chk(FILE *st, int fl, const char *fmt, va_list ap) { return vfprintf(st, fmt, ap); }' \
+            'int __isoc99_sscanf(const char *str, const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = vsscanf(str, fmt, ap); va_end(ap); return r; }' \
+            'size_t __mbrlen(const char *s, size_t n, mbstate_t *ps) { return mbrlen(s, n, ps); }' \
+            'static const int32_t toupper_tbl[384] = {0};' \
+            'const int32_t **__ctype_toupper_loc(void) { static const int32_t *p = toupper_tbl + 128; return &p; }' \
+            'static const int32_t tolower_tbl[384] = {0};' \
+            'const int32_t **__ctype_tolower_loc(void) { static const int32_t *p = tolower_tbl + 128; return &p; }' \
+            'static const uint16_t b_tbl[384] = {0};' \
+            'const uint16_t **__ctype_b_loc(void) { static const uint16_t *p = b_tbl + 128; return &p; }' \
             > "$RUNNER_TEMP/bionic_compat.c"
           "$NDK_TC/aarch64-linux-android29-clang" -c "$RUNNER_TEMP/bionic_compat.c" -o "$RUNNER_TEMP/bionic_compat.o"
           "$NDK_TC/llvm-ar" rcs "$RUNNER_TEMP/libbionic_compat.a" "$RUNNER_TEMP/bionic_compat.o"
