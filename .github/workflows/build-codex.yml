@@ -186,6 +186,9 @@ jobs:
           NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC_aarch64_linux_android="$NDK_TC/aarch64-linux-android29-clang"
           export AR_aarch64_linux_android="$NDK_TC/llvm-ar"
+          export RANLIB_aarch64_linux_android="$NDK_TC/llvm-ranlib"
+          export RANLIB="$NDK_TC/llvm-ranlib"
+          export PATH="$NDK_TC:$PATH"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_TC/aarch64-linux-android29-clang"
           # El Cargo.lock del tag upstream a veces está desincronizado con su
           # Cargo.toml (mantenimiento de openai): regenerar el lock primero
