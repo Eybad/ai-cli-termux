@@ -187,21 +187,43 @@ jobs:
             '#include <wchar.h>' \
             '#include <stdint.h>' \
             '#include <errno.h>' \
+            '#include <string.h>' \
             '#include <sys/stat.h>' \
             '#include <sys/syscall.h>' \
             '#include <unistd.h>' \
+            '' \
             'void *__libc_stack_end = 0;' \
             'long __timezone = 0;' \
+            '' \
             'int backtrace(void **b, int s) { return 0; }' \
             'char **backtrace_symbols(void *const *b, int s) { return 0; }' \
             'void backtrace_symbols_fd(void *const *b, int s, int f) {}' \
+            '' \
             'int *__errno_location(void) { return __errno(); }' \
-            'void __clear_cache(void *beg, void *end) { __builtin___clear_cache(beg, end); }' \
-            'int memfd_create(const char *name, unsigned int flags) { return syscall(__NR_memfd_create, name, flags); }' \
+            '' \
+            '/* V8 cpu-arm64.cc llama __clear_cache (glibc). Bionic lo expone via' \
+            '   cacheflush(2). No podemos redeclararla porque el NDK la trata como' \
+            '   builtin con firma (void*,void*). Usamos un wrapper con asm label. */' \
+            'void __clear_cache_impl(void *beg, void *end) { __builtin___clear_cache(beg, end); }' \
+            '__asm__(".globl __clear_cache\n.set __clear_cache, __clear_cache_impl");' \
+            '' \
+            'int memfd_create(const char *name, unsigned int flags) {' \
+            '  return syscall(__NR_memfd_create, name, flags);' \
+            '}' \
+            '' \
+            '/* glibc stat wrappers: bionic usa fstat/stat directamente */' \
             'int __fxstat64(int ver, int fd, struct stat *buf) { return fstat(fd, buf); }' \
+            'int __xstat64(int ver, const char *path, struct stat *buf) { return stat(path, buf); }' \
+            '' \
+            '/* V8 turboshaft usa bcmp (BSD/glibc); bionic lo tiene desde API 30 */' \
+            'int bcmp(const void *s1, const void *s2, size_t n) { return memcmp(s1, s2, n); }' \
+            '' \
             'int __vfprintf_chk(FILE *st, int fl, const char *fmt, va_list ap) { return vfprintf(st, fmt, ap); }' \
-            'int __isoc99_sscanf(const char *str, const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = vsscanf(str, fmt, ap); va_end(ap); return r; }' \
+            'int __isoc99_sscanf(const char *str, const char *fmt, ...) {' \
+            '  va_list ap; va_start(ap, fmt); int r = vsscanf(str, fmt, ap); va_end(ap); return r;' \
+            '}' \
             'size_t __mbrlen(const char *s, size_t n, mbstate_t *ps) { return mbrlen(s, n, ps); }' \
+            '' \
             'static const int32_t toupper_tbl[384] = {0};' \
             'const int32_t **__ctype_toupper_loc(void) { static const int32_t *p = toupper_tbl + 128; return &p; }' \
             'static const int32_t tolower_tbl[384] = {0};' \
