@@ -684,7 +684,7 @@ check_current() {
       fi
       exit 0
     fi
-    [[ -n "$installed_tag" ]] && info "Versión instalada: $installed_tag → actualizando a $TAG"
+    info "Versión instalada: $installed_tag → actualizando a $TAG"
     return 0
   fi
 
@@ -1070,9 +1070,13 @@ verify_install() {
     err "Probá cerrar y reabrir Termux, o revisá 'bash verify.sh $APP_NAME'."
     exit 1
   fi
-  local got
+  local got version_core
   got=$(normalize_version "$out")
-  [[ -n "$got" && "$got" != "$VERSION" ]] && \
+  # Comparar núcleo vs núcleo: con versiones +build (ej. 0.146.0+android2)
+  # el binario reporta el núcleo (0.146.0); normalizar ambos lados evita un
+  # warning espurio (ver docs/adr/0001-release-scheme.md).
+  version_core=$(normalize_version "$VERSION")
+  [[ -n "$got" && "$got" != "$version_core" ]] && \
     warn "Versión reportada ($got) ≠ esperada ($VERSION)."
   INSTALL_DONE=true
   info "$DISPLAY_NAME ${got:-$VERSION} funcionando correctamente."

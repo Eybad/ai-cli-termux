@@ -226,11 +226,6 @@ def workspace_version(src: Path) -> str:
     raise SystemExit(f"ERROR: [workspace.package] version no encontrado en {cargo}")
 
 
-def workspace_version_core(src: Path) -> str:
-    """Núcleo X.Y.Z de la versión del workspace (sin build metadata)."""
-    return workspace_version(src).split("+", 1)[0]
-
-
 def scan_sites(src: Path):
     """Todos los call sites de receiver file-like en el árbol (fuera de comentarios)."""
     sites = []
