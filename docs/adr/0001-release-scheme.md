@@ -17,3 +17,7 @@ Si el build de Android necesita un parche sobre el código upstream (no es el bi
 - **Fallback fail-closed**: si el parche no aplica (source upstream cambiado), el workflow aborta y la última versión buena sigue instalable.
 
 Caso de uso actual: `File::{try_,}{lock,lock_shared}` devuelven `Unsupported` en Android desde Rust 1.89 (flock no se usa en esa plataforma; rust-lang/rust#148325) → codex TUI/exec fallan. El shim `file_lock_shim` usa `flock(2)` directo en android (EWOULDBLOCK → `std::fs::TryLockError::WouldBlock`) y delega en std fuera de android.
+
+### Detalle: los call sites llevan prefijo `crate::`
+
+El generador reemplaza cada call site por `crate::file_lock_shim::<method>(&<recv>)`. El prefijo `crate::` es **obligatorio** (validado en CI): desde la línea de Rust 1.96+ un path no calificado hacia un módulo del crate root ya no resuelve cuando se usa desde un submódulo anidado (E0433, ni siquiera con `pub mod`); el caso del build amd64 (sin parche) compila porque el source upstream no usa ese patrón, y los call sites del propio `lib.rs` (arg0, message-history) no fallaban porque resuelven desde la raíz. La corrección de `patch_rev=2` (v0.146.0+android2) fue exactamente esto: prefijar los 17 call sites (amend.rs, certs.rs, writer_lock.rs, etc.) con `crate::`.

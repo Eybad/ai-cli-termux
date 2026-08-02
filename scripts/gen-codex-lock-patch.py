@@ -9,8 +9,11 @@
 #   1. Inserta el módulo `file_lock_shim` en el crate root de cada crate con
 #      call sites (delega en std fuera de Android; usa flock(2) directo en
 #      Android, mapeando EWOULDBLOCK a std::fs::TryLockError::WouldBlock).
-#   2. Reemplaza los 17 call sites conocidos por file_lock_shim::{...}(&file),
+#   2. Reemplaza los 17 call sites conocidos por crate::file_lock_shim::{...}(&file),
 #      preservando `?`, `match` y `map_err` de cada llamada.
+#      (El prefijo crate:: es obligatorio: desde Rust 1.96 los paths no
+#      calificados hacia módulos del crate root ya no resuelven desde submódulos
+#      anidados — E0433 —; ver docs/adr/0001-release-scheme.md.)
 #   3. Bump de [workspace.package] version → <core>+<build> (--dist-version).
 #
 # Fail-closed: si el source difiere del inventario esperado (sitio faltante o
@@ -266,7 +269,7 @@ def apply_replacements(src: Path):
         p = src / rel
         lines = read_lines(p)
         needle = f"{recv}.{method}()"
-        replacement = f"file_lock_shim::{method}(&{recv})"
+        replacement = f"crate::file_lock_shim::{method}(&{recv})"
         line = lines[lineno - 1]
         if line.count(needle) != 1:
             raise SystemExit(
@@ -393,7 +396,7 @@ def main():
         if "mod file_lock_shim" not in (src / root).read_text(encoding="utf-8"):
             raise SystemExit(f"ERROR: post-check: shim ausente en {root}")
 
-    print(f"OK: parche aplicado — 17 call sites → file_lock_shim, versión {args.dist_version}")
+    print(f"OK: parche aplicado — 17 call sites → crate::file_lock_shim, versión {args.dist_version}")
     return 0
 
 
