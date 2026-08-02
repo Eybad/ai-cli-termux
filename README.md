@@ -5,14 +5,15 @@
 **CLIs de IA ejecutadas de forma nativa en Termux, sin proot**
 
 [![Update hashes](https://img.shields.io/github/actions/workflow/status/Eybad/ai-cli-termux/update-hashes.yml?style=flat-square&label=update-hashes)](https://github.com/Eybad/ai-cli-termux/actions)
+[![Build codex](https://img.shields.io/github/actions/workflow/status/Eybad/ai-cli-termux/build-codex.yml?style=flat-square&label=build-codex)](https://github.com/Eybad/ai-cli-termux/actions)
 [![Android](https://img.shields.io/badge/Android-10%2B-3ddc84?style=flat-square&logo=android&logoColor=white)](https://www.android.com/)
 [![Termux](https://img.shields.io/badge/Termux-F--Droid-000000?style=flat-square&logo=terminal)](https://f-droid.org/en/packages/com.termux/)
 
-[Features](#features) • [Instalación](#instalación) • [Herramientas](#herramientas-soportadas) • [Actualización](#actualización-automática) • [Verificación](#verificación) • [Agregar una CLI](#agregar-una-cli-nueva)
+[Features](#features) • [Herramientas soportadas](#herramientas-soportadas) • [Requisitos](#requisitos) • [Instalación](#instalación) • [Actualización automática](#actualización-automática) • [Verificación](#verificación) • [Cómo funciona](#cómo-funciona) • [Soluciones técnicas de Android](#soluciones-técnicas-de-android) • [Agregar una CLI nueva](#agregar-una-cli-nueva) • [Estructura del repositorio](#estructura-del-repositorio)
 
 </div>
 
-`ai-cli-termux` instala y audita CLIs de inteligencia artificial ([opencode](https://github.com/anomalyco/opencode), [Antigravity CLI](https://antigravity.google), [Kiro CLI](https://kiro.dev)) directamente en **Termux** para Android (`aarch64`) y Linux (`x86_64`), usando el overlay de librerías glibc del ecosistema Termux. Sin `proot`, sin máquinas virtuales: los binarios corren nativos sobre el kernel de Android, con rendimiento 1:1.
+`ai-cli-termux` instala y audita CLIs de inteligencia artificial ([opencode](https://github.com/anomalyco/opencode), [Antigravity CLI](https://antigravity.google), [Kiro CLI](https://kiro.dev) y [OpenAI Codex](https://github.com/openai/codex)) directamente en **Termux** para Android (`aarch64`) y Linux (`x86_64`), usando el overlay de librerías glibc del ecosistema Termux. Sin `proot`, sin máquinas virtuales: los binarios corren nativos sobre el kernel de Android, con rendimiento 1:1.
 
 > [!TIP]
 > Agregar una herramienta nueva solo requiere crear un archivo `registry/<tool>.conf`. El instalador es genérico y no se toca.
@@ -24,19 +25,8 @@
 - **Última versión automática** — versión y checksum se resuelven solos desde la GitHub API, el manifest de Google o el manifest del CDN de Amazon.
 - **Fail-closed** — sin checksum verificado no se instala. `sha256.txt` queda como pinning opcional para verificaciones independientes del vendor.
 - **Parches adaptativos** — agy se auto-parchea (syscall `faccessat2` + TCMalloc VA48→VA39 si aplica) con smoke test posterior. `--update` funciona sin mantenimiento manual entre versiones.
+- **Build en CI** — codex se compila en GitHub Actions desde el código oficial (bionic arm64 para Android, musl verificado para amd64) y se publica con digest y attestation en un repo de distribución dedicado.
 - **Auditable** — `verify.sh` audita la instalación en 10 pasos y detecta adulteración posterior al chequeo de hashes registrados en `manifest.txt`.
-
-## Cómo funciona
-
-```
-Android (kernel aarch64 + seccomp)
-  └─ Termux (bionic libc)
-       └─ Overlay glibc ($PREFIX/glibc/lib/ld-linux-aarch64.so.1)
-            ├─ 1. patchelf          → interpreter y rpath apuntan a glibc
-            ├─ 2. pre_wrapper_hook  → parches de kernel, shims, DNS
-            └─ 3. wrapper           → SSL_CERT_FILE, GODEBUG, LD_LIBRARY_PATH
-                 └─ binario ejecutado de forma nativa (sin VM, sin emulación)
-```
 
 ## Herramientas soportadas
 
@@ -107,7 +97,9 @@ bash install.sh codex -u                 # desinstalar
 
 - **Parche de locks Android**: desde Rust 1.89, `File::lock*` devuelve `Unsupported` en Android (rust-lang/rust#148325) y el TUI/exec de codex fallan. El build de arm64 aplica un parche generado ([`gen-codex-lock-patch.py`](scripts/gen-codex-lock-patch.py) → módulo `file_lock_shim` con `flock(2)`) y publica con tag `vX.Y.Z+androidN` (build metadata semver; `N` = `patch_rev`). El instalador preserva el `+build` en versión y tag, y `--update` migra automáticamente del release estándar al parcheado. `codex update` está bloqueado en el wrapper (todo pasa por `install.sh codex --update`).
 - **Escalable**: el CI detecta cada release nuevo de OpenAI (cron diario) y publica el asset en el [repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) (`codex-arm64.tar.gz`/`codex-amd64.tar.gz`) con digest y attestation. `--update` funciona sin tocar nada. Si un release upstream rompe el build bionic, no se publica y la última versión buena sigue instalable.
-- **Sandbox**: codex usa `landlock` por defecto. Si tu kernel Android no lo soporta, configurá `sandbox_mode = "off"` en `~/.codex/config.toml`.
+> [!IMPORTANT]
+> El sandbox de codex usa `landlock` por defecto; en kernels Android que no lo soporten, configurá `sandbox_mode = "off"` en `~/.codex/config.toml`.
+
 - **Ripgrep**: si codex reporta la falta de `rg`, instalalo con `pkg install ripgrep` (se busca por PATH, como los shims de agy).
 - **Releases del proyecto vs de distribución**: los releases `v0.146.0+` de codex viven en el repo de distribución dedicado (solo binarios). Los releases `v1.0.0+` de este repo versionan el instalador en sí (este README, `install.sh`, `verify.sh`, `registry/`). El instalador distingue por asset, no por repo.
 
@@ -133,7 +125,7 @@ file ~/.local/share/kiro-cli/bun | grep -q 'linker64' \
 
 `bun.sha256` no se toca: el launcher compara ese archivo contra el hash del build glibc v1.3.13 que espera, y solo re-descarga si difieren; el binario en sí no se valida. Por eso el binario queda en v1.3.14 (la build Android más cercana; las builds Android de bun existen desde v1.3.14, no hay build Android de v1.3.13) con el sha file de v1.3.13.
 
-### Opciones comunes
+## Opciones comunes
 
 | Opción | Descripción |
 |---|---|
@@ -144,6 +136,9 @@ file ~/.local/share/kiro-cli/bun | grep -q 'linker64' \
 | `--sha256 <hash>` | Pinear el checksum del tarball explícitamente |
 | `--require-attestation` | Abortar si no se puede verificar la attestation (solo tools de GitHub) |
 | `-h, --help` | Mostrar la ayuda completa |
+
+> [!IMPORTANT]
+> `--sha256 <hash>` desactiva la resolución automática de checksum: el hash se toma tal cual lo pasás. Verificá vos mismo que sea el correcto antes de instalarlo.
 
 ## Actualización automática
 
@@ -168,6 +163,20 @@ bash verify.sh <tool>    # ej: bash verify.sh agy
 ```
 
 Audita la instalación en 10 pasos: manifest local, binario presente y ejecutable (formato ELF correcto), interpreter/rpath de `patchelf`, integridad post-modificación contra `manifest.txt`, consistencia con `sha256.txt`, estado de la attestation, wrapper (limpia `LD_PRELOAD`/`LD_LIBRARY_PATH`), entorno glibc (loader, `nsswitch.conf`, DNS), ejecución real (`--version`) y resumen final. **Exit code 1 ante cualquier fallo.**
+
+## Cómo funciona
+
+```
+Android (kernel aarch64 + seccomp)
+  └─ Termux (bionic libc)
+       └─ Overlay glibc ($PREFIX/glibc/lib/ld-linux-aarch64.so.1)
+            ├─ 1. patchelf          → interpreter y rpath apuntan a glibc
+            ├─ 2. pre_wrapper_hook  → parches de kernel, shims, DNS
+            └─ 3. wrapper           → SSL_CERT_FILE, GODEBUG, LD_LIBRARY_PATH
+                 └─ binario ejecutado de forma nativa (sin VM, sin emulación)
+```
+
+Esta sección describe las capas del runtime; los parches puntuales que resuelven cada incompatibilidad de Android están detallados en [Soluciones técnicas de Android](#soluciones-técnicas-de-android).
 
 ## Soluciones técnicas de Android
 
@@ -222,26 +231,33 @@ En la glibc de Termux, `/usr/glibc/lib/libc.so` es un script ASCII del linker, n
 > [!NOTE]
 > El detalle fino — arch mapping (`aarch64`→`arm64`, `x86_64`→`amd64`), formato de `sha256.txt`, pipeline completo de instalación y las invariants del proyecto — está documentado en [AGENTS.md](AGENTS.md).
 
-## Estructura del repositorio
-
-```
-ai-cli-termux/
-├── install.sh                  # Instalador genérico (POSIX)
-├── verify.sh                   # Suite de verificación de 10 pasos
-├── sha256.txt                  # Hashes pineados (pinning opcional)
-├── registry/                   # Configuración por herramienta
-│   ├── opencode.conf
-│   ├── agy.conf
-│   ├── kiro-cli.conf
-│   └── patch_va39.py           # Parche adaptativo ARM64 (VA39 + faccessat2)
-├── AGENTS.md                   # Guía para contribuir (invariants, convenciones)
-└── .github/workflows/
-    └── update-hashes.yml       # CI: actualiza sha256.txt automáticamente
-```
-
 ## Integridad (doble capa de hashes)
 
 Como `patchelf` y `patch_va39.py` modifican el binario durante la instalación, el sistema registra dos checksums:
 
 1. **Tarball**: verificado al descargar (digest del vendor, pin de `sha256.txt` o `--sha256`) — sin hash verificado no se instala.
 2. **Binario instalado**: hash recalculado tras los parches y guardado en `manifest.txt`; `verify.sh` lo compara en cada auditoría para detectar adulteración posterior.
+
+## Estructura del repositorio
+
+```
+ai-cli-termux/
+├── install.sh                  # Instalador genérico (fail-closed)
+├── verify.sh                   # Verificador post-instalación (10 pasos)
+├── sha256.txt                  # Pinning opcional de hashes
+├── AGENTS.md                   # Invariants y convenciones para contribuir
+├── CONTEXT.md                  # Glosario del proyecto
+├── registry/                   # Configuración por herramienta
+│   ├── opencode.conf
+│   ├── agy.conf
+│   ├── kiro-cli.conf
+│   ├── codex.conf
+│   └── patch_va39.py           # Parche adaptativo ARM64 (VA39 + faccessat2)
+├── scripts/
+│   └── gen-codex-lock-patch.py # Generador fail-closed del parche de locks (CI)
+├── docs/
+│   └── adr/0001-release-scheme.md
+└── .github/workflows/
+    ├── build-codex.yml         # Build bionic arm64 + musl verificado (cron diario)
+    └── update-hashes.yml       # Actualiza sha256.txt (manual)
+```
