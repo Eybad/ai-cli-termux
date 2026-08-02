@@ -154,6 +154,9 @@ WRAPPER_ENV=""
 # (ej: kiro-cli delega el TUI a kiro-cli-chat). Se patchean igual que ELF_NAME,
 # reciben su propio wrapper en $PREFIX/bin y quedan auditados en el manifest.
 EXTRA_BINS=""
+# Subcomandos denegados en el wrapper (ej: WRAPPER_DENY_ARGS="update" en codex).
+# Default vacío: el bloque de denegación no se genera.
+WRAPPER_DENY_ARGS=""
 
 # shellcheck source=/dev/null
 source "$CONF"
@@ -532,6 +535,13 @@ resolve_version() {
       url_key=$(expand_template "$MANIFEST_KEY_URL")
       checksum_key=$(expand_template "$MANIFEST_KEY_CHECKSUM")
       VERSION=$(json_get "$manifest_json" "$version_key")
+      # Fail-closed: validar charset semver (evita inyección de líneas en el
+      # manifest local y logs si el endpoint remoto responde basura).
+      VERSION=$(parse_version_tag "$VERSION")
+      [[ -n "$VERSION" ]] || {
+        err "El manifest remoto trae una versión inválida: '$(json_get "$manifest_json" "$version_key")'"
+        exit 1
+      }
       DOWNLOAD_URL=$(json_get "$manifest_json" "$url_key")
       REMOTE_CHECKSUM=$(json_get "$manifest_json" "$checksum_key")
       # Normalizar: el manifest puede venir con hex en mayúsculas.
