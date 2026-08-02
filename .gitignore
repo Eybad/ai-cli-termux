@@ -7,3 +7,6 @@ test-*.tar.gz
 test_exec.sh
 test_wrapper.sh
 .gemini/
+
+# Artefactos de Python (generador de parches)
+__pycache__/
