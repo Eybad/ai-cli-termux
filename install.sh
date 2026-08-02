@@ -59,7 +59,8 @@ $(list_tools)
 
 Opciones:
   -h, --help                 Mostrar esta ayuda
-  -v, --version <version>    Instalar una versión específica (ej: 1.18.9)
+  -v, --version <version>    Instalar una versión específica
+                             (ej: 1.18.9; acepta -prerelease/+build, ej: 0.146.0+android1)
   -u, --uninstall            Desinstalar
   -r, --reinstall            Forzar reinstalación
       --update               Actualizar a la última versión disponible si
@@ -250,6 +251,21 @@ trap cleanup EXIT
 normalize_version() {
   local out
   out=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<< "${1:-}" | head -1 || true)
+  printf '%s' "$out"
+}
+
+# Versión con build metadata opcional (semver: X.Y.Z[-pre][+build]).
+# Preserva el sufijo +build: distingue releases del mismo núcleo (ej: el
+# release parcheado de codex "0.146.0+android1"). Fail-closed: si el input
+# no matchea el formato completo, devuelve vacío (no instalar mal).
+parse_version_tag() {
+  local raw="$1" out=""
+  # Patrón en variable: `\+` literal no compila inline en [[ =~ ]]
+  # (el backslash se consume antes de llegar al motor regex).
+  local version_re='^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z._-]+)?$'
+  if [[ "$raw" =~ $version_re ]]; then
+    out="${raw#v}"
+  fi
   printf '%s' "$out"
 }
 
@@ -471,8 +487,12 @@ resolve_version() {
 
     github)
       if [[ -n "$REQUESTED_VERSION" ]]; then
-        VERSION=$(normalize_version "$REQUESTED_VERSION")
-        [[ -n "$VERSION" ]] || { err "Versión inválida: '$REQUESTED_VERSION'"; exit 2; }
+        VERSION=$(parse_version_tag "$REQUESTED_VERSION")
+        [[ -n "$VERSION" ]] || {
+          err "Versión inválida: '$REQUESTED_VERSION'"
+          err "Formato esperado: X.Y.Z (opcional: -prerelease y/o +build, ej: 0.146.0+android1)"
+          exit 2
+        }
       else
         # Última versión instalable = release más reciente con el asset esperado.
         # Fail-closed: si ningún release lo tiene, error claro (no instalar mal).
@@ -486,8 +506,13 @@ resolve_version() {
         fi
         local raw
         raw=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
-        VERSION=$(normalize_version "$raw")
-        [[ -n "$VERSION" ]] || { err "No se pudo extraer la versión de GitHub API"; exit 1; }
+        # El tag_name del release se usa tal cual (preserva +build del dist);
+        # TAG="v$VERSION" abajo lo reconstruye idéntico.
+        VERSION=$(parse_version_tag "$raw")
+        [[ -n "$VERSION" ]] || {
+          err "No se pudo extraer la versión de GitHub API (tag: '${raw:-vacío}')"
+          exit 1
+        }
       fi
       TAG="v$VERSION"
       ;;
@@ -526,7 +551,7 @@ resolve_version() {
 
       if [[ -n "$REQUESTED_VERSION" ]]; then
         local req
-        req=$(normalize_version "$REQUESTED_VERSION")
+        req=$(parse_version_tag "$REQUESTED_VERSION")
         [[ "$req" == "$VERSION" ]] || {
           warn "La versión disponible ($VERSION) no coincide con la solicitada ($req)."
           warn "Solo está disponible la última versión en el manifest remoto."
@@ -537,8 +562,12 @@ resolve_version() {
 
     url_template)
       if [[ -n "$REQUESTED_VERSION" ]]; then
-        VERSION=$(normalize_version "$REQUESTED_VERSION")
-        [[ -n "$VERSION" ]] || { err "Versión inválida: '$REQUESTED_VERSION'"; exit 2; }
+        VERSION=$(parse_version_tag "$REQUESTED_VERSION")
+        [[ -n "$VERSION" ]] || {
+          err "Versión inválida: '$REQUESTED_VERSION'"
+          err "Formato esperado: X.Y.Z (opcional: -prerelease y/o +build, ej: 0.146.0+android1)"
+          exit 2
+        }
       else
         VERSION=$(latest_hashfile_version)
         if [[ -z "$VERSION" ]]; then
@@ -632,13 +661,29 @@ resolve_expected_checksum() {
 check_current() {
   [[ "$REINSTALL" == true ]] && return 0
 
-  local installed
-  installed=$(normalize_version "$(manifest_get version)")
-  if [[ -z "$installed" && -x "$WRAPPER" ]]; then
-    installed=$(normalize_version "$("$WRAPPER" --version 2>/dev/null || true)")
+  # Con manifest, la fuente de verdad es el tag: identifica el release exacto
+  # (incluye el sufijo +build, ej: v0.146.0 vs v0.146.0+android1).
+  local installed_tag=""
+  [[ -f "$MANIFEST" ]] && installed_tag=$(manifest_get tag)
+  if [[ -n "$installed_tag" ]]; then
+    if [[ "$installed_tag" == "$TAG" && -x "$BIN_FILE" && -x "$WRAPPER" ]]; then
+      if [[ "$UPDATE" == true ]]; then
+        info "$DISPLAY_NAME ya está actualizado a la última versión ($VERSION)."
+      else
+        info "$DISPLAY_NAME $VERSION ya está instalado. Usá -r para reinstalar."
+      fi
+      exit 0
+    fi
+    [[ -n "$installed_tag" ]] && info "Versión instalada: $installed_tag → actualizando a $TAG"
+    return 0
   fi
 
-  if [[ -n "$installed" && "$installed" == "$VERSION" && -x "$BIN_FILE" && -x "$WRAPPER" ]]; then
+  # Sin manifest (instalación manual o anterior a manifest_version): fallback
+  # a --version comparando el núcleo (no distingue +build).
+  local installed version_core
+  installed=$(normalize_version "$("$WRAPPER" --version 2>/dev/null || true)")
+  version_core=$(normalize_version "$VERSION")
+  if [[ -n "$installed" && "$installed" == "$version_core" && -x "$BIN_FILE" && -x "$WRAPPER" ]]; then
     if [[ "$UPDATE" == true ]]; then
       info "$DISPLAY_NAME ya está actualizado a la última versión ($VERSION)."
     else
@@ -893,6 +938,36 @@ _write_wrapper() {
     exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$BIN\" \"\$@\""
   fi
 
+  # Subcomandos denegados por configuración (WRAPPER_DENY_ARGS del .conf):
+  # bloquea flags que intentarían auto-actualizarse fuera del instalador
+  # (ej: codex update). Solo tokens seguros, fail-closed si el .conf es inválido.
+  # El bloque se arma completo solo si hay items (vacío → no se genera código).
+  # printf con comillas simples deja $ literales (el heredoc de abajo inserta
+  # el valor sin re-examinarlo).
+  local deny_block=""
+  if [[ -n "$WRAPPER_DENY_ARGS" ]]; then
+    local item deny_items=""
+    for item in $WRAPPER_DENY_ARGS; do
+      [[ "$item" =~ ^[a-zA-Z0-9_-]+$ ]] || {
+        err "WRAPPER_DENY_ARGS inválido en $CONF: '$item' (solo [a-zA-Z0-9_-])"
+        exit 1
+      }
+      deny_items+=" $item"
+    done
+    # shellcheck disable=SC2016  # $1/$a deben quedar literales en el wrapper
+    deny_block=$(printf '%s\n' \
+      '# Comandos denegados por configuración (WRAPPER_DENY_ARGS del .conf)' \
+      'if [[ $# -gt 0 ]]; then' \
+      "  for a in ${deny_items# }; do" \
+      '    [[ "$1" == "$a" ]] || continue' \
+      "    echo \"ERROR: el comando '\$a' está deshabilitado para $DISPLAY_NAME.\" >&2" \
+      "    echo \"Las actualizaciones se gestionan con el instalador:\" >&2" \
+      "    echo \"  bash install.sh $APP_NAME --update\" >&2" \
+      '    exit 1' \
+      '  done' \
+      'fi')
+  fi
+
   cat > "$wrapper_path" <<WRAPPER_EOF
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
@@ -918,6 +993,7 @@ unset LD_LIBRARY_PATH
 
 # Variables de entorno específicas de esta herramienta (definidas en el .conf)
 ${env_block}
+${deny_block}
 ${exec_cmd}
 WRAPPER_EOF
   chmod 755 "$wrapper_path"

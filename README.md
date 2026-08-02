@@ -97,13 +97,15 @@ bash install.sh kiro-cli -u                 # desinstalar
 
 ```bash
 bash install.sh codex                    # última versión (release de distribución generado por CI)
-bash install.sh codex -v 0.146.0         # versión específica
+bash install.sh codex -v 0.146.0         # versión específica (release estándar)
+bash install.sh codex -v 0.146.0+android1  # release con el parche de locks Android
 bash install.sh codex --update           # actualizar a la última versión
 bash install.sh codex -u                 # desinstalar
 ```
 
 **Por qué no se instala el binario oficial de OpenAI**: los assets Linux oficiales son **musl estáticos**, que en Android no resuelven DNS (leen `/etc/resolv.conf` de la raíz del sistema, inexistente sin proot) — el login y la API fallan. Por eso el workflow [build-codex.yml](.github/workflows/build-codex.yml) compila el CLI en CI desde el código oficial (`openai/codex`, Apache-2.0) para **bionic nativo** (`aarch64-linux-android`, NDK API 29): DNS (netd) y TLS (rustls/webpki) funcionan sin proot. En `amd64` (host Linux) se re-empaqueta el asset oficial musl con su digest SHA256 verificado contra la API upstream (fail-closed).
 
+- **Parche de locks Android**: desde Rust 1.89, `File::lock*` devuelve `Unsupported` en Android (rust-lang/rust#148325) y el TUI/exec de codex fallan. El build de arm64 aplica un parche generado ([`gen-codex-lock-patch.py`](scripts/gen-codex-lock-patch.py) → módulo `file_lock_shim` con `flock(2)`) y publica con tag `vX.Y.Z+androidN` (build metadata semver; `N` = `patch_rev`). El instalador preserva el `+build` en versión y tag, y `--update` migra automáticamente del release estándar al parcheado. `codex update` está bloqueado en el wrapper (todo pasa por `install.sh codex --update`).
 - **Escalable**: el CI detecta cada release nuevo de OpenAI (cron diario) y publica el asset en el [repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) (`codex-arm64.tar.gz`/`codex-amd64.tar.gz`) con digest y attestation. `--update` funciona sin tocar nada. Si un release upstream rompe el build bionic, no se publica y la última versión buena sigue instalable.
 - **Sandbox**: codex usa `landlock` por defecto. Si tu kernel Android no lo soporta, configurá `sandbox_mode = "off"` en `~/.codex/config.toml`.
 - **Ripgrep**: si codex reporta la falta de `rg`, instalalo con `pkg install ripgrep` (se busca por PATH, como los shims de agy).

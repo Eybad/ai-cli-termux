@@ -11,16 +11,23 @@ name: Build codex (bionic arm64 + musl amd64 verificado)
 #       digest SHA256 de la API de openai/codex (fail-closed: si no coincide,
 #       no se publica).
 #
-# Resultado: release de distribución con tags estándar vX.Y.Z en el repo de
-# distribución Eybad/ai-cli-termux-dist (el workflow corre en este repo, el
-# publish va al repo de dist con un PAT fine-grained — secret DIST_REPO_TOKEN).
-# El instalador (registry/codex.conf, RELEASE_SOURCE=github + release_digest)
-# resuelve versión y checksum automáticamente → `--update` sobrevive a cada
-# release nuevo de OpenAI sin tocar nada.
+# Resultado: release de distribución en el repo Eybad/ai-cli-termux-dist (el
+# workflow corre en este repo, el publish va al repo de dist con un PAT
+# fine-grained — secret DIST_REPO_TOKEN).
 #
-# Idempotente: si vX.Y.Z ya está publicado, el job de chequeo termina sin
-# trabajo. Si el build falla, no se publica nada (fail-closed: la última
-# versión buena sigue instalable).
+# Esquema de tags: el tag de dist lleva build metadata semver cuando el build
+# de Android aplica el parche de locks (File::lock* no funciona en android,
+# rust-lang/rust#148325):
+#   - android_patch=true  → vX.Y.Z+androidN  (N = patch_rev, default 1)
+#   - android_patch=false → vX.Y.Z           (tag estándar, sin parche)
+# El instalador (registry/codex.conf, RELEASE_SOURCE=github + release_digest)
+# preserva el +build en versión y tag → `--update` sobrevive a cada release
+# nuevo de OpenAI y distingue el release parcheado del estándar.
+#
+# Idempotente: si el tag de dist (DIST_TAG) ya está publicado, el job de
+# chequeo termina sin trabajo. Re-emitir una versión corregida se hace con
+# patch_rev=2 (vX.Y.Z+android2). Si el build falla, no se publica nada
+# (fail-closed: la última versión buena sigue instalable).
 #
 # Seguridad: valores del upstream validados por charset y normalizados a
 # commit SHA inmutable antes de usarse; actions pineadas por SHA; NDK
@@ -33,6 +40,14 @@ on:
         description: 'Versión específica de OpenAI Codex (ej: 0.146.0). Vacío = última.'
         required: false
         default: ''
+      patch_rev:
+        description: 'Rev del parche de locks Android (sufijo +androidN del tag de dist). Incrementar para re-emitir una versión corregida.'
+        required: false
+        default: '1'
+      android_patch:
+        description: 'Aplicar el parche de locks Android (tag vX.Y.Z+androidN). false = tag estándar sin parche.'
+        required: false
+        default: 'true'
   schedule:
     - cron: '17 4 * * *'   # diario 04:17 UTC
 
@@ -61,6 +76,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
       upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
+      dist_tag: ${{ steps.resolve.outputs.dist_tag }}
       should_build: ${{ steps.resolve.outputs.should_build }}
     steps:
       - name: Resolver versión upstream y estado del release propio
@@ -68,6 +84,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
+          PATCH_REV: ${{ inputs.patch_rev }}
+          ANDROID_PATCH: ${{ inputs.android_patch }}
         run: |
           set -euo pipefail
 
@@ -99,14 +117,27 @@ jobs:
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || {
             echo "ERROR: SHA del commit no resuelto para $UPSTREAM_TAG"; exit 1; }
 
+          # Tag de distribución: build metadata semver cuando el build de
+          # Android aplica el parche de locks (vX.Y.Z+androidN).
+          [[ "$PATCH_REV" =~ ^[0-9]+$ ]] || {
+            echo "ERROR: patch_rev inválido: '$PATCH_REV' (solo dígitos)"; exit 1; }
+          if [[ "$ANDROID_PATCH" == "true" ]]; then
+            DIST_TAG="v${VERSION}+android${PATCH_REV}"
+          else
+            DIST_TAG="v${VERSION}"
+          fi
+          [[ "$DIST_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\+android[0-9]+)?$ ]] || {
+            echo "ERROR: DIST_TAG inválido: '$DIST_TAG'"; exit 1; }
+
           echo "version=$VERSION"           >> "$GITHUB_OUTPUT"
           echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=$SHA"          >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$DIST_TAG"         >> "$GITHUB_OUTPUT"
 
           # Idempotencia: si el release de distribución ya existe, no rebuildear.
           # Lectura de repo público: no requiere el PAT del dist.
-          if gh release view "v${VERSION}" --repo "$DIST_REPO" >/dev/null 2>&1; then
-            echo "v${VERSION} ya publicado en $DIST_REPO; nada que hacer."
+          if gh release view "$DIST_TAG" --repo "$DIST_REPO" >/dev/null 2>&1; then
+            echo "$DIST_TAG ya publicado en $DIST_REPO; nada que hacer."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
             echo "should_build=true" >> "$GITHUB_OUTPUT"
@@ -127,6 +158,28 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ needs.check.outputs.upstream_sha }}
           path: upstream
+
+      - name: Checkout del proyecto (generador de parche, pin por SHA del run)
+        if: ${{ inputs.android_patch == 'true' }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: project
+
+      - name: Aplicar parche de locks Android (generador fail-closed)
+        if: ${{ inputs.android_patch == 'true' }}
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          PATCH_REV: ${{ inputs.patch_rev }}
+        run: |
+          set -euo pipefail
+          # El generador valida el inventario de call sites y el core de la
+          # versión; cualquier desvío del source upstream aborta el build
+          # (fail-closed: no se publica un binario sin el parche aplicado).
+          python3 "$GITHUB_WORKSPACE/project/scripts/gen-codex-lock-patch.py" \
+            --apply --src "$GITHUB_WORKSPACE/upstream/codex-rs" \
+            --dist-version "${VERSION}+android${PATCH_REV}"
+          grep -n '^version = ' "$GITHUB_WORKSPACE/upstream/codex-rs/Cargo.toml" | head -2
 
       - name: Cache cargo (registro + target)
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -264,6 +317,11 @@ jobs:
           # Cargo.toml (mantenimiento de openai): actualizar solo openssl-sys para que
           # openssl-src quede registrado sin tocar versiones probadas de otras deps (ej. rama-*).
           cargo update -p openssl-sys
+          # El parche de locks bumpó [workspace.package] version (+build): los
+          # crates que heredan version.workspace quedaron desincronizados en el
+          # lock. Resincronizar solo los miembros del workspace (no toca deps
+          # externas); --locked abajo valida que no falte nada.
+          cargo update --workspace
           # --locked: falla si el Cargo.lock (ya regenerado) necesita cambios.
           cargo build --locked --release -p codex-cli --target aarch64-linux-android
 
@@ -361,9 +419,10 @@ jobs:
       attestations: write
       id-token: write
     env:
-      VERSION: ${{ needs.check.outputs.version }}
+      DIST_TAG: ${{ needs.check.outputs.dist_tag }}
       UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
       UPSTREAM_SHA: ${{ needs.check.outputs.upstream_sha }}
+      ANDROID_PATCH: ${{ inputs.android_patch }}
     steps:
       - name: Descargar assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -384,17 +443,23 @@ jobs:
           NOTES_FILE="$RUNNER_TEMP/codex-notes.md"
           # printf evita heredocs con indentación YAML (quedaría como bloque markdown).
           printf '%s\n' \
-            "OpenAI Codex CLI v${VERSION} — build propio para Termux." \
+            "OpenAI Codex ${DIST_TAG#v} — build propio para Termux." \
             "" \
             "- **codex-arm64.tar.gz**: compilado en este workflow desde el código oficial (openai/codex@${UPSTREAM_TAG}, commit ${UPSTREAM_SHA}) con target aarch64-linux-android (bionic, NDK API 29). DNS y TLS nativos; sin proot." \
             "- **codex-amd64.tar.gz**: asset oficial musl de OpenAI, digest SHA256 verificado contra la API upstream (fail-closed). Para host Linux." \
             "" \
             "Instalación: \`bash install.sh codex\` (repo Eybad/ai-cli-termux)." \
             > "$NOTES_FILE"
-          gh release create "v${VERSION}" \
+          if [[ "$ANDROID_PATCH" == "true" ]]; then
+            printf '%s\n' \
+              "" \
+              "**arm64**: incluye el parche de locks de archivo para Android (file_lock_shim, flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325)." \
+              >> "$NOTES_FILE"
+          fi
+          gh release create "$DIST_TAG" \
             codex-arm64.tar.gz codex-amd64.tar.gz \
             --repo "$DIST_REPO" \
-            --title "OpenAI Codex v${VERSION}" \
+            --title "OpenAI Codex ${DIST_TAG#v}" \
             --notes-file "$NOTES_FILE"
           sha256sum codex-arm64.tar.gz codex-amd64.tar.gz
 

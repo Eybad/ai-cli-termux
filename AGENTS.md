@@ -49,6 +49,7 @@ Si la respuesta es sí, no tocar `install.sh`.
 | Actualizar hash de un release existente | `sha256.txt` |
 | Automatizar actualización de hashes en CI | `.github/workflows/update-hashes.yml` |
 | Build propio de un tool (sin builds compatibles con Android) | `.github/workflows/build-codex.yml` (patrón codex) |
+| Parche de source upstream (generado, no versionado) | `scripts/gen-codex-lock-patch.py` (inventario fail-closed) |
 
 ## EXEC_DIRECT (binarios nativos sin overlay glibc)
 
@@ -56,7 +57,11 @@ Si la respuesta es sí, no tocar `install.sh`.
 
 ## Patrón "build en CI" (codex)
 
-Si un vendor solo publica builds incompatibles con Android (ej. musl estático sin DNS en Android), no se instala ese binario: se compila en CI desde el código oficial (pin por tag + commit SHA; si el `Cargo.lock` del tag upstream está desincronizado con su `Cargo.toml`, el workflow lo regenera con `cargo update` y valida con `--locked`) y se publica un release de distribución `vX.Y.Z` (mirror de la versión upstream) en el repo de distribución dedicado (`Eybad/ai-cli-termux-dist`) con digest + attestation del workflow (emitida por el repo del proyecto: `ATTEST_REPO`). El instalador queda igual (`RELEASE_SOURCE=github` + `release_digest` apuntando al repo de distribución) y `--update` sobrevive a cada release upstream: el cron del workflow rebuilda solo cuando hay versión nueva. El publish cross-repo usa el secret `DIST_REPO_TOKEN` (PAT fine-grained con `Contents: read/write` sobre el repo de dist; el `GITHUB_TOKEN` del workflow no puede escribir en otro repo). Si el build falla, no se publica (fail-closed: la última buena sigue instalable). Ver `.github/workflows/build-codex.yml`.
+Si un vendor solo publica builds incompatibles con Android (ej. musl estático sin DNS en Android), no se instala ese binario: se compila en CI desde el código oficial (pin por tag + commit SHA; si el `Cargo.lock` del tag upstream está desincronizado con su `Cargo.toml`, el workflow lo regenera con `cargo update` y valida con `--locked`) y se publica un release de distribución en el repo de distribución dedicado (`Eybad/ai-cli-termux-dist`) con digest + attestation del workflow (emitida por el repo del proyecto: `ATTEST_REPO`). El instalador queda igual (`RELEASE_SOURCE=github` + `release_digest` apuntando al repo de distribución) y `--update` sobrevive a cada release upstream: el cron del workflow rebuilda solo cuando hay versión nueva. El publish cross-repo usa el secret `DIST_REPO_TOKEN` (PAT fine-grained con `Contents: read/write` sobre el repo de dist; el `GITHUB_TOKEN` del workflow no puede escribir en otro repo). Si el build falla, no se publica (fail-closed: la última buena sigue instalable). Ver `.github/workflows/build-codex.yml`.
+
+### Patch series con semver build metadata (vX.Y.Z+androidN)
+
+Si el build de Android necesita un parche sobre el source upstream, el tag de dist lleva build metadata: `vX.Y.Z+androidN` (`patch_rev`, default 1; re-emitir una corrección = `patch_rev=2`). El parche **se genera, no se versiona**: `scripts/gen-codex-lock-patch.py` reescribe el source (inventario fail-closed de call sites; desvío → abort del build) y el workflow lo aplica al checkout antes de compilar. `install.sh` preserva `+build` (versión y tag) y `check_current` compara el **tag del manifest**; `verify.sh` compara núcleos normalizados (el asset amd64 oficial convive en el mismo tag). Caso de uso: `File::lock*` → `Unsupported` en Android (rust-lang/rust#148325), shim `file_lock_shim` con `flock(2)`. Detalles: `docs/adr/0001-release-scheme.md`.
 
 ## Invariants (nunca romper)
 

@@ -5,3 +5,15 @@ Los binarios compilados en CI (patrón "build en CI", hoy solo codex) se publica
 Se eligió mirror de versión upstream (`vX.Y.Z` = versión de openai/codex) sobre una serie propia (`v0.1.0`): `verify.sh` compara la versión ejecutada contra el manifest y el pinning de `sha256.txt` indexa por tag — el mirror hace ambos funcionar sin fricción.
 
 Publish cross-repo: el workflow corre en el repo del proyecto y publica en el dist con un PAT fine-grained del usuario (secret `DIST_REPO_TOKEN`); el `GITHUB_TOKEN` del workflow no puede escribir en otro repo. La attestation SLSA la emite el repo del proyecto (donde corre el workflow), por eso `registry/codex.conf` define `ATTEST_REPO` apuntando al repo emisor.
+
+## Patch series con semver build metadata (vX.Y.Z+androidN)
+
+Si el build de Android necesita un parche sobre el código upstream (no es el binario oficial + patchelf: es código que se compila distinto), el tag de dist lleva **build metadata semver** (`vX.Y.Z+androidN`, `N` = `patch_rev`, default 1):
+
+- **El parche se genera, no se versiona**: `scripts/gen-codex-lock-patch.py` reescribe el source upstream de forma determinista y fail-closed (inventario de call sites; cualquier desvío aborta el build). El workflow aplica el generador al checkout del source y compila; un binario sin parche nunca se publica.
+- **Por qué no `vX.Y.Z+1` ni una serie propia (`v0.146.0.1`)**: el build metadata se ignora en la precedencia semver (no hay riesgo de "actualización" accidental hacia el release roto) y Cargo tolera `version = "0.146.0+android1"` (`CARGO_PKG_VERSION` lo reporta, `cargo update --workspace` resincroniza el lock). Una serie propia rompería el mirror de versión (verify.sh compara versión contra manifest).
+- **El instalador lo soporta como caso general**: `install.sh` preserva `+build` en versión y tag (`parse_version_tag`; el tag se reconstruye desde la versión completa con `+build`, no desde el núcleo) y `check_current` compara el **tag del manifest** (identifica el release exacto: `v0.146.0` ≠ `v0.146.0+android1`, así `--update` migra del release roto al parcheado). `verify.sh` compara núcleos normalizados, así que el asset `amd64` oficial (reporta `0.146.0`) convive en el mismo tag.
+- **Re-emitir una corrección**: `patch_rev=2` → `vX.Y.Z+android2` (el gate de idempotencia es por tag de dist, no por versión upstream). Si upstream arregla el problema en std, `android_patch=false` vuelve al tag estándar.
+- **Fallback fail-closed**: si el parche no aplica (source upstream cambiado), el workflow aborta y la última versión buena sigue instalable.
+
+Caso de uso actual: `File::{try_,}{lock,lock_shared}` devuelven `Unsupported` en Android desde Rust 1.89 (flock no se usa en esa plataforma; rust-lang/rust#148325) → codex TUI/exec fallan. El shim `file_lock_shim` usa `flock(2)` directo en android (EWOULDBLOCK → `std::fs::TryLockError::WouldBlock`) y delega en std fuera de android.
