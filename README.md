@@ -263,12 +263,12 @@ ai-cli-termux/
 ├── verify.sh                   # Verificador post-instalación (10 pasos)
 ├── sha256.txt                  # Pinning opcional de hashes
 ├── AGENTS.md                   # Invariants y convenciones para contribuir
-├── CONTEXT.md                  # Glosario del proyecto
 ├── registry/                   # Configuración por herramienta
 │   ├── opencode.conf
 │   ├── agy.conf
 │   ├── kiro-cli.conf
 │   ├── codex.conf
+│   ├── cursor-agent.conf
 │   └── patch_va39.py           # Parche adaptativo ARM64 (VA39 + faccessat2)
 ├── scripts/
 │   └── gen-codex-lock-patch.py # Generador fail-closed del parche de locks (CI)
