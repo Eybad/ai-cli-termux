@@ -49,3 +49,9 @@ opencode/v1.18.9  b16bd7593ea960a25d9c6849b3023bcd9b9244a6f51675341fd2052043b067
 
 # agy (Antigravity CLI) — usa el SHA512 del manifest JSON de Google.
 # No agregar entradas para agy acá.
+
+# cursor-agent — CDN propio (downloads.cursor.com/lab/<version>/linux/<arch>/...).
+# Pin obligatorio (CHECKSUM_SOURCE=hashfile): el vendor no publica checksums
+# ni manifest. Actualización manual: detectar la versión nueva en el script
+# de install de cursor.com, descargar el tarball, sha256sum y actualizar acá.
+cursor-agent/v2026.07.23-e383d2b  f40b99647cb24e0da885e97620a2048034f1fe8961910d573d827d77c4d26dcb

@@ -103,6 +103,7 @@ fi
 # Cargar configuración
 APP_NAME=""; DISPLAY_NAME=""; ELF_NAME=""; CHECKSUM_ALGO="sha256"
 CHECKSUM_SOURCE="hashfile"; NEEDS_PATCHELF=true; EXEC_DIRECT=false
+ALIASES=""; EXTRA_BINS=""
 # shellcheck source=/dev/null
 source "$CONF"
 
@@ -238,10 +239,14 @@ fi
 M_EXTRA_BINS=""
 [[ -f "$MANIFEST" ]] && M_EXTRA_BINS=$(manifest_get extra_bins "$MANIFEST")
 
-if [[ -z "$M_EXTRA_BINS" ]]; then
+# WARN solo si el .conf ACTUAL define EXTRA_BINS y el manifest no los registra
+# (instalación previa a la feature): reinstalar audita los compañeros. Un tool
+# sin EXTRA_BINS tiene el manifest sin el campo por diseño — no es una
+# instalación vieja y no debe emitir ruido.
+if [[ -n "$EXTRA_BINS" && -z "$M_EXTRA_BINS" ]]; then
   warn "Manifest sin extra_bins (instalación previa a esta feature); auditoría de binarios compañeros omitida"
   note "Reinstalá con: bash install.sh $APP_NAME -r para auditar también los binarios compañeros"
-else
+elif [[ -n "$M_EXTRA_BINS" ]]; then
   for extra in $M_EXTRA_BINS; do
     extra_bin="$LIBEXEC_DIR/$extra"
     extra_wrapper="$PREFIX/bin/$extra"
@@ -306,6 +311,22 @@ if [[ -x "$WRAPPER" ]]; then
 else
   fail "Wrapper no encontrado o no ejecutable: $WRAPPER"
 fi
+
+# ── 8.1. Aliases (ALIASES del .conf/manifest) ─────────────────────────────────
+# El manifest es la fuente de verdad instalada; fallback al .conf (mismo
+# patrón que extra_bins, sección 5.2). Sin aliases → se omite: la mayoría de
+# los tools no define ninguno y no debe emitir ni warning ni ruido.
+M_ALIASES=""
+[[ -f "$MANIFEST" ]] && M_ALIASES=$(manifest_get aliases "$MANIFEST")
+[[ -n "$M_ALIASES" ]] || M_ALIASES="$ALIASES"
+for alias_name in $M_ALIASES; do
+  alias_target="$PREFIX/bin/$alias_name"
+  if [[ -L "$alias_target" && "$(readlink "$alias_target")" == "$WRAPPER" ]]; then
+    pass "Alias OK: $alias_target → $WRAPPER"
+  else
+    fail "Alias no encontrado o no apunta al wrapper: $alias_target"
+  fi
+done
 
 # ── 9. Loader glibc y DNS (solo modo overlay; ejecución directa no lo usa) ─────
 # EXEC_DIRECT=true: el binario corre nativo (estático musl o bionic/Android),

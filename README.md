@@ -36,6 +36,7 @@
 | **`agy`** (Antigravity CLI) | [Google Cloud Storage](https://antigravity.google) (manifest JSON) | SHA512 dinámico del manifest | Parche adaptativo VA39 + `faccessat2`, shim `libc.so`, DNS cgo |
 | **`kiro-cli`** (Kiro CLI) | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 del `manifest.json` oficial | Última versión automática del manifest |
 | **`codex`** (OpenAI Codex) | [Repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) — **build propio en CI** desde el código oficial (Apache-2.0) | SHA256 del asset vía GitHub API + attestation SLSA del workflow | Binario nativo bionic (arm64, sin proot) o musl verificado (amd64); `EXEC_DIRECT` |
+| **`cursor-agent`** (Cursor Agent CLI) | [CDN propio](https://downloads.cursor.com/lab/...) (`url_template`, sin endpoint "latest" público) | SHA256 del tarball pineado a mano en `sha256.txt` | Bundle node embebido patcheado (`ELF_NAME` + `ENTRY_POINT`), alias `agent`, `agent update` bloqueado, shims de navegador y DNS (patrón agy), `rg` del sistema por PATH |
 
 ## Requisitos
 
@@ -103,6 +104,21 @@ bash install.sh codex -u                 # desinstalar
 - **Ripgrep**: si codex reporta la falta de `rg`, instalalo con `pkg install ripgrep` (se busca por PATH, como los shims de agy).
 - **Releases del proyecto vs de distribución**: los releases `v0.146.0+` de codex viven en el repo de distribución dedicado (solo binarios). Los releases `v1.0.0+` de este repo versionan el instalador en sí (este README, `install.sh`, `verify.sh`, `registry/`). El instalador distingue por asset, no por repo.
 
+### cursor-agent (Cursor Agent CLI)
+
+```bash
+bash install.sh cursor-agent -v 2026.07.23-e383d2b  # versión específica (ver pin en sha256.txt)
+bash install.sh cursor-agent --update               # última versión registrada en sha256.txt
+bash install.sh cursor-agent -r                     # reinstalar
+bash install.sh cursor-agent -u                     # desinstalar (borra también el alias `agent`)
+```
+
+- **Bundle node**: Cursor distribuye un tarball con un runtime **node embebido** (ELF glibc de 125 MB, no-PIE) que se patchea al overlay (`ELF_NAME="node"`) y se lanza vía el launcher bash del bundle (`ENTRY_POINT="cursor-agent"`). El instalador oficial expone el comando como `agent`; se replica con `ALIASES` (symlink gestionado).
+- **Sin checksums del vendor**: Cursor no publica checksums ni manifest, y la versión va hardcodeada en el script de [cursor.com/install](https://cursor.com/install). El pin se mantiene a mano en `sha256.txt` (ver el comentario del archivo): detectar la versión nueva, descargar el tarball (`https://downloads.cursor.com/lab/<version>/linux/arm64/agent-cli-package.tar.gz`), `sha256sum`, actualizar la entrada y `bash install.sh cursor-agent --update`. El CDN tuvo incidentes de 403 históricos (artifacts no publicados): el pin evita instalar versiones rotas.
+- **`agent update` bloqueado** (`WRAPPER_DENY_ARGS`): el updater interno descargaría versiones sin verificación de checksum; las actualizaciones pasan siempre por `install.sh cursor-agent --update` (fail-closed). Nota: el deny es *policy* del wrapper, no una frontera — ejecutar el launcher del bundle directo (`libexec/cursor-agent/cursor-agent update`) o `node index.js update` la esquiva. El código JS del CLI (`index.js`, chunks) se cubre con el pin del tarball al instalar, pero no se audita individualmente después (verify.sh hashea los ELFs).
+- **`rg` del sistema**: el CLI busca `rg` por PATH (`pkg install ripgrep`); no se usa el binario del bundle. `cursorsandbox` y `crepectl` (búsqueda/sandbox del bundle) se patchean y auditan vía `EXTRA_BINS`.
+- **Login**: requiere cuenta de cursor.com (`agent login` abre el navegador vía `termux-open-url`, redirigido por los shims).
+
 #### TUI en Termux: fix del runtime bun
 
 El TUI de `kiro-cli` (sin argumentos) delega el render en un runtime [bun](https://bun.sh) que el cliente descarga a `~/.local/share/kiro-cli/` (`bun` + `tui.js`). El build que descarga es glibc y no puede ejecutarse en Termux (interpreter del sistema inexistente): el TUI muestra `Launching...` y falla con `error: No such file or directory (os error 2)`.
@@ -152,9 +168,10 @@ bash install.sh <tool> --update
 - **agy**: última versión del manifest de Google. El parche adaptativo (`registry/patch_va39.py`) resuelve los cambios de estructura por pattern-matching de instrucciones ARM64, y el hook ejecuta un smoke test (`--version`) post-parche: si algo no se puede resolver, la instalación aborta y se restaura la versión anterior.
 - **kiro-cli**: última versión del `manifest.json` del CDN de Amazon.
 - **codex**: última versión publicada por el build propio de CI en el repo de distribución ([`build-codex.yml`](.github/workflows/build-codex.yml)); digest + attestation del workflow (emitida por el repo del proyecto).
+- **cursor-agent**: última versión registrada en `sha256.txt` (pin manual; el vendor no publica endpoint "latest" — ver [cursor-agent](#cursor-agent-cursor-agent-cli)). Detecta versiones con prerelease/build (ej: `2026.07.23-e383d2b`).
 
 > [!NOTE]
-> Ninguna herramienta requiere tocar `sha256.txt` para el flujo default: la versión y el checksum se resuelven automáticamente y fail-closed desde la fuente del vendor. El archivo queda como capa opcional de pinning.
+> Para la mayoría de las herramientas no hace falta tocar `sha256.txt`: la versión y el checksum se resuelven automáticamente y fail-closed desde la fuente del vendor (el archivo queda como capa opcional de pinning). **Excepción: `cursor-agent`** — su pin en `sha256.txt` es la única fuente de versiones (CDN sin manifest), y `--update` toma de ahí la última registrada.
 
 ## Verificación
 

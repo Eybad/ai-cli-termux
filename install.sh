@@ -154,6 +154,17 @@ WRAPPER_ENV=""
 # (ej: kiro-cli delega el TUI a kiro-cli-chat). Se patchean igual que ELF_NAME,
 # reciben su propio wrapper en $PREFIX/bin y quedan auditados en el manifest.
 EXTRA_BINS=""
+# Entry point del bundle: si el CLI se ejecuta vía un script del paquete
+# (ej: bundles node/python con launcher bash) en vez del ELF patcheado, el
+# wrapper principal execa "$LIBEXEC_DIR/$ENTRY_POINT" en lugar del binario.
+# Requiere NEEDS_PATCHELF=true: el script lanza el ELF del overlay glibc y
+# ELF_NAME sigue siendo el binario auditado por verify.sh.
+ENTRY_POINT=""
+# Alias de comando: symlinks adicionales en $PREFIX/bin apuntando al wrapper
+# (ej: Cursor instala "agent" como nombre primario además de "cursor-agent").
+# Fail-closed: no se pisan binarios existentes (ver create_wrapper); se crean
+# con el wrapper y se limpian en uninstall/cleanup.
+ALIASES=""
 # Subcomandos denegados en el wrapper (ej: WRAPPER_DENY_ARGS="update" en codex).
 # Default vacío: el bloque de denegación no se genera.
 WRAPPER_DENY_ARGS=""
@@ -166,6 +177,47 @@ for _field in APP_NAME DISPLAY_NAME RELEASE_SOURCE CHECKSUM_ALGO CHECKSUM_SOURCE
   [[ -n "${!_field:-}" ]] || { err "$CONF: el campo '$_field' es obligatorio."; exit 1; }
 done
 
+# Charset seguro de los identificadores que se interpolan en el wrapper y en
+# rutas de $PREFIX/bin (defensa en profundidad: un .conf malicioso con
+# metacaracteres de shell podría romper las comillas del heredoc del wrapper).
+# DISPLAY_NAME admite espacios (es texto de mensajes) pero no comillas/$/` .
+_name_is_valid() {
+  # Nombre de archivo simple: charset [a-zA-Z0-9._-] y no "." ni ".." como
+  # token completo — un path de navegación validaría el charset pero apunta a
+  # directorios (entry point → exec de un dir, alias → $PREFIX/bin/..).
+  [[ "$1" =~ ^[a-zA-Z0-9._-]+$ && "$1" != "." && "$1" != ".." ]]
+}
+for _field in APP_NAME ELF_NAME; do
+  _name_is_valid "${!_field}" || {
+    err "$CONF: '$_field' inválido: '${!_field}' (solo [a-zA-Z0-9._-], sin '.' ni '..')."
+    exit 1
+  }
+done
+# DISPLAY_NAME admite espacios pero no comillas, $, backtick ni newline: viajan
+# al heredoc del wrapper sin quoting — comillas/$/backtick romperían sus
+# comillas (inyección), un newline rompe la línea del heredoc (syntax error al
+# ejecutar el wrapper). Se usa grep -F por carácter (patrón fijo): construir
+# este set con comillas en un case pattern (ej: *[\"'\$\`]*) es frágil en
+# bash — el \" dentro de [ ] termina el contexto de comillas dobles y la
+# comilla simple abre un string sin cerrar.
+for _bad in '"' "'" '$' '`'; do
+  if printf '%s' "$DISPLAY_NAME" | grep -qF "$_bad"; then
+    err "$CONF: DISPLAY_NAME inválido: contiene comillas, \$ , backtick o caracteres de control."
+    exit 1
+  fi
+done
+# Newline/CR no pueden ir por grep -F: GNU grep usa \n dentro del patrón como
+# separador de patrones (un patrón "\n" se vuelve patrón vacío y matchea
+# siempre). Case-glob con el carácter literal. También se rechaza el resto de
+# los bytes de control (0x01-0x1f, 0x7f): un ESC en DISPLAY_NAME viajaría al
+# terminal del usuario en err/wrapper (ANSI injection), sin necesidad de romper
+# el heredoc.
+case "$DISPLAY_NAME" in
+  *$'\n'*|*$'\r'*|*[$'\x01'-$'\x1f'$'\x7f']*)
+    err "$CONF: DISPLAY_NAME inválido: contiene comillas, \$ , backtick o caracteres de control."
+    exit 1 ;;
+esac
+
 # Validar EXTRA_BINS (fail-fast en el .conf): nombres de archivo simples y solo
 # con sentido si se aplica patchelf — los compañeros del bundle glibc sin
 # overlay no pueden ejecutarse y verify.sh no podría auditar su integridad.
@@ -175,11 +227,41 @@ if [[ -n "$EXTRA_BINS" ]]; then
     exit 1
   fi
   for _extra in $EXTRA_BINS; do
-    case "$_extra" in
-      *=*|*/*|*" "*)
-        err "$CONF: EXTRA_BINS inválido: '$_extra' (solo nombre de archivo, sin '=' ni '/')."
-        exit 1 ;;
-    esac
+    _name_is_valid "$_extra" || {
+      err "$CONF: EXTRA_BINS inválido: '$_extra' (solo [a-zA-Z0-9._-], sin '.' ni '..')."
+      exit 1
+    }
+  done
+fi
+
+# Validar ENTRY_POINT (fail-fast en el .conf): nombre de archivo simple dentro
+# del bundle y solo con overlay glibc — el script lanza el ELF patcheado.
+# La existencia real del script se valida en create_wrapper (post-extract).
+if [[ -n "$ENTRY_POINT" ]]; then
+  _name_is_valid "$ENTRY_POINT" || {
+    err "$CONF: ENTRY_POINT inválido: '$ENTRY_POINT' (solo [a-zA-Z0-9._-], sin '.' ni '..')."
+    exit 1
+  }
+  if [[ "$NEEDS_PATCHELF" != true ]]; then
+    err "$CONF: ENTRY_POINT requiere NEEDS_PATCHELF=true (el script lanza el ELF del overlay glibc)."
+    exit 1
+  fi
+fi
+
+# Validar ALIASES (fail-fast en el .conf): nombres de comando simples, distintos
+# del wrapper principal. La colisión con binarios existentes en $PREFIX/bin se
+# chequea en create_wrapper (fail-closed: nunca se pisa un archivo que no sea
+# nuestro symlink).
+if [[ -n "$ALIASES" ]]; then
+  for _alias in $ALIASES; do
+    _name_is_valid "$_alias" || {
+      err "$CONF: ALIASES inválido: '$_alias' (solo [a-zA-Z0-9._-], sin '.' ni '..')."
+      exit 1
+    }
+    if [[ "$_alias" == "$APP_NAME" ]]; then
+      err "$CONF: ALIASES no puede repetir APP_NAME ('$APP_NAME' ya es el wrapper)."
+      exit 1
+    fi
   done
 fi
 
@@ -234,16 +316,43 @@ cleanup() {
   if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
     if [[ $rc -ne 0 && "$INSTALL_DONE" != true ]]; then
       warn "Instalación fallida ($DISPLAY_NAME): restaurando versión anterior..."
+      # Delta de esta corrida: los shims/aliases NUEVOS que la versión previa
+      # no registraba quedarían huérfanos tras el rollback (el registro viejo
+      # no los conoce y un uninstall futuro no los limpiaría). Solo se borran
+      # los que siguen siendo nuestros (marcador específico del tool / symlink
+      # al wrapper) y no estaban en el backup; el estado previo no se degrada.
+      _remove_orphan_shims "$BACKUP_DIR/shims.txt"
+      _remove_orphan_aliases "$BACKUP_DIR/$(basename "$MANIFEST")"
       rm -rf "$LIBEXEC_DIR"
       mv "$BACKUP_DIR" "$LIBEXEC_DIR"
+      # Restaurar el wrapper de la versión previa (copiado al backup antes de
+      # instalar): el wrapper nuevo de la corrida fallida puede apuntar a un
+      # entry point que el bundle viejo no tiene (o tener un deny/env distintos).
+      # Sin esto, un upgrade fallido deja el wrapper nuevo sobre el bundle
+      # viejo y el CLI que funcionaba queda roto.
+      if [[ -f "$LIBEXEC_DIR/.wrapper" ]]; then
+        mv "$LIBEXEC_DIR/.wrapper" "$WRAPPER"
+      else
+        rm -f "$WRAPPER"
+      fi
     else
       rm -rf "$BACKUP_DIR"
     fi
   elif [[ $rc -ne 0 && "$INSTALL_DONE" != true && "$FRESH_INSTALL" == true ]]; then
     warn "Instalación fallida ($DISPLAY_NAME): limpiando archivos incompletos..."
+    # Los shims del hook y su registro viven en rutas separadas: primero se
+    # limpian los shims (el registro shims.txt está en libexec, que se borra
+    # recién después). La guardia de _remove_registered_shims solo toca
+    # archivos que sigan siendo nuestros shims.
+    _remove_registered_shims
     rm -rf "$LIBEXEC_DIR"
     rm -f "$WRAPPER"
     _remove_extra_wrappers "$(installed_extra_bins)"
+    # La corrida pudo crear algunos aliases antes de fallar: limpiarlos con la
+    # guardia de propiedad. En el camino de restauración (BACKUP_DIR) no se
+    # tocan: los symlinks de la versión previa siguen apuntando a $WRAPPER,
+    # que no se borra, y el rollback no debe degradar el estado anterior.
+    _remove_aliases "$(installed_aliases)"
   fi
   exit $rc
 }
@@ -257,15 +366,27 @@ normalize_version() {
   printf '%s' "$out"
 }
 
+# Regex compartida del formato de versión (semver X.Y.Z[-pre][+build]).
+# Fuente única para parse_version_tag (bash [[ =~ ]]) y
+# latest_hashfile_version (awk): si cambia el formato, ambos consumidores
+# derivan del mismo par de constantes y no pueden divergir.
+# Portabilidad: se usan clases de un solo carácter ([.] y [+]) en vez de
+# escapes (\. y \+), que mawk trata como literales no escapados con warning
+# (solo gawk los respeta como literales).
+VERSION_CORE_RE='[0-9]+[.][0-9]+[.][0-9]+'
+# Prerelease/build estrictos de semver: solo [0-9A-Za-z-] con '.' como
+# separador entre identifiers (sin '_').
+VERSION_SUFFIX_RE='(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?'
+
 # Versión con build metadata opcional (semver: X.Y.Z[-pre][+build]).
 # Preserva el sufijo +build: distingue releases del mismo núcleo (ej: el
 # release parcheado de codex "0.146.0+android1"). Fail-closed: si el input
 # no matchea el formato completo, devuelve vacío (no instalar mal).
 parse_version_tag() {
   local raw="$1" out=""
-  # Patrón en variable: `\+` literal no compila inline en [[ =~ ]]
-  # (el backslash se consume antes de llegar al motor regex).
-  local version_re='^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z._-]+)?$'
+  # Patrón en variable: el motor [[ =~ ]] exige el regex sin procesar por
+  # el shell; en variable se preserva tal cual.
+  local version_re="^v?${VERSION_CORE_RE}${VERSION_SUFFIX_RE}$"
   if [[ "$raw" =~ $version_re ]]; then
     out="${raw#v}"
   fi
@@ -285,15 +406,18 @@ lookup_hashfile() {
 
 # Última versión de la herramienta registrada en sha256.txt.
 # Solo considera entradas compatibles con la arquitectura actual:
-#   tool/vX.Y.Z            (genérica, sirve para cualquier arch)
-#   tool/vX.Y.Z:$ARCH      (específica de la arquitectura detectada)
-# Requiere que ARCH esté resuelto (preflight corrió antes).
+#   tool/vX.Y.Z[-pre][+build]       (genérica, sirve para cualquier arch)
+#   tool/vX.Y.Z[-pre][+build]:$ARCH (específica de la arquitectura detectada)
+# El formato de versión deriva de VERSION_CORE_RE/VERSION_SUFFIX_RE (la misma
+# fuente que parse_version_tag): acepta prerelease (ej: 2026.07.23-e383d2b) y
+# build metadata (ej: 0.146.0+android1). Requiere que ARCH esté resuelto
+# (preflight corrió antes).
 latest_hashfile_version() {
   [[ -f "$HASH_FILE" ]] || return 0
-  awk -v app="$APP_NAME" -v arch="${ARCH:-}" '
+  awk -v app="$APP_NAME" -v arch="${ARCH:-}" -v core="$VERSION_CORE_RE" -v suf="$VERSION_SUFFIX_RE" '
     {
       sub(/\r$/, "")
-      if ($1 !~ "^" app "/v[0-9]+\\.[0-9]+\\.[0-9]+($|:" arch "$)") next
+      if ($1 !~ "^" app "/v" core suf "($|:" arch "$)") next
       v = $1
       sub("^" app "/v", "", v)
       sub(":.*$", "", v)
@@ -330,29 +454,104 @@ installed_extra_bins() {
   printf '%s' "$list"
 }
 
+# Lista de alias efectivamente instalados. Misma fuente de verdad que los
+# binarios compañeros: manifest primero, fallback al .conf actual.
+installed_aliases() {
+  local list=""
+  [[ -f "$MANIFEST" ]] && list=$(manifest_get aliases "$MANIFEST")
+  [[ -z "$list" ]] && list="$ALIASES"
+  printf '%s' "$list"
+}
+
 # Elimina los wrappers de binarios compañeros del bundle.
 _remove_extra_wrappers() {
   local list="$1" extra
   for extra in $list; do
+    # Defensa en profundidad: la lista deriva del manifest (podría estar
+    # tampearado); solo se borran nombres de archivo simples.
+    _name_is_valid "$extra" || continue
     rm -f "$PREFIX/bin/$extra"
   done
 }
 
+# Elimina los symlinks de alias del wrapper. Guardia de propiedad: solo borra
+# symlinks que apunten a nuestro wrapper — un binario real que el usuario haya
+# instalado después con el mismo nombre no se toca. La lista dice QUÉ intentar
+# borrar (manifest/.conf); la guardia decide SI se borra (estado real en disco).
+_remove_aliases() {
+  local list="$1" alias target
+  for alias in $list; do
+    _name_is_valid "$alias" || continue
+    target="$PREFIX/bin/$alias"
+    if [[ -L "$target" && "$(readlink "$target")" == "$WRAPPER" ]]; then
+      rm -f "$target"
+    fi
+  done
+}
+
 # Elimina los shims registrados por el pre_wrapper_hook en
-# $LIBEXEC_DIR/shims.txt (una ruta por línea). Guardia: solo borra archivos
-# que sigan siendo nuestros shims — un binario real que el usuario haya
-# instalado después con el mismo nombre no se toca.
+# $LIBEXEC_DIR/shims.txt (una ruta por línea). Guardia de propiedad: solo borra
+# archivos que sigan siendo NUESTROS shims — el marcador es específico del tool
+# (# termux-shim: $APP_NAME), así un shim del otro tool del proyecto (codex y
+# cursor-agent comparten los mismos nombres de navegador) no se borra, y un
+# binario real que el usuario haya instalado después no se toca. Un shim con el
+# marcador genérico viejo (pre-ownership) no matchea: se conserva (los hooks lo
+# migran al marcador específico en el próximo install).
 _remove_registered_shims() {
   local shims_file="$LIBEXEC_DIR/shims.txt"
   [[ -f "$shims_file" ]] || return 0
   local name shim
   while IFS= read -r name; do
     [[ -z "$name" || "$name" == \#* ]] && continue
+    # Defensa en profundidad: el registro podría estar tampearado (shims.txt
+    # vive en $LIBEXEC_DIR); rechazar cualquier token que no sea un nombre de
+    # archivo simple antes de construir $PREFIX/bin/$name.
+    _name_is_valid "$name" || continue
     shim="$PREFIX/bin/$name"
-    if [[ -f "$shim" ]] && grep -qE 'termux-(open-url|clipboard-set)' "$shim" 2>/dev/null; then
+    if [[ -f "$shim" ]] && grep -qF "termux-shim: $APP_NAME" "$shim" 2>/dev/null; then
       rm -f "$shim"
     fi
   done < "$shims_file"
+}
+
+# Shims creados por la corrida que la versión previa (backup) no registraba:
+# el registro viejo no los conoce, así que un uninstall futuro no los limpiaría
+# y quedarían huérfanos tras el rollback. Solo se borran los que siguen siendo
+# shims del tool (marcador específico) y no figuraban en el registro previo.
+_remove_orphan_shims() {
+  local prev_file="$1" name shim
+  [[ -f "$LIBEXEC_DIR/shims.txt" ]] || return 0
+  [[ -f "$prev_file" ]] || return 0
+  while IFS= read -r name; do
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    _name_is_valid "$name" || continue
+    grep -qxF "$name" "$prev_file" && continue
+    shim="$PREFIX/bin/$name"
+    if [[ -f "$shim" ]] && grep -qF "termux-shim: $APP_NAME" "$shim" 2>/dev/null; then
+      rm -f "$shim"
+    fi
+  done < "$LIBEXEC_DIR/shims.txt"
+}
+
+# Aliases creados por la corrida que el manifest de la versión previa no
+# declaraba (mismo criterio que _remove_orphan_shims). Guardia: solo symlinks
+# que apunten a nuestro wrapper. Nota: manifest_get usa el MANIFEST global, por
+# eso el campo se lee inline sobre el archivo previo (backup). El manifest de
+# la corrida fallida NO existe en el rollback (write_manifest corre después de
+# verify_install, que marca INSTALL_DONE=true): installed_aliases cae entonces
+# al $ALIASES del .conf actual, que es la lista de la corrida.
+_remove_orphan_aliases() {
+  local prev_manifest="$1" prev_aliases="" alias target
+  [[ -f "$prev_manifest" ]] || return 0
+  prev_aliases=$(awk -F= -v k=aliases '{ sub(/\r$/, "") } $1==k { sub(/^[^=]*=/,""); print; exit }' "$prev_manifest")
+  for alias in $(installed_aliases); do
+    [[ -n "$prev_aliases" ]] && grep -qxF "$alias" <<< "$prev_aliases" && continue
+    _name_is_valid "$alias" || continue
+    target="$PREFIX/bin/$alias"
+    if [[ -L "$target" && "$(readlink "$target")" == "$WRAPPER" ]]; then
+      rm -f "$target"
+    fi
+  done
 }
 
 checksum_of() {
@@ -421,13 +620,15 @@ preflight() {
 
 uninstall() {
   info "Desinstalando $DISPLAY_NAME..."
-  # Derivar los extras del manifest ANTES de borrar libexec (donde vive).
-  local extras
+  # Derivar extras y aliases del manifest ANTES de borrar libexec (donde vive).
+  local extras aliases
   extras=$(installed_extra_bins)
+  aliases=$(installed_aliases)
   _remove_registered_shims
   rm -rf "$LIBEXEC_DIR"
   rm -f "$WRAPPER"
   _remove_extra_wrappers "$extras"
+  _remove_aliases "$aliases"
   info "$DISPLAY_NAME eliminado."
   info "Para remover dependencias si no las necesitás: pkg remove glibc-runner patchelf glibc-repo"
   exit 0
@@ -840,6 +1041,13 @@ extract_install() {
     BACKUP_DIR="$(dirname "$LIBEXEC_DIR")/.$APP_NAME.backup.$$"
     rm -rf "$BACKUP_DIR"
     mv "$LIBEXEC_DIR" "$BACKUP_DIR"
+    # Copia del wrapper actual dentro del backup: con ENTRY_POINT el wrapper
+    # apunta a un archivo del bundle (ej: launcher del .conf actual), así que
+    # el wrapper NUEVO de esta corrida puede ser incompatible con el bundle
+    # VIEJO tras un rollback. Se restaura junto con libexec (ver cleanup).
+    if [[ -f "$WRAPPER" ]]; then
+      cp -a "$WRAPPER" "$BACKUP_DIR/.wrapper"
+    fi
   else
     FRESH_INSTALL=true
   fi
@@ -866,8 +1074,17 @@ _patch_elf() {
     err "Revisá ELF_NAME/EXTRA_BINS en registry/$APP_NAME.conf"
     exit 1
   }
-  patchelf --set-interpreter "$LOADER" --set-rpath "$RPATH" "$target" || {
-    err "Falló patchelf sobre $target"; exit 1
+  # Dos invocaciones separadas (rpath → interpreter), no una combinada:
+  # patchelf 0.19.1 corrompe ELFs grandes no-PIE (ET_EXEC con debug_info, ej.
+  # el node embebido de cursor-agent) cuando --set-interpreter y --set-rpath se
+  # combinan en una sola llamada: el grow simultáneo de .dynstr e .interp genera
+  # un segmento LOAD que se solapa con el del código y el loader muere (SIGSEGV
+  # antes de resolver libs). El split en dos pasos reubica correctamente.
+  patchelf --set-rpath "$RPATH" "$target" || {
+    err "Falló patchelf (rpath) sobre $target"; exit 1
+  }
+  patchelf --set-interpreter "$LOADER" "$target" || {
+    err "Falló patchelf (interpreter) sobre $target"; exit 1
   }
   local got_interp got_rpath
   got_interp=$(patchelf --print-interpreter "$target" 2>/dev/null || true)
@@ -928,6 +1145,7 @@ run_pre_wrapper_hook() {
 # principal y para cada EXTRA_BINS.
 _write_wrapper() {
   local wrapper_path="$1" bin_path="$2"
+  local exec_target="${3:-$bin_path}"
 
   # Construir bloque de exports para variables de entorno del .conf
   local env_block=""
@@ -943,9 +1161,12 @@ _write_wrapper() {
     done <<< "$WRAPPER_ENV"
   fi
 
-  local exec_cmd="exec \"\$BIN\" \"\$@\""
+  # Ejecución: el binario patcheado (o el entry point del bundle si el .conf
+  # define ENTRY_POINT — create_wrapper pasa el target a ejecutar). En el modo
+  # loader (sin patchelf) el exec va vía loader glibc con --library-path.
+  local exec_cmd="exec \"\$EXEC_TARGET\" \"\$@\""
   if [[ "$NEEDS_PATCHELF" == false && "$EXEC_DIRECT" != true ]]; then
-    exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$BIN\" \"\$@\""
+    exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$EXEC_TARGET\" \"\$@\""
   fi
 
   # Subcomandos denegados por configuración (WRAPPER_DENY_ARGS del .conf):
@@ -983,6 +1204,7 @@ _write_wrapper() {
 set -euo pipefail
 
 BIN="$bin_path"
+EXEC_TARGET="$exec_target"
 
 if [[ ! -f "\$BIN" ]]; then
   echo "ERROR: $DISPLAY_NAME no encontrado en \$BIN" >&2
@@ -1012,13 +1234,48 @@ WRAPPER_EOF
 create_wrapper() {
   mkdir -p "$(dirname "$WRAPPER")"
 
-  _write_wrapper "$WRAPPER" "$BIN_FILE"
+  # Validar el entry point del bundle si el .conf lo define (fail-closed:
+  # sin él el wrapper no podría ejecutar el CLI). Ocurre antes de cualquier
+  # create de archivos → INSTALL_DONE=false → el trap EXIT hace el rollback.
+  local exec_target="$BIN_FILE"
+  if [[ -n "$ENTRY_POINT" ]]; then
+    local entry_file="$LIBEXEC_DIR/$ENTRY_POINT"
+    if [[ ! -f "$entry_file" || ! -x "$entry_file" ]]; then
+      err "ENTRY_POINT: '$ENTRY_POINT' no existe o no es ejecutable en $LIBEXEC_DIR."
+      err "Revisá registry/$APP_NAME.conf."
+      exit 1
+    fi
+    exec_target="$entry_file"
+    info "Entry point: $exec_target"
+  fi
+
+  _write_wrapper "$WRAPPER" "$BIN_FILE" "$exec_target"
   info "Wrapper creado en $WRAPPER"
 
   local extra
   for extra in $EXTRA_BINS; do
     _write_wrapper "$PREFIX/bin/$extra" "$LIBEXEC_DIR/$extra"
     info "Wrapper creado en $PREFIX/bin/$extra"
+  done
+
+  # Aliases: symlinks al wrapper. Fail-closed contra shadowing accidental:
+  # si el nombre ya existe y NO es nuestro symlink (p.ej. un binario de otro
+  # paquete o del sistema), no se pisa — Termux sin root no amortigua el error.
+  local alias_name target
+  for alias_name in $ALIASES; do
+    target="$PREFIX/bin/$alias_name"
+    if [[ -L "$target" && "$(readlink "$target")" == "$WRAPPER" ]]; then
+      info "Alias ya presente (reinstall): $target → $WRAPPER"
+      continue
+    fi
+    if [[ -e "$target" || -L "$target" ]]; then
+      err "ALIASES: '$alias_name' ya existe en $PREFIX/bin y no es un symlink a $WRAPPER."
+      err "Fail-closed: no se pisa un binario existente."
+      err "Renombrá o remové $target, o quitá el alias del .conf."
+      exit 1
+    fi
+    ln -s "$WRAPPER" "$target"
+    info "Alias creado: $target → $WRAPPER"
   done
 }
 
@@ -1050,6 +1307,8 @@ binary_checksum_original=$BIN_CHECKSUM_ORIG
 binary_checksum_patched=${BIN_CHECKSUM_PATCHED:-${BIN_CHECKSUM_ORIG}}
 needs_patchelf=$NEEDS_PATCHELF
 exec_direct=${EXEC_DIRECT:-false}
+entry_point=$ENTRY_POINT
+aliases=$ALIASES
 interpreter=${LOADER}
 rpath=${RPATH}
 attestation=$ATTEST_STATUS

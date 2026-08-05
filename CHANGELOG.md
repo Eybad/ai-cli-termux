@@ -4,6 +4,27 @@ Todas las versiones notables de ai-cli-termux se documentan en este archivo.
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
+## [1.1.0] - 2026-08-05
+
+### Added
+
+- Nueva herramienta: **cursor-agent** (Cursor Agent CLI) desde el CDN propio de Cursor (`url_template` + pin manual en `sha256.txt`). Bundle node embebido patcheado al overlay glibc, `ENTRY_POINT` (launcher bash del bundle), alias `agent` gestionado, `agent update` bloqueado, `EXTRA_BINS` para `cursorsandbox`/`crepectl`, shims de navegador y DNS para el login OAuth.
+- `ENTRY_POINT` en `install.sh`: el wrapper principal puede execar un script del bundle en vez del ELF (validado fail-closed: existencia + ejecutable, rollback vía trap).
+- `ALIASES` en `install.sh`: symlinks gestionados del wrapper (ej: `agent` → `cursor-agent`) con collision-check fail-closed y limpieza con guardia de propiedad en uninstall; verificados por el paso 8.1 de `verify.sh`.
+- `latest_hashfile_version` acepta prerelease y build metadata (`2026.07.23-e383d2b`, `0.146.0+android1`): `--update` funciona para esos formatos. Regex compartida (`VERSION_CORE_RE`/`VERSION_SUFFIX_RE`) como fuente única con `parse_version_tag`, portable a mawk/gawk (clases `[.]`/`[+]`).
+
+### Fixed
+
+- `patchelf` 0.19.1 corrompía ELFs grandes no-PIE (`ET_EXEC` con debug_info, ej. el node embebido de cursor-agent) al combinar `--set-interpreter` + `--set-rpath` en una sola invocación (grow simultáneo de `.dynstr` e `.interp` → LOAD solapado → SIGSEGV del loader antes de resolver libs). El paso 10 de `install.sh` ahora aplica el patcheo en dos invocaciones separadas (rpath → interpreter): el ELF reubica los segmentos correctamente. Sin cambios de comportamiento para los tools existentes (regresión opencode/kiro-cli: 0 fallos).
+- Hardening del preflight (security review): charset `[a-zA-Z0-9._-]` para `APP_NAME`/`ELF_NAME`/`EXTRA_BINS`/`ENTRY_POINT`/`ALIASES` y rechazo de comillas/`$`/backtick en `DISPLAY_NAME` (vía `grep -F`): ningún valor de `.conf` puede romper las comillas del heredoc del wrapper (el `case` con `[\"'\$\`]` resultó frágil en bash — `\"` dentro de `[ ]` termina el contexto de comillas dobles).
+- El rollback de un upgrade fallido ahora restaura también el wrapper de la versión previa (se respalda junto a `libexec`): con `ENTRY_POINT` el wrapper nuevo puede apuntar a un entry point del bundle nuevo inexistente en el viejo; sin el restore, un `--update` fallido dejaba el CLI roto.
+- El fresh-fail de `cleanup()` ahora limpia los shims del hook (`_remove_registered_shims` antes del `rm -rf libexec`) y los aliases creados por la corrida fallida; el hook de cursor-agent no pisa archivos existentes (guardia `-e`/`-L`).
+- El registro de shims (`shims.txt`) se reconstruye completo en cada corrida: los shims propios de corridas anteriores se re-registran (con la guardia del marcador `termux-*`). Antes, un reinstall dejaba el registro incompleto y el uninstall dejaba shims huérfanos en `$PREFIX/bin`. Aplicado también a `codex.conf` (guardia `-e`/`-L` + re-registro en los shims de navegador y portapapeles).
+- Ownership por tool en los shims: cada shim lleva un marcador específico (`# termux-shim: <tool>`) y el registro/borrado (`shims.txt`, `_remove_registered_shims`) solo toca shims con SU marcador. Antes, codex y cursor-agent (que comparten los mismos nombres de navegador) se pisaban entre sí: el uninstall de uno podía borrar los shims del otro. La migración de shims con el marcador viejo (pre-ownership) solo aplica a archivos con la forma exacta del shim antiguo (shebang + exec, sin marcador ajeno): un shim de otro tool o un archivo del usuario no se reescribe. Se aplicó el mismo esquema a `agy.conf` (antes creaba shims sin registro ni marcador). Guardias ahora FIFO-safe (`[[ -f ]]` antes del grep: un FIFO ajeno colgaba el instalador).
+- El rollback de un upgrade fallido limpia el delta de la corrida: los shims/aliases NUEVOS que la versión previa no registraba se eliminan (con guardia de propiedad) antes de restaurar el backup; antes quedaban huérfanos con el registro viejo.
+- Validación de nombres endurecida: `.`/`..` como token completo rechazados en `APP_NAME`/`ELF_NAME`/`EXTRA_BINS`/`ENTRY_POINT`/`ALIASES` (un path de navegación validaba el charset pero apuntaba a directorios), y `DISPLAY_NAME` rechaza también newline/CR y el resto de los bytes de control (0x01-0x1f, 0x7f — un ESC viajaría al terminal vía ANSI injection). Regex compartida ahora estricta según semver: sin `_` en prerelease/build. Defensa en profundidad: los removedores revalidan con el mismo charset los nombres leídos de `shims.txt`/manifest antes de construir `$PREFIX/bin/$name`.
+- `verify.sh`: el WARN de `extra_bins` solo se emite si el `.conf` actual define `EXTRA_BINS` pero el manifest no los registra (instalación previa a la feature). Antes era un falso positivo para todos los tools sin `EXTRA_BINS` (codex, opencode, agy) y el "Reinstalá con -r" sugerido no resolvía nada. `EXTRA_BINS` pre-declarada en la carga del conf (con `set -u` su ausencia en el `.conf` rompía la sección 5.2 con "unbound variable").
+
 ## [1.0.0] - 2026-08-01
 
 ### Added
