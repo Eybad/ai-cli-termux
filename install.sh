@@ -96,6 +96,9 @@ UNINSTALL=false
 REINSTALL=false
 REQUIRE_ATTEST=false
 UPDATE=false
+# Interfaz máquina interna (la usa aicli list): resuelve la versión objetivo y
+# nada más. Oculto del usage(): es plumbing, no una opción de usuario.
+RESOLVE_VERSION=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -110,6 +113,7 @@ while [[ $# -gt 0 ]]; do
     -u|--uninstall) UNINSTALL=true; shift ;;
     -r|--reinstall) REINSTALL=true; shift ;;
     --update) UPDATE=true; shift ;;
+    --resolve-version) RESOLVE_VERSION=true; shift ;;
     *)
       err "Opción desconocida: $1"
       err "Usá --help para ver las opciones."
@@ -121,6 +125,23 @@ done
   err "--update es incompatible con -v (--update siempre va a la última versión)."
   exit 2
 }
+
+# Contrato de --resolve-version: resolver el objetivo y nada más. Los flags de
+# instalación/pinning no aportan al resultado y romperían la semántica (un
+# --sha256 ajeno al objetivo, por ejemplo, sería una pista falsa).
+if [[ "$RESOLVE_VERSION" == true ]]; then
+  bad=""
+  [[ "$UNINSTALL" == true ]] && bad+=" -u"
+  [[ "$REINSTALL" == true ]] && bad+=" -r"
+  [[ "$UPDATE" == true ]] && bad+=" --update"
+  [[ -n "$REQUESTED_VERSION" ]] && bad+=" -v"
+  [[ -n "$PINNED_CHECKSUM" ]] && bad+=" --sha256"
+  if [[ -n "$bad" ]]; then
+    err "--resolve-version (interfaz máquina interna) es incompatible con:$bad"
+    err "Su contrato: imprimir 'TARGET_VERSION=<versión>' en stdout y nada más."
+    exit 2
+  fi
+fi
 
 # ── Cargar configuración de la herramienta ─────────────────────────────────────
 CONF="$REGISTRY_DIR/$TOOL.conf"
@@ -1370,7 +1391,28 @@ run_post_install_hook() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
   preflight
-  resolve_version
+
+  # ── Modo resolución (--resolve-version): contrato máquina estricto ─────────
+  # aicli list lo usa para saber si hay actualización disponible. Contrato:
+  #   stdout = EXACTAMENTE "TARGET_VERSION=<v>" (sin prefijo v, preserva +build)
+  #   logs del instalador → stderr (no contaminan el stdout de máquina)
+  #   exit 0 = resuelto; 1/2 = error (sin red, sin entrada en sha256.txt, uso)
+  #   sin efectos colaterales: no descarga a disco persistente, no toca $PREFIX,
+  #   no ejecuta wrappers (check_current NO corre).
+  # Los logs de resolve_version van a stdout por defecto (info()/warn()); el
+  # redireccionamiento del fd 1 a stderr durante la resolución mantiene el
+  # contrato sin tocar el resto del pipeline.
+  if [[ "$RESOLVE_VERSION" == true ]]; then
+    # fd 9 (no 3): no pisar un fd que el llamador pudiera usar.
+    exec 9>&1
+    exec 1>&2
+    resolve_version
+    exec 1>&9
+    exec 9>&-
+    printf 'TARGET_VERSION=%s\n' "$VERSION"
+    exit 0
+  fi
+
   resolve_expected_checksum
   check_current
   install_deps

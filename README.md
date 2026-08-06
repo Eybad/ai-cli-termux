@@ -9,7 +9,7 @@
 [![Android](https://img.shields.io/badge/Android-10%2B-3ddc84?style=flat-square&logo=android&logoColor=white)](https://www.android.com/)
 [![Termux](https://img.shields.io/badge/Termux-F--Droid-000000?style=flat-square&logo=terminal)](https://f-droid.org/en/packages/com.termux/)
 
-[Features](#features) • [Herramientas soportadas](#herramientas-soportadas) • [Requisitos](#requisitos) • [Instalación](#instalación) • [Actualización automática](#actualización-automática) • [Verificación](#verificación) • [Cómo funciona](#cómo-funciona) • [Soluciones técnicas de Android](#soluciones-técnicas-de-android) • [Agregar una CLI nueva](#agregar-una-cli-nueva) • [Estructura del repositorio](#estructura-del-repositorio)
+[Features](#features) • [Herramientas soportadas](#herramientas-soportadas) • [Requisitos](#requisitos) • [Instalación](#instalación) • [Gestor aicli](#gestor-aicli) • [Actualización automática](#actualización-automática) • [Verificación](#verificación) • [Cómo funciona](#cómo-funciona) • [Soluciones técnicas de Android](#soluciones-técnicas-de-android) • [Agregar una CLI nueva](#agregar-una-cli-nueva) • [Estructura del repositorio](#estructura-del-repositorio)
 
 </div>
 
@@ -56,6 +56,31 @@
 git clone https://github.com/Eybad/ai-cli-termux.git
 cd ai-cli-termux
 ```
+
+## Gestor aicli
+
+`aicli` es la fachada recomendada sobre `install.sh`/`verify.sh`: gestiona los CLIs sin reemplazar sus comandos propios (cada CLI se usa con su ayuda: `opencode --help`, `codex exec`, ...). Primera instalación del gestor (desde el clon):
+
+```bash
+bash aicli self-install   # instala el wrapper en $PREFIX/bin (marca de propiedad)
+aicli --version
+```
+
+| Subcomando | Descripción |
+|---|---|
+| `aicli list [--offline] [--json] [<tool>]` | Estado local (manifest) + actualización disponible. UPDATE: `sí`/`no`/`n/d`. Exit 0 siempre (informativo) |
+| `aicli install <tool> [-v X.Y.Z \| --sha256 <hash> \| --require-attestation]` | Instalar (passthrough de flags a `install.sh`) |
+| `aicli update <tool>` (`upgrade`) | Actualizar a la última versión (`install.sh <tool> --update`) |
+| `aicli remove <tool>` (`uninstall`) | Desinstalar (`install.sh <tool> -u`) |
+| `aicli verify <tool>` | Auditar integridad (10 pasos, `verify.sh`) |
+| `aicli help [<subcomando>\|<tool>]` | Ayuda general, de un subcomando o de una herramienta (`aicli help codex`) |
+| `aicli doctor` | Diagnóstico del entorno (repo, arch, deps, wrapper, loader glibc) |
+| `aicli completion <bash\|zsh\|fish>` | Completions a stdout (tools del registry dinámicos) |
+| `aicli self-install` / `self-update` | Instalar / actualizar el wrapper propio (fail-closed: nunca pisa un binario ajeno) |
+
+Convenciones: `--help`/`--version` a stdout con exit 0, errores a stderr, exit `2` = uso inválido, `NO_COLOR`/`TERM=dumb`/no-TTY/`--no-color` desactivan colores. La versión de cada CLI se resuelve con la interfaz máquina `install.sh <tool> --resolve-version` (imprime `TARGET_VERSION=<v>`, sin efectos colaterales; ver `AGENTS.md`).
+
+`install.sh` y `verify.sh` siguen funcionando directo (los comandos son equivalentes).
 
 ### opencode
 

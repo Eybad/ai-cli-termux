@@ -50,6 +50,8 @@ Si la respuesta es sí, no tocar `install.sh`.
 | Automatizar actualización de hashes en CI | `.github/workflows/update-hashes.yml` |
 | Build propio de un tool (sin builds compatibles con Android) | `.github/workflows/build-codex.yml` (patrón codex) |
 | Parche de source upstream (generado, no versionado) | `scripts/gen-codex-lock-patch.py` (inventario fail-closed) |
+| Agregar/quitar subcomandos o comportamiento del gestor | `aicli` (fachada; nunca lógica de instalación) |
+| Cambiar el contrato de resolución de versión | `install.sh` (`--resolve-version`) + `aicli` (parse de `TARGET_VERSION=`) |
 
 ## EXEC_DIRECT (binarios nativos sin overlay glibc)
 
@@ -90,6 +92,25 @@ Si el build de Android necesita un parche sobre el source upstream, el tag de di
 6. Hooks opcionales: `pre_wrapper_hook` (antes del wrapper), `post_install_hook` (después de verify)
 
 > Ver `registry/opencode.conf`, `agy.conf`, `kiro-cli.conf` como ejemplos canónicos.
+
+## Gestor aicli (fachada)
+
+`aicli` es una fachada bash sobre `install.sh`/`verify.sh`: orquesta, no duplica. No contiene lógica de instalación ni de verificación; cualquier cambio de pipeline va a `install.sh`/`verify.sh`/`registry/*.conf` y el gestor solo ajusta su interfaz si el contrato cambia.
+
+### Contrato `install.sh --resolve-version` (no romper)
+
+- stdout = **exactamente** `TARGET_VERSION=<v>` (sin prefijo `v`, preserva `+build`) y nada más.
+- Logs del instalador → stderr (en modo resolve, `main()` redirige fd 1→2 con `exec 9>&1/1>&2/1>&9/9>&-`, sin pisar fds bajos del llamador).
+- Sin efectos colaterales: no corre `check_current`, no descarga a disco persistente, no toca `$PREFIX`.
+- Incompatible con `-u`/`-r`/`--update`/`-v`/`--sha256` → exit 2. Resuelto → exit 0.
+- Oculto del `usage()` (plumbing): `aicli list` es su único consumidor. El parse en aicli es defensivo (`TARGET_VERSION=*`; desvío → columna `n/d`, el listado nunca se rompe).
+
+### Reglas del gestor
+
+- **Interfaz**: exit codes 0 ok / 1 ejecución / 2 uso; `--help`/`--version` a stdout con exit 0; errores a stderr; `NO_COLOR`/`TERM=dumb`/no-TTY/`--no-color` → sin colores; `list` nunca sale con error por fallo de red.
+- **Wrapper** (`self-install`/`self-update`): lleva la marca `aicli-managed: ai-cli-termux`; fail-closed — si `$PREFIX/bin/aicli` existe sin la marca, no se pisa (error + sugerencia). `self-update` exige marca previa.
+- **`DESCRIPTION`** en `registry/*.conf` (opcional, 1 línea): alimenta `aicli help <tool>` y `aicli list` (`--json` y tabla). No cambiar su formato (una sola línea, sin comillas internas).
+- Al cambiar `aicli`, `shellcheck aicli` también es obligatorio.
 
 ## Estructura
 

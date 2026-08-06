@@ -4,6 +4,15 @@ Todas las versiones notables de ai-cli-termux se documentan en este archivo.
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
+## [1.2.0] - 2026-08-06
+
+### Added
+
+- **Gestor `aicli`**: fachada sobre `install.sh`/`verify.sh` (no duplica lógica de instalación). Subcomandos: `install`/`update`/`remove`/`verify` (delegación pura), `list` (estado local desde el manifest + actualización disponible consultada en paralelo con `timeout` por tool; columnas UPDATE: sí/no/n/d; `--offline`, `--json`, filtro por tool; exit 0 siempre), `help` (general, por subcomando y por herramienta), `doctor` (repo, arch, deps, wrapper, loader glibc, tools), `completion <bash|zsh|fish>` (a stdout, con tools dinámicos), `self-install`/`self-update` (wrapper en `$PREFIX/bin` con marca de propiedad `aicli-managed: ai-cli-termux`, fail-closed: nunca pisa un binario ajeno). Exit codes estándar (0 ok · 1 ejecución · 2 uso), `--version`, `--no-color` global, `NO_COLOR`/`TERM=dumb`/no-TTY respetados, sugerencia de typo por prefijo.
+- `install.sh --resolve-version` (interfaz máquina interna, plumbing oculto del usage): imprime `TARGET_VERSION=<v>` (sin `v`, preserva `+build`) en stdout y nada más; logs a stderr vía redirección del fd 1; sin efectos (no corre `check_current`, no toca `$PREFIX`); incompatible con `-u`/`-r`/`--update`/`-v`/`--sha256` (exit 2). Lo usa `aicli list` para la columna UPDATE.
+- `DESCRIPTION` opcional en `registry/*.conf` (una línea): alimenta `aicli help <tool>` y `aicli list` (JSON y tabla).
+- Completions dinámicos: incluyen los tools del registry en el momento de generación.
+
 ## [1.1.0] - 2026-08-05
 
 ### Added

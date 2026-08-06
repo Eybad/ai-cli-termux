@@ -1,0 +1,892 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# aicli — Gestor de CLIs de IA para Termux (fachada sobre install.sh/verify.sh)
+#
+# aicli orquesta; la lógica de instalación/verificación vive en install.sh y
+# verify.sh. Patrón fachada: NO se duplica lógica de negocio acá (invariant
+# del repo). La interfaz sigue clig.dev (Command Line Interface Guidelines)
+# y las convenciones de gestores de referencia (mise, uv, gh):
+#   - help en todas las formas: aicli, -h/--help, help, help <sub>, <sub> -h
+#   - exit codes: 0 éxito · 1 error de ejecución · 2 uso inválido
+#   - --help/--version a stdout con exit 0; errores a stderr
+#   - NO_COLOR / TERM=dumb / no-TTY / --no-color → sin colores
+#   - stdout = output primario (listados, JSON); stderr = mensajes de proceso
+#
+# Los CLIs se usan con SUS propios comandos (opencode run, codex exec, ...):
+# aicli solo las gestiona (instalar/actualizar/quitar/auditar). Cada CLI
+# expone su ayuda con <tool> --help — sin comandos redundantes acá.
+
+set -euo pipefail
+
+AICLI_VERSION="1.2.0"
+# Marca de propiedad del wrapper en $PREFIX/bin/aicli (fail-closed en
+# self-install/self-update: nunca se pisa un binario que no sea nuestro).
+AICLI_MARK="aicli-managed: ai-cli-termux"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolución del repo (orden): $AI_CLI_TERMUX_DIR (env) → SCRIPT_DIR.
+# El wrapper creado por self-install execa el aicli real del repo, así que
+# SCRIPT_DIR ya es la ruta correcta cuando se corre desde $PREFIX/bin.
+REPO_DIR="${AI_CLI_TERMUX_DIR:-$SCRIPT_DIR}"
+INSTALL_SH="$REPO_DIR/install.sh"
+VERIFY_SH="$REPO_DIR/verify.sh"
+REGISTRY_DIR="$REPO_DIR/registry"
+
+SUBCOMMANDS="install update remove verify list help doctor completion self-install self-update"
+
+# ── Colores (estándar clig.dev: TTY + NO_COLOR + TERM=dumb) ───────────────────
+# Se inicializan en main() (después de parsear --no-color global).
+MUTED=''; GREEN=''; RED=''; ORANGE=''; NC=''
+
+info() { printf '%sINFO%s: %s\n' "$GREEN" "$NC" "$*" >&2; }
+warn() { printf '%sWARN%s: %s\n' "$ORANGE" "$NC" "$*" >&2; }
+err()  { printf '%sERROR%s: %s\n' "$RED" "$NC" "$*" >&2; }
+
+# ── Helpers de registry ──────────────────────────────────────────────────────
+# Lee el valor del primer campo key=... de un registry/*.conf, quitando
+# comentario, espacios y comillas envolventes. Fail-safe: vacío si no está.
+conf_get() {
+  local file="$1" key="$2"
+  # Sanitización final (fail-closed): los valores viajan a prints de terminal
+  # (help/list), filas internas y JSON. Bytes de control (0x00-0x1f, 0x7f —
+  # incluye \n, \r, tab y ESC, el vector de ANSI injection) → espacio.
+  awk -F= -v k="$key" '
+    $1 == k {
+      v = $0; sub(/^[^=]*=/, "", v)
+      sub(/#.*$/, "", v)          # comentario de fin de línea
+      gsub(/[ \t]+$/, "", v)      # espacios/ tabs finales
+      gsub(/^[ \t]+/, "", v)      # espacios/ tabs iniciales
+      gsub(/^"|"$/, "", v)        # comillas envolventes
+      gsub(/[\001-\037\177]/, " ", v)   # controles (octal POSIX, mawk+gawk)
+      gsub(/  +/, " ", v)         # colapsa espacios (de controles removidos)
+      print v
+      exit
+    }' "$file" | sed 's/ $//'
+}
+
+# Nombres de registry/*.conf. Filtro fail-closed (mismo charset de
+# validate_tool + primer carácter alfanumérico): los nombres viajan a prints de
+# terminal (tabla de list, doctor, help), a completions que el usuario sourcea
+# y a argumentos de install.sh — un .conf con metacharacters o nombre con '-'
+# inicial (colisiona con opciones de compadd en zsh) se descarta de todas las
+# rutas de una vez. Sin pipeline: evita interacciones con pipefail.
+list_registry() {
+  local f name
+  [[ -d "$REGISTRY_DIR" ]] || return 0
+  for f in "$REGISTRY_DIR"/*.conf; do
+    [[ -f "$f" ]] || continue
+    name=$(basename "$f" .conf)
+    [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || continue
+    printf '%s\n' "$name"
+  done
+}
+
+# Mismo charset que list_registry (primer carácter alfanumérico): un tool con
+# guion inicial sería parseado como flag por install.sh/verify.sh.
+validate_tool() {
+  local t="$1"
+  [[ "$t" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || {
+    err "Nombre de herramienta inválido: '$t'"
+    exit 2
+  }
+  [[ -f "$REGISTRY_DIR/$t.conf" ]] || {
+    err "Herramienta desconocida: '$t'"
+    err "Disponibles: $(tools_spaced)"
+    exit 2
+  }
+}
+
+# Lee un campo del manifest.txt de un tool instalado.
+manifest_get() {
+  local key="$1" mf="$2"
+  [[ -f "$mf" ]] || return 0
+  awk -F= -v k="$key" '{ sub(/\r$/, "") } $1==k { sub(/^[^=]*=/,""); print; exit }' "$mf"
+}
+
+check_repo() {
+  [[ -f "$INSTALL_SH" && -f "$VERIFY_SH" && -d "$REGISTRY_DIR" ]] || {
+    err "No se encuentra el repositorio ai-cli-termux en: $REPO_DIR"
+    err "Opciones: corré aicli desde el clon del repo, definí AI_CLI_TERMUX_DIR,"
+    err "o ejecutá 'aicli self-install' desde el clon (instala el wrapper)."
+    exit 1
+  }
+}
+
+# ── Ayuda ─────────────────────────────────────────────────────────────────────
+usage_short() {
+  cat <<EOF
+aicli — gestor de CLIs de IA para Termux (instala, actualiza, audita; sin proot)
+
+Uso: aicli <subcomando> [opciones]
+  aicli list [--offline] [--json] [<tool>]
+  aicli install <tool> [-v X.Y.Z | --sha256 <hash> | --require-attestation]
+  aicli update <tool> | remove <tool> | verify <tool>
+  aicli help [<subcomando>|<tool>] | doctor | completion <bash|zsh|fish>
+  aicli self-install | self-update | --version
+
+Ejemplos:
+  aicli list
+  aicli install opencode
+  aicli update agy
+
+Ejecutá 'aicli help' para la ayuda completa.
+EOF
+}
+
+usage() {
+  local tools
+  tools=$(list_registry)
+  cat <<EOF
+aicli $AICLI_VERSION — gestor de CLIs de IA para Termux (overlay glibc, sin proot)
+
+Uso:
+  aicli [--version] [-h|--help] [--no-color]
+  aicli <subcomando> [-h|--help] [opciones]
+
+Subcomandos:
+  install <tool> [flags]    Instalar un CLI. Flags: -v X.Y.Z (versión),
+                            --sha256 <hash>, --require-attestation
+                            (ver 'aicli install --help')
+  update <tool>             Actualizar a la última versión disponible
+  remove <tool>             Desinstalar por completo
+  verify <tool>             Auditar la integridad de la instalación (10 pasos)
+  list [opciones]           Listar CLIs: estado, versión instalada y
+                            actualización disponible
+                            (--offline: sin red · --json: salida máquina ·
+                             [<tool>]: filtrar por herramienta)
+  help [<sub>|<tool>]       Ayuda general, de un subcomando o de un CLI
+  doctor                    Diagnóstico del entorno (repo, wrapper, deps)
+  completion <shell>        Generar completions para bash|zsh|fish (stdout)
+  self-install              Instalar/actualizar el wrapper de aicli en \$PREFIX/bin
+  self-update               Actualizar el wrapper ya instalado (debe existir)
+
+Herramientas disponibles:
+$(print_tools "$tools")
+
+Los CLIs se usan con sus propios comandos (ej: opencode run, codex exec).
+aicli solo las gestiona: no duplica comandos de cada CLI. La ayuda de cada
+CLI se consulta con <tool> --help.
+
+Ejemplos:
+  aicli install opencode
+  aicli update agy
+  aicli list --offline
+  aicli verify codex
+EOF
+}
+
+print_tools() {
+  local t f desc
+  for t in $1; do
+    f="$REGISTRY_DIR/$t.conf"
+    desc=$(conf_get "$f" DESCRIPTION)
+    if [[ -n "$desc" ]]; then
+      printf '  %-14s %s\n' "$t" "$desc"
+    else
+      printf '  %-14s\n' "$t"
+    fi
+  done
+}
+
+help_sub() {
+  case "$1" in
+    install)
+      cat <<'EOF'
+aicli install <tool> [flags]
+
+Instala un CLI de IA en Termux (overlay glibc, sin proot). La versión y el
+checksum se resuelven automáticamente desde la fuente del vendor (fail-closed:
+sin hash verificado no se instala).
+
+Flags:
+  -v, --version <X.Y.Z>      Instalar una versión específica
+  --sha256 <hash>            Pinear el checksum del tarball explícitamente
+  --require-attestation      Abortar si no se puede verificar la attestation
+                             de GitHub (solo tools con attestation)
+
+Ejemplos:
+  aicli install opencode
+  aicli install codex -v 0.146.0+android1
+EOF
+      ;;
+    update)
+      cat <<'EOF'
+aicli update <tool>
+
+Actualiza un CLI a la última versión disponible. Mantiene las actualizaciones
+dentro del pipeline fail-closed del instalador (checksum + attestation),
+incluso para CLIs con updater propio (que el wrapper bloquea).
+
+Ejemplos:
+  aicli update agy
+EOF
+      ;;
+    remove)
+      cat <<'EOF'
+aicli remove <tool>
+
+Desinstala un CLI por completo: binario, wrapper, aliases, shims registrados
+y manifest de integridad.
+
+Ejemplos:
+  aicli remove kiro-cli
+EOF
+      ;;
+    verify)
+      cat <<'EOF'
+aicli verify <tool>
+
+Audita la integridad de una instalación en 10 pasos: manifest, binario,
+interpreter/rpath, checksums post-patchelf, consistencia con sha256.txt,
+attestation, wrapper, entorno glibc y ejecución real.
+Exit code 1 ante cualquier fallo.
+
+Ejemplos:
+  aicli verify codex
+EOF
+      ;;
+    list)
+      cat <<'EOF'
+aicli list [--offline] [--json] [<tool>]
+
+Lista los CLIs del repositorio con su estado local (instalado/no, versión del
+manifest) y, si hay red, si existe actualización disponible (columna UPDATE:
+sí | no | n/d). Un fallo de red nunca rompe el listado: esa fila queda en n/d.
+
+Flags:
+  --offline   No consultar la red (sin chequeo de actualizaciones)
+  --json      Salida máquina (JSON por tool) para scripts/agentes
+  <tool>      Filtrar por una herramienta
+
+Exit 0 siempre (es informativo).
+EOF
+      ;;
+    help)
+      cat <<'EOF'
+aicli help [<subcomando>|<tool>]
+
+Sin argumentos: ayuda completa. Con un subcomando: ayuda de ese subcomando
+(ej: aicli help list). Con una herramienta: detalle de esa CLI (descripción,
+distribución y comandos de gestión; ej: aicli help codex).
+EOF
+      ;;
+    doctor)
+      cat <<'EOF'
+aicli doctor
+
+Diagnostica el entorno de aicli: repositorio resoluble, wrapper instalado con
+la marca de propiedad, arquitectura soportada, dependencias del instalador
+(curl, jq, tar, awk, sha256sum) y loader glibc. Sugiere la acción siguiente
+cuando falta algo (ej: aicli self-install). Exit 1 ante fallos.
+EOF
+      ;;
+    completion)
+      cat <<'EOF'
+aicli completion <bash|zsh|fish>
+
+Genera el script de completions para el shell indicado y lo imprime por
+stdout. Instalación (bash, requiere pkg install bash-completion):
+
+  aicli completion bash > ~/.bash_completion.d/aicli
+
+zsh (sobre fpath):
+  aicli completion zsh > ~/.zfunc/_aicli
+
+fish:
+  aicli completion fish > ~/.config/fish/completions/aicli.fish
+EOF
+      ;;
+    self-install)
+      cat <<'EOF'
+aicli self-install
+
+Instala el wrapper de aicli en $PREFIX/bin (embebe la ruta del repositorio y
+delega en el aicli real). Si el wrapper ya existe y es nuestro (marca
+'$AICLI_MARK'), lo reescribe; si existe un binario ajeno, falla sin pisarlo.
+Corrélo desde el clon la primera vez:
+
+  bash aicli self-install
+
+Después, aicli queda disponible desde cualquier directorio.
+EOF
+      ;;
+    self-update)
+      cat <<'EOF'
+aicli self-update
+
+Actualiza el wrapper de aicli ya instalado (debe existir y llevar la marca
+de propiedad). Si no está instalado, falla y sugiere 'aicli self-install'.
+Útil después de mover el repositorio o actualizarlo con git pull.
+EOF
+      ;;
+    *)
+      err "Sin ayuda para el subcomando '$1'."
+      return 2
+      ;;
+  esac
+}
+
+help_tool() {
+  local t="$1" f app display desc source repo
+  validate_tool "$t"
+  f="$REGISTRY_DIR/$t.conf"
+  app=$(conf_get "$f" APP_NAME)
+  display=$(conf_get "$f" DISPLAY_NAME)
+  desc=$(conf_get "$f" DESCRIPTION)
+  source=$(conf_get "$f" RELEASE_SOURCE)
+  repo=$(conf_get "$f" REPO)
+
+  printf '%s%s%s (%s)\n' "$GREEN" "$display" "$NC" "$t"
+  [[ -n "$desc" ]] && printf '  %s\n' "$desc"
+  case "$source" in
+    github)        printf '  Distribución: GitHub Releases (%s)\n' "${repo:--}" ;;
+    manifest_json) printf '  Distribución: manifest JSON remoto del vendor\n' ;;
+    url_template)  printf '  Distribución: CDN con URL por versión (pin manual en sha256.txt)\n' ;;
+    *)             printf '  Distribución: %s\n' "${source:--}" ;;
+  esac
+  cat <<EOF
+
+  Instalar:    aicli install $t
+  Actualizar:  aicli update $t
+  Desinstalar: aicli remove $t
+  Auditar:     aicli verify $t
+  Ayuda del CLI en sí: $t --help
+EOF
+}
+
+cmd_help() {
+  local target="${1:-}"
+  if [[ -z "$target" ]]; then usage; return 0; fi
+  case "$target" in
+    -h|--help) usage; return 0 ;;
+    install|update|remove|verify|list|help|doctor|completion|self-install|self-update)
+      help_sub "$target"
+      return 0 ;;
+  esac
+  if [[ -f "$REGISTRY_DIR/$target.conf" ]]; then
+    help_tool "$target"
+    return 0
+  fi
+  err "No hay ayuda para '$target' (no es un subcomando ni una herramienta)."
+  err "Subcomandos: $SUBCOMMANDS"
+  err "Herramientas: $(tools_spaced)"
+  return 2
+}
+
+# ── list ──────────────────────────────────────────────────────────────────────
+# Contrato interno: la última versión se resuelve con install.sh
+# --resolve-version (interfaz máquina: stdout = "TARGET_VERSION=<v>").
+# Parse defensivo: cualquier desvío del contrato cuenta como n/d (el listado
+# nunca se rompe por un cambio de formato).
+resolve_latest() {
+  local tool="$1" out
+  out=$(timeout 20 bash "$INSTALL_SH" "$tool" --resolve-version 2>/dev/null || true)
+  case "$out" in
+    TARGET_VERSION=*) printf '%s' "${out#TARGET_VERSION=}" ;;
+  esac
+}
+
+json_escape() {
+  # JSON válido ante cualquier contenido de los .conf: escapa \, ", y todo
+  # byte de control (0x01-0x1f, 0x7f) como \u00xx. Los reemplazos del pattern
+  # ${var//pat/rep} se interpretan literalmente (sin re-expansión). IFS local
+  # por si el llamador usa un separador custom (cmd_list/print_json_rows).
+  local s="$1" i ch hex
+  local IFS=$' \t\n'
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  for ((i = 1; i <= 31; i++)); do
+    case "$i" in 9|10|13) continue ;; esac
+    printf -v hex '%02x' "$i"
+    printf -v ch '%b' "\\0$(printf '%03o' "$i")"
+    s=${s//$ch/\\u00$hex}
+  done
+  printf -v ch '%b' '\177'
+  s=${s//$ch/\\u007f}
+  # Bytes altos (0x80-0xff, ej. latin-1): escapar como \u00xx. El JSON queda
+  # siempre válido (mojibake aceptable) ante contenido no-UTF-8 de los .conf.
+  for ((i = 128; i <= 255; i++)); do
+    printf -v hex '%02x' "$i"
+    printf -v ch '%b' "\\$(printf '%03o' "$i")"
+    s=${s//$ch/\\u00$hex}
+  done
+  printf '%s' "$s"
+}
+
+cmd_list() {
+  local offline=false json=false filter="" tool
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --offline) offline=true ;;
+      --json) json=true ;;
+      -h|--help) help_sub list; return 0 ;;
+      --*) err "Opción desconocida para list: $1"; return 2 ;;
+      *)
+        [[ -z "$filter" ]] || { err "list acepta un solo tool como filtro."; return 2; }
+        filter="$1" ;;
+    esac
+    shift
+  done
+
+  local f app display desc mf tag version installed_at installed update latest
+  local rows=() row
+  local names=() name
+  # Separador de campos de las filas internas: unit separator (0x1f), que no
+  # puede aparecer en texto de los .conf (un '|' del contenido desalinearía).
+  local USEP=$'\x1f'
+
+  if [[ -n "$filter" ]]; then
+    validate_tool "$filter"
+    names=("$filter")
+  else
+    while IFS= read -r name; do [[ -n "$name" ]] && names+=("$name"); done < <(list_registry)
+  fi
+  [[ ${#names[@]} -gt 0 ]] || {
+    err "No hay herramientas registradas en $REGISTRY_DIR."
+    return 1
+  }
+
+  # Consultas de red en paralelo (timeout individual de 20s): N tools no
+  # bloquean el listado N×20s en serie.
+  local tmp; tmp=$(mktemp -d)
+  local pids=()
+  for tool in "${names[@]}"; do
+    if [[ "$offline" == true ]]; then
+      continue
+    fi
+    [[ -f "$PREFIX/libexec/$tool/manifest.txt" ]] || continue
+    ( resolve_latest "$tool" > "$tmp/latest_$tool" ) &
+    pids+=("$!")
+  done
+  local p
+  for p in "${pids[@]:-}"; do [[ -n "$p" ]] && wait "$p" || true; done
+
+  for tool in "${names[@]}"; do
+    f="$REGISTRY_DIR/$tool.conf"
+    app=$(conf_get "$f" APP_NAME)
+    display=$(conf_get "$f" DISPLAY_NAME)
+    desc=$(conf_get "$f" DESCRIPTION)
+    mf="$PREFIX/libexec/$app/manifest.txt"
+    installed="no"; version=""; installed_at=""; update=""; latest=""
+    if [[ -f "$mf" ]]; then
+      tag=$(manifest_get tag "$mf")
+      version="${tag#v}"
+      installed_at=$(manifest_get installed_at "$mf")
+      installed="si"
+      if [[ "$offline" != true ]]; then
+        latest=$(cat "$tmp/latest_$tool" 2>/dev/null || true)
+        if [[ -n "$latest" ]]; then
+          if [[ -n "$version" && "$latest" == "$version" ]]; then
+            update="no"
+          else
+            update="sí"
+          fi
+        else
+          update="n/d"
+        fi
+      else
+        update="n/d"
+      fi
+    else
+      update="—"
+    fi
+    rows+=("$tool$USEP$display$USEP$desc$USEP$installed$USEP$version$USEP$installed_at$USEP$update$USEP$latest")
+  done
+  rm -rf "$tmp"
+
+  if [[ "$json" == true ]]; then
+    print_json_rows "${rows[@]}"
+    return 0
+  fi
+
+  # Tabla: ancho TOOL = nombre más largo (mín. 4); VERSIÓN = versión más larga
+  # visible (mín. 7) para que versiones con +build no desalineen las columnas.
+  local w=4 wv=7 n v
+  for n in "${names[@]}"; do [[ ${#n} -gt $w ]] && w=${#n}; done
+  for row in "${rows[@]}"; do
+    IFS=$USEP read -r -a _pv <<< "$row"
+    v="${_pv[4]:-}"
+    [[ ${#v} -gt $wv ]] && wv=${#v}
+  done
+  printf '%-*s  %-9s  %-*s  %s\n' "$w" 'TOOL' 'ESTADO' "$wv" 'VERSIÓN' 'UPDATE'
+  local parts
+  for row in "${rows[@]}"; do
+    IFS=$USEP read -r -a parts <<< "$row"
+    local inst_disp upd_disp
+    if [[ "${parts[3]:-}" == "si" ]]; then
+      inst_disp="${GREEN}instalado${NC}"
+      upd_disp=$(update_display "${parts[6]:-}")
+    else
+      inst_disp="${MUTED}—${NC}"
+      upd_disp="${MUTED}—${NC}"
+    fi
+    printf '%-*s  %-9s  %-*s  %s\n' "$w" "${parts[0]}" "$inst_disp" "$wv" "${parts[4]:-—}" "$upd_disp"
+  done
+  printf '\n%sUPDATE: %ssí%s = hay versión más nueva · %sno%s = al día · %sn/d%s = no se pudo determinar (red/offline)%s\n' \
+    "$MUTED" "$ORANGE" "$NC" "$GREEN" "$NC" "$MUTED" "$NC" "$NC"
+  return 0
+}
+
+update_display() {
+  case "$1" in
+    sí) printf '%s%s%s' "$ORANGE" "$1" "$NC" ;;
+    no) printf '%s%s%s' "$GREEN" "$1" "$NC" ;;
+    *)  printf '%s' "$1" ;;
+  esac
+}
+
+print_json_rows() {
+  local row
+  local parts items=() item
+  for row in "$@"; do
+    IFS=$'\x1f' read -r -a parts <<< "$row"
+    local inst_bool upd_json latest_json version_json installed_at_json
+    [[ "${parts[3]:-}" == "si" ]] && inst_bool=true || inst_bool=false
+    case "${parts[6]:-}" in
+      sí) upd_json=true ;;
+      no) upd_json=false ;;
+      *)  upd_json=null ;;
+    esac
+    [[ -n "${parts[7]:-}" ]] && latest_json="\"$(json_escape "${parts[7]:-}")\"" || latest_json=null
+    [[ -n "${parts[4]:-}" ]] && version_json="\"$(json_escape "${parts[4]:-}")\"" || version_json=null
+    [[ -n "${parts[5]:-}" ]] && installed_at_json="\"$(json_escape "${parts[5]:-}")\"" || installed_at_json=null
+    item=$(printf '{"name": "%s", "display_name": "%s", "description": "%s", "installed": %s, "version": %s, "installed_at": %s, "latest_version": %s, "update_available": %s}' \
+      "$(json_escape "${parts[0]}")" "$(json_escape "${parts[1]}")" "$(json_escape "${parts[2]}")" \
+      "$inst_bool" "$version_json" "$installed_at_json" "$latest_json" "$upd_json")
+    items+=("$item")
+  done
+  printf '{\n  "tools": [\n'
+  local i
+  for (( i = 0; i < ${#items[@]}; i++ )); do
+    printf '    %s' "${items[$i]}"
+    [[ $i -lt $(( ${#items[@]} - 1 )) ]] && printf ','
+    printf '\n'
+  done
+  printf '  ]\n}\n'
+}
+
+# ── install / update / remove / verify (delegación pura) ─────────────────────
+cmd_install() {
+  [[ $# -ge 1 ]] || { err "Uso: aicli install <tool> [flags]"; err "Ejecutá 'aicli install --help' para los flags."; return 2; }
+  [[ "$1" == "-h" || "$1" == "--help" ]] && { help_sub install; return 0; }
+  case "$1" in
+    -*)
+      err "El tool va primero: aicli install <tool> [-v X.Y.Z | --sha256 <hash> | --require-attestation]"
+      err "Recibido: aicli install $*"
+      return 2 ;;
+  esac
+  validate_tool "$1"
+  exec bash "$INSTALL_SH" "$@"
+}
+
+cmd_update() {
+  [[ $# -ge 1 ]] || { err "Uso: aicli update <tool>"; return 2; }
+  [[ "$1" == "-h" || "$1" == "--help" ]] && { help_sub update; return 0; }
+  validate_tool "$1"
+  [[ $# -eq 1 ]] || {
+    err "update no acepta flags. Para una versión específica: aicli install <tool> -v X.Y.Z"
+    return 2
+  }
+  exec bash "$INSTALL_SH" "$1" --update
+}
+
+cmd_remove() {
+  [[ $# -ge 1 ]] || { err "Uso: aicli remove <tool>"; return 2; }
+  [[ "$1" == "-h" || "$1" == "--help" ]] && { help_sub remove; return 0; }
+  validate_tool "$1"
+  [[ $# -eq 1 ]] || { err "remove no acepta flags."; return 2; }
+  exec bash "$INSTALL_SH" "$1" -u
+}
+
+cmd_verify() {
+  [[ $# -ge 1 ]] || { err "Uso: aicli verify <tool>"; return 2; }
+  [[ "$1" == "-h" || "$1" == "--help" ]] && { help_sub verify; return 0; }
+  validate_tool "$1"
+  [[ $# -eq 1 ]] || { err "verify no acepta flags."; return 2; }
+  exec bash "$VERIFY_SH" "$1"
+}
+
+# ── doctor ────────────────────────────────────────────────────────────────────
+cmd_doctor() {
+  local fails=0 warns=0
+  pass() { printf '%sPASS%s: %s\n' "$GREEN" "$NC" "$1"; }
+  fail() { printf '%sFAIL%s: %s\n' "$RED" "$NC" "$1"; fails=$((fails + 1)); }
+  warn_() { printf '%sWARN%s: %s\n' "$ORANGE" "$NC" "$1"; warns=$((warns + 1)); }
+
+  printf '=== Diagnóstico de aicli ===\n\n'
+
+  if [[ -f "$INSTALL_SH" ]]; then
+    pass "Repositorio: $REPO_DIR"
+  else
+    fail "Repositorio no encontrado en $REPO_DIR (corré desde el clon o definí AI_CLI_TERMUX_DIR)"
+  fi
+
+  case "$(uname -m)" in
+    aarch64|x86_64) pass "Arquitectura: $(uname -m)" ;;
+    *) fail "Arquitectura no soportada: $(uname -m)" ;;
+  esac
+
+  local c missing=()
+  for c in curl jq tar awk sha256sum; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    fail "Faltan dependencias: ${missing[*]} (pkg install curl jq gawk coreutils)"
+  else
+    pass "Dependencias del instalador presentes"
+  fi
+
+  local wrapper="$PREFIX/bin/aicli"
+  if [[ -f "$wrapper" ]]; then
+    if grep -qF "$AICLI_MARK" "$wrapper" 2>/dev/null; then
+      pass "Wrapper de aicli instalado: $wrapper"
+    else
+      fail "Existe $wrapper pero sin la marca '$AICLI_MARK' (binario ajeno; no se toca)"
+    fi
+  elif [[ -L "$wrapper" ]]; then
+    fail "Existe un symlink $wrapper que no es el wrapper de aicli (no se toca)"
+  else
+    warn_ "Wrapper de aicli no instalado — ejecutá 'aicli self-install'"
+  fi
+
+  local loader=""
+  case "$(uname -m)" in
+    aarch64) loader="$PREFIX/glibc/lib/ld-linux-aarch64.so.1" ;;
+    x86_64)  loader="$PREFIX/glibc/lib/ld-linux-x86-64.so.2" ;;
+  esac
+  if [[ -n "$loader" && -f "$loader" ]]; then
+    pass "Loader glibc presente"
+  else
+    warn_ "Loader glibc no encontrado ($loader) — se instala con los CLIs (pkg install glibc-repo glibc-runner)"
+  fi
+
+  local t app mf tag
+  for t in $(list_registry); do
+    app=$(conf_get "$REGISTRY_DIR/$t.conf" APP_NAME)
+    mf="$PREFIX/libexec/$app/manifest.txt"
+    if [[ -f "$mf" ]]; then
+      tag=$(manifest_get tag "$mf")
+      pass "$t instalado (${tag#v})"
+    else
+      printf '      %s-%s: %s no instalado\n' "$MUTED" "$NC" "$t"
+    fi
+  done
+
+  printf '\n=== Resultado: %d fallos, %d advertencias ===\n' "$fails" "$warns"
+  [[ "$fails" -gt 0 ]] && return 1
+  return 0
+}
+
+# ── completion ────────────────────────────────────────────────────────────────
+cmd_completion() {
+  local shell="${1:-}"
+  [[ -n "$shell" ]] || { err "Uso: aicli completion <bash|zsh|fish>"; return 2; }
+  case "$shell" in
+    bash) comp_bash ;;
+    zsh) comp_zsh ;;
+    fish) comp_fish ;;
+    *) err "Shell no soportado: '$shell' (bash|zsh|fish)"; return 2 ;;
+  esac
+}
+
+# Lista de tools como una sola línea (sin espacio final) para completions.
+# list_registry ya filtra el charset (fail-closed); aquí solo se unen.
+tools_spaced() {
+  list_registry | paste -sd ' ' -
+}
+
+comp_bash() {
+  local tools; tools=$(tools_spaced)
+  cat <<EOF
+# bash completions para aicli — generado por 'aicli completion bash'
+# Instalación: aicli completion bash > ~/.bash_completion.d/aicli && source ~/.bashrc
+_aicli() {
+  local cur sub
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  sub="\${COMP_WORDS[1]}"
+  case "\$COMP_CWORD" in
+    1)
+      COMPREPLY=( \$(compgen -W "$SUBCOMMANDS $tools --version --help --no-color" -- "\$cur") )
+      ;;
+    2)
+      case "\$sub" in
+        install|update|remove|verify|list)
+          COMPREPLY=( \$(compgen -W "$tools" -- "\$cur") )
+          ;;
+        completion)
+          COMPREPLY=( \$(compgen -W "bash zsh fish" -- "\$cur") )
+          ;;
+      esac
+      ;;
+  esac
+}
+complete -F _aicli aicli
+EOF
+}
+
+comp_zsh() {
+  local tools; tools=$(tools_spaced)
+  cat <<EOF
+#compdef aicli
+# zsh completions para aicli — generado por 'aicli completion zsh'
+# La lista de subcomandos y tools se emite literal (interpolada por bash): zsh
+# tokeniza el texto del script, así que no hace falta word splitting en runtime.
+_aicli() {
+  if (( CURRENT == 2 )); then
+    compadd $SUBCOMMANDS $tools --version --help --no-color
+  elif (( CURRENT == 3 )); then
+    case "\$words[2]" in
+      install|update|remove|verify|list) compadd $tools ;;
+      completion) compadd bash zsh fish ;;
+    esac
+  fi
+}
+compdef _aicli aicli
+EOF
+}
+
+comp_fish() {
+  local tools; tools=$(tools_spaced)
+  cat <<EOF
+# fish completions para aicli — generado por 'aicli completion fish'
+complete -c aicli -f -a "$SUBCOMMANDS $tools --version --help --no-color" -d 'aicli: gestor de CLIs de IA'
+for t in install update remove verify list
+  complete -c aicli -n "__fish_seen_subcommand_from \$t" -f -a "$tools" -d 'CLI de IA'
+end
+complete -c aicli -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
+EOF
+}
+
+# ── self-install / self-update ────────────────────────────────────────────────
+write_wrapper() {
+  local wrapper="$PREFIX/bin/aicli"
+  if ! mkdir -p "$(dirname "$wrapper")"; then
+    err "No se pudo crear $(dirname "$wrapper") (¿permisos?)."
+    return 1
+  fi
+  # Fail-closed: nunca pisar un binario ajeno (puede ser del usuario o de
+  # otro paquete). Solo reescribe si no existe o si lleva NUESTRA marca.
+  if [[ -e "$wrapper" || -L "$wrapper" ]] && ! grep -qF "$AICLI_MARK" "$wrapper" 2>/dev/null; then
+    err "$wrapper ya existe y no es el wrapper de aicli (sin marca '$AICLI_MARK')."
+    err "Fail-closed: no se pisa un binario existente."
+    return 1
+  fi
+  # La ruta viaja interpolada al heredoc: rechazar los caracteres que el
+  # heredoc expande, interpreta o rompe (" ' $ ` \ y newline) — fail-closed
+  # total ante cualquier ruta inesperada. Mismo patrón que install.sh con
+  # DISPLAY_NAME: grep -F por carácter (los case patterns con comillas
+  # dentro de [ ] son frágiles de parsear).
+  local bad
+  for bad in '"' "'" '$' '`' $'\\'; do
+    if printf '%s' "$REPO_DIR" | grep -qF "$bad"; then
+      err "Ruta del repo inválida para embeber en el wrapper: $REPO_DIR"
+      return 1
+    fi
+  done
+  # Newline: NO va por grep -F — un pattern con \n se trata como patrón vacío
+  # múltiple y matchea cualquier input. Case con patrón literal en su lugar.
+  case "$REPO_DIR" in
+    *$'\n'*)
+      err "Ruta del repo inválida para embeber en el wrapper: $REPO_DIR"
+      return 1
+      ;;
+  esac
+  # Fail-closed también en la escritura: un wrapper truncado sin marca bloquearía
+  # self-install/self-update futuros (el guard de la marca lo rechaza).
+  if ! cat > "$wrapper" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+# $AICLI_MARK
+# Wrapper del gestor ai-cli-termux. No editar: se regenera con
+# 'aicli self-install' (o self-update) desde el repositorio.
+set -euo pipefail
+exec "$REPO_DIR/aicli" "\$@"
+EOF
+  then
+    err "No se pudo escribir $wrapper (¿disco lleno o permisos?)."
+    return 1
+  fi
+  if ! chmod 755 "$wrapper"; then
+    err "No se pudo dar permisos de ejecución a $wrapper."
+    return 1
+  fi
+}
+
+cmd_self_install() {
+  if write_wrapper; then
+    info "aicli instalado: $PREFIX/bin/aicli → $REPO_DIR/aicli"
+    info "Disponible desde cualquier directorio. Para actualizar el gestor: aicli self-update"
+  else
+    return 1
+  fi
+}
+
+cmd_self_update() {
+  local wrapper="$PREFIX/bin/aicli"
+  if [[ ! -e "$wrapper" && ! -L "$wrapper" ]]; then
+    err "aicli no está instalado en $PREFIX/bin/aicli."
+    err "Ejecutá 'aicli self-install' (o desde el clon: bash aicli self-install)."
+    return 1
+  fi
+  if ! grep -qF "$AICLI_MARK" "$wrapper" 2>/dev/null; then
+    err "$wrapper no es el wrapper de aicli (sin marca '$AICLI_MARK')."
+    err "Fail-closed: no se pisa un binario existente."
+    return 1
+  fi
+  if write_wrapper; then
+    info "aicli actualizado: $PREFIX/bin/aicli → $REPO_DIR/aicli"
+  else
+    return 1
+  fi
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+suggest_cmd() {
+  local guess="" c
+  for c in $SUBCOMMANDS; do
+    [[ "$c" == "$1"* ]] && guess="$c" && break
+  done
+  [[ -n "$guess" ]] && err "¿Quisiste decir '$guess'?"
+}
+
+main() {
+  # Flags globales antes del subcomando (estándar: tool [global] <sub> ...).
+  [[ "${1:-}" == "--no-color" ]] && { NO_COLOR=1; shift; }
+  # Colores tras parsear --no-color (TTY + NO_COLOR + TERM=dumb → sin color).
+  if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then
+    MUTED=$'\033[0;2m'; GREEN=$'\033[0;32m'; RED=$'\033[0;31m'
+    ORANGE=$'\033[38;5;214m'; NC=$'\033[0m'
+  fi
+
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    "") usage_short; return 2 ;;
+    -h|--help) usage; return 0 ;;
+    --version) printf 'aicli %s\n' "$AICLI_VERSION"; return 0 ;;
+  esac
+
+  check_repo
+
+  case "$cmd" in
+    help) cmd_help "$@" ;;
+    list) cmd_list "$@" ;;
+    install) cmd_install "$@" ;;
+    update|upgrade) cmd_update "$@" ;;
+    remove|uninstall) cmd_remove "$@" ;;
+    verify) cmd_verify "$@" ;;
+    doctor) cmd_doctor ;;
+    completion) cmd_completion "$@" ;;
+    self-install) cmd_self_install ;;
+    self-update) cmd_self_update ;;
+    *)
+      err "Subcomando desconocido: '$cmd'"
+      err "Ejecutá 'aicli help' para la lista completa."
+      suggest_cmd "$cmd"
+      return 2 ;;
+  esac
+}
+
+main "$@"
