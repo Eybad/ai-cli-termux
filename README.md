@@ -13,14 +13,15 @@
 
 </div>
 
-`ai-cli-termux` instala y audita CLIs de inteligencia artificial ([opencode](https://github.com/anomalyco/opencode), [Antigravity CLI](https://antigravity.google), [Kiro CLI](https://kiro.dev) y [OpenAI Codex](https://github.com/openai/codex)) directamente en **Termux** para Android (`aarch64`) y Linux (`x86_64`), usando el overlay de librerías glibc del ecosistema Termux. Sin `proot`, sin máquinas virtuales: los binarios corren nativos sobre el kernel de Android, con rendimiento 1:1.
+Instala y audita CLIs de inteligencia artificial — [opencode](https://github.com/anomalyco/opencode), [Antigravity CLI](https://antigravity.google), [Kiro CLI](https://kiro.dev), [OpenAI Codex](https://github.com/openai/codex) y [Cursor Agent CLI](https://cursor.com) — directamente en **Termux** para Android (`aarch64`) y Linux (`x86_64`). Los binarios ELF glibc corren **nativos sobre el kernel de Android** vía el overlay de librerías glibc del ecosistema Termux: sin `proot`, sin máquinas virtuales, con rendimiento 1:1.
 
 > [!TIP]
 > Agregar una herramienta nueva solo requiere crear un archivo `registry/<tool>.conf`. El instalador es genérico y no se toca.
 
 ## Features
 
-- **Nativo, sin proot** — binarios ELF glibc ejecutados directamente vía el loader de Termux (`ld-linux-aarch64.so.1`), con `patchelf` y wrappers que resuelven las diferencias con Android (seccomp, DNS, certificados).
+- **Gestor `aicli`** — fachada de línea de comandos: `list` (estado + actualizaciones), `install`/`update`/`remove`, `verify`, `doctor`, completions y auto-instalación del propio gestor.
+- **Nativo, sin proot** — binarios ELF glibc ejecutados vía el loader de Termux (`ld-linux-aarch64.so.1`), con `patchelf` y wrappers que resuelven las diferencias con Android (seccomp, DNS, certificados).
 - **Framework modular** — cada CLI vive en un `registry/*.conf`: variables, entorno, parches y hooks. Todo lo específico de una herramienta está en su registro.
 - **Última versión automática** — versión y checksum se resuelven solos desde la GitHub API, el manifest de Google o el manifest del CDN de Amazon.
 - **Fail-closed** — sin checksum verificado no se instala. `sha256.txt` queda como pinning opcional para verificaciones independientes del vendor.
@@ -30,13 +31,13 @@
 
 ## Herramientas soportadas
 
-| Herramienta | Distribución | Verificación de integridad | Mitigaciones específicas |
+| Herramienta | Distribución | Verificación de integridad | Notas |
 |---|---|---|---|
 | **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | SHA256 del asset vía GitHub API + [Attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) (Sigstore) | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
-| **`agy`** (Antigravity CLI) | [Google Cloud Storage](https://antigravity.google) (manifest JSON) | SHA512 dinámico del manifest | Parche adaptativo VA39 + `faccessat2`, shim `libc.so`, DNS cgo |
-| **`kiro-cli`** (Kiro CLI) | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 del `manifest.json` oficial | Última versión automática del manifest |
+| **`agy`** (Antigravity CLI) | [endpoint de actualización de Google](https://antigravity.google) (Cloud Run, manifest JSON) | SHA512 dinámico del manifest | Parche adaptativo VA39 + `faccessat2`, shim `libc.so`, DNS cgo |
+| **`kiro-cli`** (Kiro CLI) | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 del `manifest.json` oficial | TUI vía runtime bun parcheado; `EXTRA_BINS` |
 | **`codex`** (OpenAI Codex) | [Repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) — **build propio en CI** desde el código oficial (Apache-2.0) | SHA256 del asset vía GitHub API + attestation SLSA del workflow | Binario nativo bionic (arm64, sin proot) o musl verificado (amd64); `EXEC_DIRECT` |
-| **`cursor-agent`** (Cursor Agent CLI) | [CDN propio](https://downloads.cursor.com/lab/...) (`url_template`, sin endpoint "latest" público) | SHA256 del tarball pineado a mano en `sha256.txt` | Bundle node embebido patcheado (`ELF_NAME` + `ENTRY_POINT`), alias `agent`, `agent update` bloqueado, shims de navegador y DNS (patrón agy), `rg` del sistema por PATH |
+| **`cursor-agent`** (Cursor Agent CLI) | [CDN propio](https://downloads.cursor.com/lab/...) (`url_template`, sin endpoint "latest" público) | SHA256 del tarball pineado a mano en `sha256.txt` | Bundle node embebido patcheado, alias `agent`, `agent update` bloqueado |
 
 ## Requisitos
 
@@ -55,16 +56,19 @@
 ```bash
 git clone https://github.com/Eybad/ai-cli-termux.git
 cd ai-cli-termux
+bash aicli self-install   # instala el gestor en $PREFIX/bin
+```
+
+Desde cualquier directorio:
+
+```bash
+aicli install opencode    # instala la última versión verificada
+aicli list                # estado local + actualizaciones disponibles
 ```
 
 ## Gestor aicli
 
-`aicli` es la fachada recomendada sobre `install.sh`/`verify.sh`: gestiona los CLIs sin reemplazar sus comandos propios (cada CLI se usa con su ayuda: `opencode --help`, `codex exec`, ...). Primera instalación del gestor (desde el clon):
-
-```bash
-bash aicli self-install   # instala el wrapper en $PREFIX/bin (marca de propiedad)
-aicli --version
-```
+`aicli` es la fachada recomendada sobre `install.sh`/`verify.sh`: gestiona los CLIs sin reemplazar sus comandos propios (cada CLI se usa con su propia ayuda: `opencode --help`, `codex exec`, ...).
 
 | Subcomando | Descripción |
 |---|---|
@@ -78,70 +82,39 @@ aicli --version
 | `aicli completion <bash\|zsh\|fish>` | Completions a stdout (tools del registry dinámicos) |
 | `aicli self-install` / `self-update` | Instalar / actualizar el wrapper propio (fail-closed: nunca pisa un binario ajeno) |
 
-Convenciones: `--help`/`--version` a stdout con exit 0, errores a stderr, exit `2` = uso inválido, `NO_COLOR`/`TERM=dumb`/no-TTY/`--no-color` desactivan colores. La versión de cada CLI se resuelve con la interfaz máquina `install.sh <tool> --resolve-version` (imprime `TARGET_VERSION=<v>`, sin efectos colaterales; ver `AGENTS.md`).
+Convenciones: `--help`/`--version` a stdout con exit 0, errores a stderr, exit `2` = uso inválido, `NO_COLOR`/`TERM=dumb`/no-TTY/`--no-color` desactivan colores.
 
-`install.sh` y `verify.sh` siguen funcionando directo (los comandos son equivalentes).
+> [!NOTE]
+> `install.sh` y `verify.sh` siguen funcionando directo; los comandos del gestor son equivalentes (`aicli update <tool>` = `bash install.sh <tool> --update`).
 
-### opencode
-
-```bash
-bash install.sh opencode                    # última versión (digest SHA256 de GitHub)
-bash install.sh opencode -v 1.18.9          # versión específica
-bash install.sh opencode --update           # actualizar a la última versión
-bash install.sh opencode -u                 # desinstalar
-```
-
-### agy (Antigravity CLI)
+### Instalación por herramienta
 
 ```bash
-bash install.sh agy                         # última versión (manifest oficial de Google)
-bash install.sh agy --update                # actualizar a la última versión
-bash install.sh agy -r                      # reinstalar (re-aplica los parches)
-bash install.sh agy -u                      # desinstalar
+aicli install agy         # última versión (manifest oficial de Google)
+aicli install kiro-cli    # última versión (manifest del CDN de Amazon)
+aicli install codex -v 0.146.0+android1   # ejemplo: release con el parche de locks Android
+aicli install cursor-agent -v 2026.07.23-e383d2b  # ejemplo: versión pineada (ver sha256.txt)
 ```
 
-### kiro-cli
+**opencode** — digest SHA256 verificado contra la GitHub API (el pin de `sha256.txt` gana si existe).
 
-```bash
-bash install.sh kiro-cli                    # última versión (manifest del CDN de Amazon)
-bash install.sh kiro-cli --update           # actualizar a la última versión
-bash install.sh kiro-cli -r                 # reinstalación forzada
-bash install.sh kiro-cli -u                 # desinstalar
-```
+**agy** — el hook de instalación aplica el parche adaptativo (VA39 + `faccessat2`, ver [Soluciones técnicas de Android](#soluciones-técnicas-de-android)) y ejecuta un smoke test (`--version`) post-parche: si algo no se puede resolver, la instalación aborta y se restaura la versión anterior.
 
-### codex (OpenAI Codex)
+**kiro-cli** — el TUI delega el render en un runtime bun que el cliente descarga a `~/.local/share/kiro-cli/`; el build descargado es glibc y no corre en Termux. Ver [TUI en Termux: fix del runtime bun](#tui-en-termux-fix-del-runtime-bun).
 
-```bash
-bash install.sh codex                    # última versión (release de distribución generado por CI)
-bash install.sh codex -v 0.146.0         # versión específica (release estándar)
-bash install.sh codex -v 0.146.0+android1  # release con el parche de locks Android
-bash install.sh codex --update           # actualizar a la última versión
-bash install.sh codex -u                 # desinstalar
-```
+**codex** — por qué no se instala el binario oficial de OpenAI: los assets Linux oficiales son **musl estáticos**, que en Android no resuelven DNS (leen `/etc/resolv.conf` de la raíz del sistema, inexistente sin proot) — el login y la API fallan. El workflow [build-codex.yml](.github/workflows/build-codex.yml) compila el CLI en CI desde el código oficial (`openai/codex`, Apache-2.0) para **bionic nativo** (`aarch64-linux-android`, NDK API 29): DNS (netd) y TLS (rustls/webpki) funcionan sin proot. En `amd64` (host Linux) se re-empaqueta el asset oficial musl con su digest SHA256 verificado contra la API upstream (fail-closed).
 
-**Por qué no se instala el binario oficial de OpenAI**: los assets Linux oficiales son **musl estáticos**, que en Android no resuelven DNS (leen `/etc/resolv.conf` de la raíz del sistema, inexistente sin proot) — el login y la API fallan. Por eso el workflow [build-codex.yml](.github/workflows/build-codex.yml) compila el CLI en CI desde el código oficial (`openai/codex`, Apache-2.0) para **bionic nativo** (`aarch64-linux-android`, NDK API 29): DNS (netd) y TLS (rustls/webpki) funcionan sin proot. En `amd64` (host Linux) se re-empaqueta el asset oficial musl con su digest SHA256 verificado contra la API upstream (fail-closed).
+- **Parche de locks Android**: desde Rust 1.89, `File::lock*` devuelve `Unsupported` en Android (rust-lang/rust#148325) y el TUI/exec de codex fallan. El build de arm64 aplica un parche generado ([`gen-codex-lock-patch.py`](scripts/gen-codex-lock-patch.py) → módulo `file_lock_shim` con `flock(2)`) y publica con tag `vX.Y.Z+androidN` (build metadata semver). El instalador preserva el `+build` en versión y tag, y `--update` migra automáticamente del release estándar al parcheado. `codex update` está bloqueado en el wrapper (todo pasa por `aicli update codex`).
+- **Escalable**: el CI detecta cada release nuevo de OpenAI (cron diario) y publica el asset en el [repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) con digest y attestation. Si un release upstream rompe el build bionic, no se publica y la última versión buena sigue instalable.
+- **Ripgrep**: si codex reporta la falta de `rg`, instalalo con `pkg install ripgrep` (se busca por PATH).
 
-- **Parche de locks Android**: desde Rust 1.89, `File::lock*` devuelve `Unsupported` en Android (rust-lang/rust#148325) y el TUI/exec de codex fallan. El build de arm64 aplica un parche generado ([`gen-codex-lock-patch.py`](scripts/gen-codex-lock-patch.py) → módulo `file_lock_shim` con `flock(2)`) y publica con tag `vX.Y.Z+androidN` (build metadata semver; `N` = `patch_rev`). El instalador preserva el `+build` en versión y tag, y `--update` migra automáticamente del release estándar al parcheado. `codex update` está bloqueado en el wrapper (todo pasa por `install.sh codex --update`).
-- **Escalable**: el CI detecta cada release nuevo de OpenAI (cron diario) y publica el asset en el [repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) (`codex-arm64.tar.gz`/`codex-amd64.tar.gz`) con digest y attestation. `--update` funciona sin tocar nada. Si un release upstream rompe el build bionic, no se publica y la última versión buena sigue instalable.
 > [!IMPORTANT]
-> El sandbox de codex usa `landlock` por defecto; en kernels Android que no lo soporten, configurá `sandbox_mode = "off"` en `~/.codex/config.toml`.
+> El sandbox de codex usa `landlock` por defecto; en kernels Android que no lo soporten (`zgrep LANDLOCK /proc/config.gz`), configurá `sandbox_mode = "off"` en `~/.codex/config.toml`. Desactivarlo elimina el aislamiento de los comandos que el agente ejecuta sobre tus archivos: aplicálo solo si el kernel realmente no lo soporta.
 
-- **Ripgrep**: si codex reporta la falta de `rg`, instalalo con `pkg install ripgrep` (se busca por PATH, como los shims de agy).
-- **Releases del proyecto vs de distribución**: los releases `v0.146.0+` de codex viven en el repo de distribución dedicado (solo binarios). Los releases `v1.0.0+` de este repo versionan el instalador en sí (este README, `install.sh`, `verify.sh`, `registry/`). El instalador distingue por asset, no por repo.
+**cursor-agent** — Cursor distribuye un tarball con un runtime **node embebido** (ELF glibc de 125 MB, no-PIE) que se patchea al overlay (`ELF_NAME="node"`) y se lanza vía el launcher bash del bundle (`ENTRY_POINT="cursor-agent"`). El instalador oficial expone el comando como `agent`; se replica con `ALIASES` (symlink gestionado).
 
-### cursor-agent (Cursor Agent CLI)
-
-```bash
-bash install.sh cursor-agent -v 2026.07.23-e383d2b  # versión específica (ver pin en sha256.txt)
-bash install.sh cursor-agent --update               # última versión registrada en sha256.txt
-bash install.sh cursor-agent -r                     # reinstalar
-bash install.sh cursor-agent -u                     # desinstalar (borra también el alias `agent`)
-```
-
-- **Bundle node**: Cursor distribuye un tarball con un runtime **node embebido** (ELF glibc de 125 MB, no-PIE) que se patchea al overlay (`ELF_NAME="node"`) y se lanza vía el launcher bash del bundle (`ENTRY_POINT="cursor-agent"`). El instalador oficial expone el comando como `agent`; se replica con `ALIASES` (symlink gestionado).
-- **Sin checksums del vendor**: Cursor no publica checksums ni manifest, y la versión va hardcodeada en el script de [cursor.com/install](https://cursor.com/install). El pin se mantiene a mano en `sha256.txt` (ver el comentario del archivo): detectar la versión nueva, descargar el tarball (`https://downloads.cursor.com/lab/<version>/linux/arm64/agent-cli-package.tar.gz`), `sha256sum`, actualizar la entrada y `bash install.sh cursor-agent --update`. El CDN tuvo incidentes de 403 históricos (artifacts no publicados): el pin evita instalar versiones rotas.
-- **`agent update` bloqueado** (`WRAPPER_DENY_ARGS`): el updater interno descargaría versiones sin verificación de checksum; las actualizaciones pasan siempre por `install.sh cursor-agent --update` (fail-closed). Nota: el deny es *policy* del wrapper, no una frontera — ejecutar el launcher del bundle directo (`libexec/cursor-agent/cursor-agent update`) o `node index.js update` la esquiva. El código JS del CLI (`index.js`, chunks) se cubre con el pin del tarball al instalar, pero no se audita individualmente después (verify.sh hashea los ELFs).
-- **`rg` del sistema**: el CLI busca `rg` por PATH (`pkg install ripgrep`); no se usa el binario del bundle. `cursorsandbox` y `crepectl` (búsqueda/sandbox del bundle) se patchean y auditan vía `EXTRA_BINS`.
+- **Sin checksums del vendor**: Cursor no publica checksums ni manifest, y la versión va hardcodeada en el script de [cursor.com/install](https://cursor.com/install). El pin se mantiene a mano en `sha256.txt` (ver el comentario del archivo): detectar la versión nueva, descargar el tarball (`https://downloads.cursor.com/lab/<version>/linux/arm64/agent-cli-package.tar.gz`), `sha256sum`, actualizar la entrada y `aicli update cursor-agent`. El CDN tuvo incidentes de 403 históricos (artifacts no publicados): el pin evita instalar versiones rotas. Nota: el primer hash es *trust-on-first-use* — asume confianza en `downloads.cursor.com` (protege contra cambios posteriores, no contra un CDN envenenado).
+- **`agent update` bloqueado** (`WRAPPER_DENY_ARGS`): el updater interno descargaría versiones sin verificación de checksum; las actualizaciones pasan siempre por `aicli update cursor-agent` (fail-closed). El deny es *policy* del wrapper, no una frontera — ejecutar el launcher del bundle directo (`libexec/cursor-agent/cursor-agent update`) la esquiva.
 - **Login**: requiere cuenta de cursor.com (`agent login` abre el navegador vía `termux-open-url`, redirigido por los shims).
 
 #### TUI en Termux: fix del runtime bun
@@ -156,13 +129,20 @@ Fix (una sola vez; repetir si el cliente re-descarga el build glibc):
 ```bash
 curl -fsSL -o /tmp/bun-android.zip \
   https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64-android.zip
-unzip -o /tmp/bun-android.zip -d /tmp/bun-android
-cp /tmp/bun-android/bun-linux-aarch64-android/bun ~/.local/share/kiro-cli/bun
-chmod 755 ~/.local/share/kiro-cli/bun
-# Fail-closed: debe ser la build Android (bionic, interpreter /system/bin/linker64).
-file ~/.local/share/kiro-cli/bun | grep -q 'linker64' \
-  || { echo "ERROR: el binario descargado no es la build Android de bun"; exit 1; }
+# Fail-closed: digest del asset publicado por la GitHub API para bun-v1.3.14.
+if echo "992bcf239c91bedd873f8150cceef3db3b0618fa78161badd3c14dc6d24fe560  /tmp/bun-android.zip" \
+    | sha256sum -c - >/dev/null 2>&1; then
+  unzip -o /tmp/bun-android.zip -d /tmp/bun-android
+  cp /tmp/bun-android/bun-linux-aarch64-android/bun ~/.local/share/kiro-cli/bun
+  chmod 755 ~/.local/share/kiro-cli/bun
+  echo "OK: runtime bun Android instalado (digest verificado)"
+else
+  echo "ERROR: checksum del zip no coincide. Borrá /tmp/bun-android.zip y repetí."
+fi
 ```
+
+> [!NOTE]
+> El digest corresponde a `bun-v1.3.14` (la build Android más cercana a la v1.3.13 que espera el launcher). Si en el futuro el fix se aplica a otra versión, verificá el digest del asset en la GitHub API antes de pegar el bloque.
 
 `bun.sha256` no se toca: el launcher compara ese archivo contra el hash del build glibc v1.3.13 que espera, y solo re-descarga si difieren; el binario en sí no se valida. Por eso el binario queda en v1.3.14 (la build Android más cercana; las builds Android de bun existen desde v1.3.14, no hay build Android de v1.3.13) con el sha file de v1.3.13.
 
@@ -186,22 +166,24 @@ file ~/.local/share/kiro-cli/bun | grep -q 'linker64' \
 Cada instalación registra un `manifest.txt` con la versión y los hashes del binario. Para actualizar una herramienta:
 
 ```bash
-bash install.sh <tool> --update
+aicli update <tool>
 ```
 
 - **opencode**: última release de GitHub; digest SHA256 verificado contra la GitHub API (el pin de `sha256.txt` gana si existe).
-- **agy**: última versión del manifest de Google. El parche adaptativo (`registry/patch_va39.py`) resuelve los cambios de estructura por pattern-matching de instrucciones ARM64, y el hook ejecuta un smoke test (`--version`) post-parche: si algo no se puede resolver, la instalación aborta y se restaura la versión anterior.
+- **agy**: última versión del manifest de Google, con re-aplicación del parche adaptativo.
 - **kiro-cli**: última versión del `manifest.json` del CDN de Amazon.
 - **codex**: última versión publicada por el build propio de CI en el repo de distribución ([`build-codex.yml`](.github/workflows/build-codex.yml)); digest + attestation del workflow (emitida por el repo del proyecto).
-- **cursor-agent**: última versión registrada en `sha256.txt` (pin manual; el vendor no publica endpoint "latest" — ver [cursor-agent](#cursor-agent-cursor-agent-cli)). Detecta versiones con prerelease/build (ej: `2026.07.23-e383d2b`).
+- **cursor-agent**: última versión registrada en `sha256.txt` (pin manual; el vendor no publica endpoint "latest" — ver [Instalación por herramienta](#instalación-por-herramienta)). Detecta versiones con prerelease/build (ej: `2026.07.23-e383d2b`).
 
 > [!NOTE]
 > Para la mayoría de las herramientas no hace falta tocar `sha256.txt`: la versión y el checksum se resuelven automáticamente y fail-closed desde la fuente del vendor (el archivo queda como capa opcional de pinning). **Excepción: `cursor-agent`** — su pin en `sha256.txt` es la única fuente de versiones (CDN sin manifest), y `--update` toma de ahí la última registrada.
 
+El workflow CI [update-hashes.yml](.github/workflows/update-hashes.yml) actualiza `sha256.txt` automáticamente para las tools con `RELEASE_SOURCE=github`.
+
 ## Verificación
 
 ```bash
-bash verify.sh <tool>    # ej: bash verify.sh agy
+aicli verify <tool>    # ej: aicli verify agy
 ```
 
 Audita la instalación en 10 pasos: manifest local, binario presente y ejecutable (formato ELF correcto), interpreter/rpath de `patchelf`, integridad post-modificación contra `manifest.txt`, consistencia con `sha256.txt`, estado de la attestation, wrapper (limpia `LD_PRELOAD`/`LD_LIBRARY_PATH`), entorno glibc (loader, `nsswitch.conf`, DNS), ejecución real (`--version`) y resumen final. **Exit code 1 ante cualquier fallo.**
@@ -218,7 +200,7 @@ Android (kernel aarch64 + seccomp)
                  └─ binario ejecutado de forma nativa (sin VM, sin emulación)
 ```
 
-Esta sección describe las capas del runtime; los parches puntuales que resuelven cada incompatibilidad de Android están detallados en [Soluciones técnicas de Android](#soluciones-técnicas-de-android).
+Los parches puntuales que resuelven cada incompatibilidad de Android están detallados en [Soluciones técnicas de Android](#soluciones-técnicas-de-android).
 
 ## Soluciones técnicas de Android
 
@@ -249,6 +231,13 @@ En la glibc de Termux, `/usr/glibc/lib/libc.so` es un script ASCII del linker, n
 
 `glibc-runner` crashea silenciosamente si un proceso invoca un binario inexistente como `xdg-open` o `xclip` (usados por las CLIs para abrir URLs y copiar texto). Se instalan wrappers ligeros que redirigen a `termux-open-url` y `termux-clipboard-set`.
 
+## Integridad (doble capa de hashes)
+
+Como `patchelf` y `patch_va39.py` modifican el binario durante la instalación, el sistema registra dos checksums:
+
+1. **Tarball**: verificado al descargar (digest del vendor, pin de `sha256.txt` o `--sha256`) — sin hash verificado no se instala.
+2. **Binario instalado**: hash recalculado tras los parches y guardado en `manifest.txt`; `verify.sh` lo compara en cada auditoría para detectar adulteración posterior.
+
 ## Agregar una CLI nueva
 
 1. Crear `registry/<tool>.conf` con los campos obligatorios: `APP_NAME`, `DISPLAY_NAME`, `RELEASE_SOURCE`, `CHECKSUM_ALGO`, `CHECKSUM_SOURCE`, `ELF_NAME`.
@@ -273,33 +262,27 @@ En la glibc de Termux, `/usr/glibc/lib/libc.so` es un script ASCII del linker, n
 > [!NOTE]
 > El detalle fino — arch mapping (`aarch64`→`arm64`, `x86_64`→`amd64`), formato de `sha256.txt`, pipeline completo de instalación y las invariants del proyecto — está documentado en [AGENTS.md](AGENTS.md).
 
-## Integridad (doble capa de hashes)
-
-Como `patchelf` y `patch_va39.py` modifican el binario durante la instalación, el sistema registra dos checksums:
-
-1. **Tarball**: verificado al descargar (digest del vendor, pin de `sha256.txt` o `--sha256`) — sin hash verificado no se instala.
-2. **Binario instalado**: hash recalculado tras los parches y guardado en `manifest.txt`; `verify.sh` lo compara en cada auditoría para detectar adulteración posterior.
-
 ## Estructura del repositorio
 
 ```
 ai-cli-termux/
-├── install.sh                  # Instalador genérico (fail-closed)
-├── verify.sh                   # Verificador post-instalación (10 pasos)
-├── sha256.txt                  # Pinning opcional de hashes
-├── AGENTS.md                   # Invariants y convenciones para contribuir
-├── registry/                   # Configuración por herramienta
+├── aicli                        # Gestor (fachada sobre install.sh/verify.sh)
+├── install.sh                   # Instalador genérico (fail-closed)
+├── verify.sh                    # Verificador post-instalación (10 pasos)
+├── sha256.txt                   # Pinning opcional de hashes
+├── AGENTS.md                    # Invariants y convenciones para contribuir
+├── registry/                    # Configuración por herramienta
 │   ├── opencode.conf
 │   ├── agy.conf
 │   ├── kiro-cli.conf
 │   ├── codex.conf
 │   ├── cursor-agent.conf
-│   └── patch_va39.py           # Parche adaptativo ARM64 (VA39 + faccessat2)
+│   └── patch_va39.py            # Parche adaptativo ARM64 (VA39 + faccessat2)
 ├── scripts/
-│   └── gen-codex-lock-patch.py # Generador fail-closed del parche de locks (CI)
+│   └── gen-codex-lock-patch.py  # Generador fail-closed del parche de locks (CI)
 ├── docs/
 │   └── adr/0001-release-scheme.md
 └── .github/workflows/
-    ├── build-codex.yml         # Build bionic arm64 + musl verificado (cron diario)
-    └── update-hashes.yml       # Actualiza sha256.txt (manual)
+    ├── build-codex.yml          # Build bionic arm64 + musl verificado (cron diario)
+    └── update-hashes.yml        # Actualiza sha256.txt (CI)
 ```
