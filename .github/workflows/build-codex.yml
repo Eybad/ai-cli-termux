@@ -237,30 +237,43 @@ jobs:
           unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP"
           echo "ANDROID_NDK_HOME=$RUNNER_TEMP/android-ndk-$NDK_VER" >> "$GITHUB_ENV"
 
-      - name: Descargar prebuilt rusty_v8 para aarch64 y verificar digest (fail-closed)
+      - name: Descargar prebuilt rusty_v8 ptrcomp_sandbox (openai) y verificar digest (fail-closed)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Versión pineada al crate v8 del Cargo.lock upstream (0.147.0 → 150.4.0).
-          V8_URL="https://github.com/denoland/rusty_v8/releases/download/v150.4.0/librusty_v8_release_aarch64-unknown-linux-gnu.a.gz"
-          # Digest del asset desde la API del release (mismo patrón fail-closed que el job amd64).
-          EXPECTED=$(gh api repos/denoland/rusty_v8/releases/tags/v150.4.0 \
-            --jq '.assets[] | select(.name == "librusty_v8_release_aarch64-unknown-linux-gnu.a.gz") | .digest' | sed 's/^sha256://')
-          [[ -n "$EXPECTED" ]] || { echo "ERROR: digest del prebuilt rusty_v8 no resuelto"; exit 1; }
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/rusty_v8.a.gz" "$V8_URL"
-          GOT=$(sha256sum "$RUNNER_TEMP/rusty_v8.a.gz" | cut -d' ' -f1)
-          if [[ "$GOT" != "$EXPECTED" ]]; then
-            echo "ERROR: digest mismatch del prebuilt rusty_v8: esperado $EXPECTED, obtenido $GOT"
-            exit 1
-          fi
-          echo "Digest del prebuilt rusty_v8 verificado: $GOT"
-          gzip -d "$RUNNER_TEMP/rusty_v8.a.gz"
-          echo "RUSTY_V8_ARCHIVE=$RUNNER_TEMP/rusty_v8.a" >> "$GITHUB_ENV"
-          # v8 busca src_binding_release_aarch64-linux-android.rs en su gen/
-          # Copiar el binding aarch64-unknown-linux-gnu (FFI idéntico en aarch64)
+          # El graph (-p codex-cli -p codex-code-mode-host) activa las features
+          # v8_enable_pointer_compression + v8_enable_sandbox del crate v8
+          # (codex-rs/code-mode-runtime/Cargo.toml → v8_enable_sandbox implica
+          # v8_enable_pointer_compression): el build.rs de v8 exige el par
+          # prebuilt+binding "ptrcomp_sandbox_release_aarch64-linux-android", que
+          # denoland NO publica. OpenAI los publica en su release rusty-v8-v150.4.0
+          # (compilados con bazel, mismo v8 150.4.0, mismo canal que distribuye
+          # los binarios oficiales del code tool). Versión pineada al crate v8
+          # del Cargo.lock upstream (0.147.0 → 150.4.0).
+          V8_BASE="https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0"
+          for NAME in \
+            librusty_v8_ptrcomp_sandbox_release_aarch64-unknown-linux-gnu.a.gz \
+            src_binding_ptrcomp_sandbox_release_aarch64-unknown-linux-gnu.rs
+          do
+            # Digest del asset desde la API del release (patrón fail-closed del job amd64).
+            EXPECTED=$(gh api repos/openai/codex/releases/tags/rusty-v8-v150.4.0 \
+              --jq ".assets[] | select(.name == \"$NAME\") | .digest" | sed 's/^sha256://')
+            [[ -n "$EXPECTED" ]] || { echo "ERROR: digest no resuelto para $NAME"; exit 1; }
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/$NAME" "$V8_BASE/$NAME"
+            GOT=$(sha256sum "$RUNNER_TEMP/$NAME" | cut -d' ' -f1)
+            if [[ "$GOT" != "$EXPECTED" ]]; then
+              echo "ERROR: digest mismatch de $NAME: esperado $EXPECTED, obtenido $GOT"
+              exit 1
+            fi
+            echo "Digest verificado ($NAME): $GOT"
+          done
+          gzip -d "$RUNNER_TEMP/librusty_v8_ptrcomp_sandbox_release_aarch64-unknown-linux-gnu.a.gz"
+          # Override oficial del build.rs de v8 (así lo usa el smoke test de
+          # openai): archive + binding se usan tal cual, sin tocar gen/ del crate.
+          echo "RUSTY_V8_ARCHIVE=$RUNNER_TEMP/librusty_v8_ptrcomp_sandbox_release_aarch64-unknown-linux-gnu.a" >> "$GITHUB_ENV"
+          echo "RUSTY_V8_SRC_BINDING_PATH=$RUNNER_TEMP/src_binding_ptrcomp_sandbox_release_aarch64-unknown-linux-gnu.rs" >> "$GITHUB_ENV"
           cargo fetch --manifest-path upstream/codex-rs/Cargo.toml
-          find ~/.cargo/registry/src/ -path '*/v8-*/gen' -exec sh -c 'cp "$1/src_binding_release_aarch64-unknown-linux-gnu.rs" "$1/src_binding_release_aarch64-linux-android.rs"' _ {} \;
 
       - name: Crear shim bionic_compat para símbolos glibc de v8
         run: |
