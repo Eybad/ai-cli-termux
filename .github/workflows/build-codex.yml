@@ -335,7 +335,7 @@ jobs:
           sed -i '/^\[dependencies\]/a openssl-sys = { workspace = true, features = ["vendored"] }' cli/Cargo.toml
           grep -n 'openssl-sys' Cargo.toml cli/Cargo.toml
 
-      - name: Compilar codex-cli para aarch64-linux-android (bionic)
+      - name: Compilar codex-cli + codex-code-mode-host para aarch64-linux-android (bionic)
         working-directory: upstream/codex-rs
         env:
           ANDROID_NDK_HOME: ${{ runner.temp }}/android-ndk-${{ env.NDK_VER }}
@@ -362,14 +362,17 @@ jobs:
           # externas); --locked abajo valida que no falte nada.
           cargo update --workspace
           # --locked: falla si el Cargo.lock (ya regenerado) necesita cambios.
-          cargo build --locked --release -p codex-cli --target aarch64-linux-android
+          # codex-code-mode-host: desde 0.147 el code tool (V8) corre en un
+          # binario separado que codex busca como "codex-code-mode-host" junto
+          # a su propio ejecutable; sin él el code tool falla fail-closed.
+          cargo build --locked --release -p codex-cli -p codex-code-mode-host --target aarch64-linux-android
 
       - name: Instalar patchelf (verificación de RUNPATH)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq patchelf
 
-      - name: Empaquetar binario + libc++_shared.so (RUNPATH $ORIGIN)
+      - name: Empaquetar binario + codex-code-mode-host + libc++_shared.so (RUNPATH $ORIGIN)
         run: |
           set -euo pipefail
           BIN=upstream/codex-rs/target/aarch64-linux-android/release/codex
@@ -381,16 +384,27 @@ jobs:
           LIB="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
           [[ -f "$LIB" ]] || { echo "ERROR: libc++_shared.so no encontrado en NDK"; exit 1; }
 
+          # Code mode host: binario compañero del bundle (0.147+). codex lo
+          # busca como "codex-code-mode-host" junto a su propio ejecutable
+          # ($LIBEXEC_DIR); el instalador copia el directorio completo del
+          # tarball, así que viaja igual que libc++_shared.so, sin wrapper.
+          HOST=upstream/codex-rs/target/aarch64-linux-android/release/codex-code-mode-host
+          [[ -f "$HOST" ]] || { echo "ERROR: codex-code-mode-host no generado"; exit 1; }
+          file "$HOST" | grep -qE 'ELF 64-bit.*ARM aarch64' || { file "$HOST"; exit 1; }
+
           mkdir -p stage
           cp "$BIN" stage/codex
+          cp "$HOST" stage/codex-code-mode-host
           cp "$LIB" stage/libc++_shared.so
           # RUNPATH=$ORIGIN: el loader bionic encuentra libc++_shared.so junto al binario.
           patchelf --set-rpath '$ORIGIN' stage/codex
           patchelf --print-rpath stage/codex | grep -q '\$ORIGIN' || { echo "ERROR: rpath no aplicado"; exit 1; }
-          file stage/codex
-          ls -la stage/codex stage/libc++_shared.so
+          patchelf --set-rpath '$ORIGIN' stage/codex-code-mode-host
+          patchelf --print-rpath stage/codex-code-mode-host | grep -q '\$ORIGIN' || { echo "ERROR: rpath del host no aplicado"; exit 1; }
+          file stage/codex stage/codex-code-mode-host
+          ls -la stage/codex stage/codex-code-mode-host stage/libc++_shared.so
 
-          tar -C stage -czf codex-arm64.tar.gz codex libc++_shared.so
+          tar -C stage -czf codex-arm64.tar.gz codex codex-code-mode-host libc++_shared.so
           sha256sum codex-arm64.tar.gz
 
       - name: Subir artifact
@@ -408,38 +422,49 @@ jobs:
       contents: read
     env:
       UPSTREAM_ASSET: codex-x86_64-unknown-linux-musl.tar.gz
+      # Code mode host (0.147+): asset oficial separado; sin él el code tool
+      # (V8) falla fail-closed. Se re-empaqueta junto a codex con digest
+      # verificado, igual que el binario principal.
+      UPSTREAM_HOST_ASSET: codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
       UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
     steps:
-      - name: Descargar asset oficial musl y verificar digest (fail-closed)
+      - name: Descargar assets oficiales musl (codex + host) y verificar digest (fail-closed)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Digest esperado desde la API del release upstream (sha256 del asset).
-          EXPECTED=$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${UPSTREAM_TAG}" \
-            --jq ".assets[] | select(.name == \"$UPSTREAM_ASSET\") | .digest" | sed 's/^sha256://')
-          [[ -n "$EXPECTED" ]] || { echo "ERROR: asset $UPSTREAM_ASSET no encontrado upstream"; exit 1; }
+          for SPEC in "$UPSTREAM_ASSET" "$UPSTREAM_HOST_ASSET"; do
+            # Digest esperado desde la API del release upstream (sha256 del asset).
+            EXPECTED=$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${UPSTREAM_TAG}" \
+              --jq ".assets[] | select(.name == \"$SPEC\") | .digest" | sed 's/^sha256://')
+            [[ -n "$EXPECTED" ]] || { echo "ERROR: asset $SPEC no encontrado upstream"; exit 1; }
 
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$UPSTREAM_ASSET" \
-            "https://github.com/${UPSTREAM_REPO}/releases/download/${UPSTREAM_TAG}/$UPSTREAM_ASSET"
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$SPEC" \
+              "https://github.com/${UPSTREAM_REPO}/releases/download/${UPSTREAM_TAG}/$SPEC"
 
-          GOT=$(sha256sum "$UPSTREAM_ASSET" | cut -d' ' -f1)
-          if [[ "$GOT" != "$EXPECTED" ]]; then
-            echo "ERROR: digest mismatch del asset oficial: esperado $EXPECTED, obtenido $GOT"
-            exit 1
-          fi
-          echo "Digest verificado: $GOT"
+            GOT=$(sha256sum "$SPEC" | cut -d' ' -f1)
+            if [[ "$GOT" != "$EXPECTED" ]]; then
+              echo "ERROR: digest mismatch del asset oficial $SPEC: esperado $EXPECTED, obtenido $GOT"
+              exit 1
+            fi
+            echo "Digest verificado ($SPEC): $GOT"
+          done
 
       - name: Re-empaquetar como codex-amd64.tar.gz
         run: |
           set -euo pipefail
           tar -xzf "$UPSTREAM_ASSET"
-          INNER=$(find . -maxdepth 1 -type f -name 'codex-*' ! -name '*.tar.gz' | head -1)
+          tar -xzf "$UPSTREAM_HOST_ASSET"
+          INNER=$(find . -maxdepth 1 -type f -name 'codex-x86_64-*' ! -name '*.tar.gz' | head -1)
           [[ -n "$INNER" ]] || { echo "ERROR: binario no encontrado en el tarball"; exit 1; }
           file "$INNER" | grep -qE 'ELF 64-bit.*x86-64' || { file "$INNER"; exit 1; }
+          HOST_INNER=$(find . -maxdepth 1 -type f -name 'codex-code-mode-host-*' ! -name '*.tar.gz' | head -1)
+          [[ -n "$HOST_INNER" ]] || { echo "ERROR: codex-code-mode-host no encontrado en el tarball"; exit 1; }
+          file "$HOST_INNER" | grep -qE 'ELF 64-bit.*x86-64' || { file "$HOST_INNER"; exit 1; }
           mkdir -p stage
           mv "$INNER" stage/codex
-          tar -C stage -czf codex-amd64.tar.gz codex
+          mv "$HOST_INNER" stage/codex-code-mode-host
+          tar -C stage -czf codex-amd64.tar.gz codex codex-code-mode-host
           sha256sum codex-amd64.tar.gz
 
       - name: Subir artifact
