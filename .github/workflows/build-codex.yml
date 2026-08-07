@@ -316,6 +316,7 @@ jobs:
             '   struct stat es idéntico, delegamos igual */' \
             'int __fxstat(int ver, int fd, struct stat *buf) { return fstat(fd, buf); }' \
             'int __xstat(int ver, const char *path, struct stat *buf) { return stat(path, buf); }' \
+            'int __lxstat(int ver, const char *path, struct stat *buf) { return lstat(path, buf); }' \
             '' \
             '/* V8 turboshaft usa bcmp (BSD/glibc); bionic lo tiene desde API 30 */' \
             'int bcmp(const void *s1, const void *s2, size_t n) { return memcmp(s1, s2, n); }' \
