@@ -326,6 +326,9 @@ jobs:
         working-directory: upstream/codex-rs
         env:
           ANDROID_NDK_HOME: ${{ runner.temp }}/android-ndk-${{ env.NDK_VER }}
+          # Build serial: baja el pico de memoria del build (v8/openssl/rustc
+          # en paralelo OOMeaba el runner). Más lento (~2-4x) pero estable.
+          CARGO_BUILD_JOBS: 1
         run: |
           set -euo pipefail
           NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
