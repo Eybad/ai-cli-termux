@@ -1413,6 +1413,11 @@ main() {
     exit 0
   fi
 
+  # Resolver versión, URL y checksum remotos para el flujo normal
+  # (install/update/reinstall). Regresión cb6c3f1: la llamada incondicional
+  # se perdió en el refactor del modo --resolve-version.
+  resolve_version
+
   resolve_expected_checksum
   check_current
   install_deps
