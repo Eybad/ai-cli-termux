@@ -312,6 +312,10 @@ jobs:
             '/* glibc stat wrappers: bionic usa fstat/stat directamente */' \
             'int __fxstat64(int ver, int fd, struct stat *buf) { return fstat(fd, buf); }' \
             'int __xstat64(int ver, const char *path, struct stat *buf) { return stat(path, buf); }' \
+            '/* Variantes 32-bit (prebuilt ptrcomp_sandbox de openai): en aarch64 el' \
+            '   struct stat es idéntico, delegamos igual */' \
+            'int __fxstat(int ver, int fd, struct stat *buf) { return fstat(fd, buf); }' \
+            'int __xstat(int ver, const char *path, struct stat *buf) { return stat(path, buf); }' \
             '' \
             '/* V8 turboshaft usa bcmp (BSD/glibc); bionic lo tiene desde API 30 */' \
             'int bcmp(const void *s1, const void *s2, size_t n) { return memcmp(s1, s2, n); }' \
