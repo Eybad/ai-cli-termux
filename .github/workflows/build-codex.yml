@@ -48,7 +48,7 @@ on:
         required: false
         default: '1'
       android_patch:
-        description: 'Aplicar el parche de locks Android (tag vX.Y.Z+androidN). false = tag estándar sin parche.'
+        description: 'Aplicar el parche Android (locks + ctype V8; tag vX.Y.Z+androidN). false = tag estándar sin parche.'
         required: false
         default: 'true'
   schedule:
@@ -80,6 +80,8 @@ jobs:
       upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
       upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
       dist_tag: ${{ steps.resolve.outputs.dist_tag }}
+      patch_rev: ${{ steps.resolve.outputs.patch_rev }}
+      android_patch: ${{ steps.resolve.outputs.android_patch }}
       should_build: ${{ steps.resolve.outputs.should_build }}
     steps:
       - name: Resolver versión upstream y estado del release propio
@@ -87,8 +89,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
-          PATCH_REV: ${{ inputs.patch_rev }}
-          ANDROID_PATCH: ${{ inputs.android_patch }}
+          # Los inputs de workflow_dispatch NO existen en el evento schedule
+          # (se evalúan vacíos): los defaults se resuelven acá, en el script.
+          INPUT_PATCH_REV: ${{ inputs.patch_rev }}
+          INPUT_ANDROID_PATCH: ${{ inputs.android_patch }}
         run: |
           set -euo pipefail
 
@@ -121,9 +125,16 @@ jobs:
             echo "ERROR: SHA del commit no resuelto para $UPSTREAM_TAG"; exit 1; }
 
           # Tag de distribución: build metadata semver cuando el build de
-          # Android aplica el parche de locks (vX.Y.Z+androidN).
+          # Android aplica el parche (locks + ctype V8; vX.Y.Z+androidN).
+          # Defaults para el evento schedule (sin inputs): patch_rev=1,
+          # android_patch=true — mismo comportamiento que el dispatch sin
+          # valores. Los outputs se propagan a los jobs de build/release.
+          PATCH_REV="${INPUT_PATCH_REV:-1}"
+          ANDROID_PATCH="${INPUT_ANDROID_PATCH:-true}"
           [[ "$PATCH_REV" =~ ^[0-9]+$ ]] || {
             echo "ERROR: patch_rev inválido: '$PATCH_REV' (solo dígitos)"; exit 1; }
+          [[ "$ANDROID_PATCH" =~ ^(true|false)$ ]] || {
+            echo "ERROR: android_patch inválido: '$ANDROID_PATCH' (true|false)"; exit 1; }
           if [[ "$ANDROID_PATCH" == "true" ]]; then
             DIST_TAG="v${VERSION}+android${PATCH_REV}"
           else
@@ -136,6 +147,8 @@ jobs:
           echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=$SHA"          >> "$GITHUB_OUTPUT"
           echo "dist_tag=$DIST_TAG"         >> "$GITHUB_OUTPUT"
+          echo "patch_rev=$PATCH_REV"       >> "$GITHUB_OUTPUT"
+          echo "android_patch=$ANDROID_PATCH" >> "$GITHUB_OUTPUT"
 
           # Idempotencia: si el release de distribución ya existe, no rebuildear.
           # Lectura de repo público: no requiere el PAT del dist.
@@ -169,10 +182,10 @@ jobs:
           path: project
 
       - name: Aplicar parche de locks Android (generador fail-closed)
-        if: ${{ inputs.android_patch == 'true' }}
+        if: needs.check.outputs.android_patch == 'true'
         env:
           VERSION: ${{ needs.check.outputs.version }}
-          PATCH_REV: ${{ inputs.patch_rev }}
+          PATCH_REV: ${{ needs.check.outputs.patch_rev }}
         run: |
           set -euo pipefail
           # El generador valida el inventario de call sites y el core de la
@@ -432,7 +445,7 @@ jobs:
       DIST_TAG: ${{ needs.check.outputs.dist_tag }}
       UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
       UPSTREAM_SHA: ${{ needs.check.outputs.upstream_sha }}
-      ANDROID_PATCH: ${{ inputs.android_patch }}
+      ANDROID_PATCH: ${{ needs.check.outputs.android_patch }}
     steps:
       - name: Descargar assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -463,7 +476,7 @@ jobs:
           if [[ "$ANDROID_PATCH" == "true" ]]; then
             printf '%s\n' \
               "" \
-              "**arm64**: incluye el parche de locks de archivo para Android (file_lock_shim, flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325)." \
+              "**arm64**: incluye el parche Android: file_lock_shim (flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325) y las tablas ctype glibc reales para el prebuilt de V8 (fix del SIGTRAP del code tool)." \
               >> "$NOTES_FILE"
           fi
           gh release create "$DIST_TAG" \
