@@ -321,6 +321,22 @@ jobs:
             '/* V8 turboshaft usa bcmp (BSD/glibc); bionic lo tiene desde API 30 */' \
             'int bcmp(const void *s1, const void *s2, size_t n) { return memcmp(s1, s2, n); }' \
             '' \
+            '/* Android rechaza mprotect() con addr no alineado (EINVAL); el sandbox' \
+            '   de V8 de openai protege los últimos 20 bytes de su región con addr' \
+            '   no alineado a página. Linux de escritorio lo tolera (por eso el code' \
+            '   tool funciona upstream); el kernel Android devuelve EINVAL y el CHECK' \
+            '   de V8 (solo reintenta con ENOMEM) aborta con SIGTRAP al iniciar el' \
+            '   code tool. Alinear el rango a la página real (sysconf) y delegar a' \
+            '   la syscall, replicando el comportamiento Linux. */' \
+            'int mprotect(void *addr, size_t len, int prot) {' \
+            '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
+            '  uintptr_t a = (uintptr_t)addr;' \
+            '  uintptr_t aligned = a & ~(page - 1);' \
+            '  uintptr_t end = a + len;' \
+            '  size_t nlen = ((end + page - 1) & ~(page - 1)) - aligned;' \
+            '  return (int)syscall(SYS_mprotect, aligned, nlen, prot);' \
+            '}' \
+            '' \
             'int __vfprintf_chk(FILE *st, int fl, const char *fmt, va_list ap) { return vfprintf(st, fmt, ap); }' \
             'int __isoc99_sscanf(const char *str, const char *fmt, ...) {' \
             '  va_list ap; va_start(ap, fmt); int r = vsscanf(str, fmt, ap); va_end(ap); return r;' \
@@ -343,6 +359,11 @@ jobs:
           grep -qE '__ctype_(b|toupper|tolower)_loc\(void\)' "$RUNNER_TEMP/bionic_compat.c" || {
             echo "ERROR: faltan funciones __ctype_*_loc en bionic_compat.c"; exit 1; }
           "$NDK_TC/aarch64-linux-android29-clang" -c "$RUNNER_TEMP/bionic_compat.c" -o "$RUNNER_TEMP/bionic_compat.o"
+          # Fail-closed: el objeto debe definir el shim de mprotect (fix del
+          # SIGTRAP del code tool en Android). Si el compilador/NDK lo omitió,
+          # abortar antes de empaquetar.
+          "$NDK_TC/llvm-nm" "$RUNNER_TEMP/bionic_compat.o" | grep -qE ' T mprotect$' || {
+            echo "ERROR: shim mprotect no definido en bionic_compat.o"; exit 1; }
           "$NDK_TC/llvm-ar" rcs "$RUNNER_TEMP/libbionic_compat.a" "$RUNNER_TEMP/bionic_compat.o"
 
       - name: Parchear openssl-sys (vendored) para bionic
@@ -413,6 +434,14 @@ jobs:
           HOST=upstream/codex-rs/target/aarch64-linux-android/release/codex-code-mode-host
           [[ -f "$HOST" ]] || { echo "ERROR: codex-code-mode-host no generado"; exit 1; }
           file "$HOST" | grep -qE 'ELF 64-bit.*ARM aarch64' || { file "$HOST"; exit 1; }
+
+          # Fail-closed: el shim mprotect debe estar LINKADO en el host (el
+          # símbolo definido por bionic_compat resuelve las llamadas del
+          # prebuilt de v8; si quedara undefined, el fix no llegó al binario).
+          "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' T mprotect$' || {
+            echo "ERROR: mprotect (shim) no definido en codex-code-mode-host"; exit 1; }
+          "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' U mprotect(@|$)' && {
+            echo "ERROR: mprotect queda undefined en codex-code-mode-host"; exit 1; }
 
           mkdir -p stage
           cp "$BIN" stage/codex
@@ -496,6 +525,46 @@ jobs:
           tar -C stage -czf codex-amd64.tar.gz codex codex-code-mode-host
           sha256sum codex-amd64.tar.gz
 
+      - name: Smoke test del code-mode host (protocolo code-mode, nativo en ubuntu)
+        # El code tool (V8) debe responder a session/execute sin morir: un
+        # SIGTRAP del sandbox de V8 (p.ej. mprotect rechazado por el kernel)
+        # rompería el code tool en todas las plataformas. Fail-closed antes
+        # de publicar.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, struct, subprocess
+          HOST = "stage/codex-code-mode-host"
+          def send(p, o):
+              b = json.dumps(o).encode()
+              p.stdin.write(struct.pack("<I", len(b)) + b)
+              p.stdin.flush()
+          def recv(p):
+              h = p.stdout.read(4)
+              if not h or len(h) < 4:
+                  return None
+              (n,) = struct.unpack("<I", h)
+              return json.loads(p.stdout.read(n))
+          p = subprocess.Popen([HOST], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+          send(p, {"type": "connection/hello", "supportedVersions": [1],
+                   "requiredCapabilities": [], "optionalCapabilities": []})
+          r = recv(p)
+          assert r and r.get("type") == "connection/ready", f"hello falló: {r}"
+          send(p, {"type": "operation/request", "id": 1,
+                   "request": {"method": "session/open", "sessionId": "s1"}})
+          r = recv(p)
+          assert r and r.get("result", {}).get("value", {}).get("type") == "session/ready", f"open falló: {r}"
+          send(p, {"type": "operation/request", "id": 2,
+                   "request": {"method": "session/execute", "sessionId": "s1", "request": {
+                       "tool_call_id": "call-1", "enabled_tools": [], "source": "1+1",
+                       "yield_time_ms": 60000, "max_output_tokens": 1000}}})
+          r = recv(p)
+          assert r is not None, "host murió en session/execute (SIGTRAP del sandbox de V8?)"
+          p.kill()
+          print("SMOKE OK: host respondió al execute")
+          PY
+
       - name: Subir artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -546,7 +615,7 @@ jobs:
           if [[ "$ANDROID_PATCH" == "true" ]]; then
             printf '%s\n' \
               "" \
-              "**arm64**: incluye el parche Android: file_lock_shim (flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325) y las tablas ctype glibc reales para el prebuilt de V8 (fix del SIGTRAP del code tool)." \
+              "**arm64**: incluye el parche Android: file_lock_shim (flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325), el shim bionic_compat de símbolos glibc que bionic no provee (__xstat/__fxstat/__lxstat, bcmp, tablas ctype reales, etc.) y un shim de mprotect que alinea el addr a página: el sandbox de V8 de openai llama mprotect con addr no alineado, el kernel Android lo rechaza (EINVAL) y el CHECK de V8 abortaba con SIGTRAP al iniciar el code tool (Linux de escritorio lo tolera, por eso CI no lo detectaba)." \
               >> "$NOTES_FILE"
           fi
           gh release create "$DIST_TAG" \
