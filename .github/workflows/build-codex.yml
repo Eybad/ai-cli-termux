@@ -29,8 +29,12 @@ name: Build codex (bionic arm64 + musl amd64 verificado)
 # incrementando patch_rev (vX.Y.Z+androidN). Historial: +android2 fix de
 # locks; +android3 fix de las tablas ctype de V8 (el shim bionic_compat con
 # tablas de ceros hacía fallar isalnum del prebuilt glibc → SIGTRAP del
-# sandbox de V8 al usar el code tool). Si el build falla, no se publica nada
-# (fail-closed: la última versión buena sigue instalable).
+# sandbox de V8 al usar el code tool).
+#
+# Versión mínima: 0.147 (el code tool corre en codex-code-mode-host, crate y
+# asset separados; el build lo compila/re-empaqueta junto al CLI). Un dispatch
+# con una versión anterior no tiene crate/asset del host → build aborta
+# fail-closed (no se publica nada; la última buena sigue instalable).
 #
 # Seguridad: valores del upstream validados por charset y normalizados a
 # commit SHA inmutable antes de usarse; actions pineadas por SHA; NDK
@@ -435,8 +439,9 @@ jobs:
           set -euo pipefail
           for SPEC in "$UPSTREAM_ASSET" "$UPSTREAM_HOST_ASSET"; do
             # Digest esperado desde la API del release upstream (sha256 del asset).
-            EXPECTED=$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${UPSTREAM_TAG}" \
-              --jq ".assets[] | select(.name == \"$SPEC\") | .digest" | sed 's/^sha256://')
+            # El nombre va por env.SPEC (jq), sin interpolación de strings.
+            EXPECTED=$(SPEC="$SPEC" gh api "repos/${UPSTREAM_REPO}/releases/tags/${UPSTREAM_TAG}" \
+              --jq '.assets[] | select(.name == env.SPEC) | .digest' | sed 's/^sha256://')
             [[ -n "$EXPECTED" ]] || { echo "ERROR: asset $SPEC no encontrado upstream"; exit 1; }
 
             curl -fsSL --proto '=https' --tlsv1.2 -o "$SPEC" \
@@ -455,10 +460,16 @@ jobs:
           set -euo pipefail
           tar -xzf "$UPSTREAM_ASSET"
           tar -xzf "$UPSTREAM_HOST_ASSET"
-          INNER=$(find . -maxdepth 1 -type f -name 'codex-x86_64-*' ! -name '*.tar.gz' | head -1)
+          # Unicidad: si el tarball cambiara de estructura (más de un binario
+          # con el prefijo), abortar en vez de elegir uno al azar (head -1).
+          INNER_LIST=$(find . -maxdepth 1 -type f -name 'codex-x86_64-*' ! -name '*.tar.gz')
+          [[ "$(printf '%s\n' "$INNER_LIST" | grep -c .)" -eq 1 ]] || { echo "ERROR: número inesperado de binarios codex en el tarball"; exit 1; }
+          INNER="$INNER_LIST"
           [[ -n "$INNER" ]] || { echo "ERROR: binario no encontrado en el tarball"; exit 1; }
           file "$INNER" | grep -qE 'ELF 64-bit.*x86-64' || { file "$INNER"; exit 1; }
-          HOST_INNER=$(find . -maxdepth 1 -type f -name 'codex-code-mode-host-*' ! -name '*.tar.gz' | head -1)
+          HOST_INNER_LIST=$(find . -maxdepth 1 -type f -name 'codex-code-mode-host-*' ! -name '*.tar.gz')
+          [[ "$(printf '%s\n' "$HOST_INNER_LIST" | grep -c .)" -eq 1 ]] || { echo "ERROR: número inesperado de codex-code-mode-host en el tarball"; exit 1; }
+          HOST_INNER="$HOST_INNER_LIST"
           [[ -n "$HOST_INNER" ]] || { echo "ERROR: codex-code-mode-host no encontrado en el tarball"; exit 1; }
           file "$HOST_INNER" | grep -qE 'ELF 64-bit.*x86-64' || { file "$HOST_INNER"; exit 1; }
           mkdir -p stage
