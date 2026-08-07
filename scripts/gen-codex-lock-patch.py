@@ -9,7 +9,7 @@
 #   1. Inserta el módulo `file_lock_shim` en el crate root de cada crate con
 #      call sites (delega en std fuera de Android; usa flock(2) directo en
 #      Android, mapeando EWOULDBLOCK a std::fs::TryLockError::WouldBlock).
-#   2. Reemplaza los 17 call sites conocidos por crate::file_lock_shim::{...}(&file),
+#   2. Reemplaza los 18 call sites conocidos por crate::file_lock_shim::{...}(&file),
 #      preservando `?`, `match` y `map_err` de cada llamada.
 #      (El prefijo crate:: es obligatorio: desde Rust 1.96 los paths no
 #      calificados hacia módulos del crate root ya no resuelven desde submódulos

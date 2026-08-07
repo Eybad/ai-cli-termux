@@ -233,12 +233,24 @@ jobs:
           unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP"
           echo "ANDROID_NDK_HOME=$RUNNER_TEMP/android-ndk-$NDK_VER" >> "$GITHUB_ENV"
 
-      - name: Descargar prebuilt rusty_v8 para aarch64
+      - name: Descargar prebuilt rusty_v8 para aarch64 y verificar digest (fail-closed)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # Versión pineada al crate v8 del Cargo.lock upstream (0.147.0 → 150.4.0).
           V8_URL="https://github.com/denoland/rusty_v8/releases/download/v150.4.0/librusty_v8_release_aarch64-unknown-linux-gnu.a.gz"
+          # Digest del asset desde la API del release (mismo patrón fail-closed que el job amd64).
+          EXPECTED=$(gh api repos/denoland/rusty_v8/releases/tags/v150.4.0 \
+            --jq '.assets[] | select(.name == "librusty_v8_release_aarch64-unknown-linux-gnu.a.gz") | .digest' | sed 's/^sha256://')
+          [[ -n "$EXPECTED" ]] || { echo "ERROR: digest del prebuilt rusty_v8 no resuelto"; exit 1; }
           curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/rusty_v8.a.gz" "$V8_URL"
+          GOT=$(sha256sum "$RUNNER_TEMP/rusty_v8.a.gz" | cut -d' ' -f1)
+          if [[ "$GOT" != "$EXPECTED" ]]; then
+            echo "ERROR: digest mismatch del prebuilt rusty_v8: esperado $EXPECTED, obtenido $GOT"
+            exit 1
+          fi
+          echo "Digest del prebuilt rusty_v8 verificado: $GOT"
           gzip -d "$RUNNER_TEMP/rusty_v8.a.gz"
           echo "RUSTY_V8_ARCHIVE=$RUNNER_TEMP/rusty_v8.a" >> "$GITHUB_ENV"
           # v8 busca src_binding_release_aarch64-linux-android.rs en su gen/
