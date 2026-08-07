@@ -25,8 +25,11 @@ name: Build codex (bionic arm64 + musl amd64 verificado)
 # nuevo de OpenAI y distingue el release parcheado del estándar.
 #
 # Idempotente: si el tag de dist (DIST_TAG) ya está publicado, el job de
-# chequeo termina sin trabajo. Re-emitir una versión corregida se hace con
-# patch_rev=2 (vX.Y.Z+android2). Si el build falla, no se publica nada
+# chequeo termina sin trabajo. Re-emitir una versión corregida se hace
+# incrementando patch_rev (vX.Y.Z+androidN). Historial: +android2 fix de
+# locks; +android3 fix de las tablas ctype de V8 (el shim bionic_compat con
+# tablas de ceros hacía fallar isalnum del prebuilt glibc → SIGTRAP del
+# sandbox de V8 al usar el code tool). Si el build falla, no se publica nada
 # (fail-closed: la última versión buena sigue instalable).
 #
 # Seguridad: valores del upstream validados por charset y normalizados a
@@ -41,7 +44,7 @@ on:
         required: false
         default: ''
       patch_rev:
-        description: 'Rev del parche de locks Android (sufijo +androidN del tag de dist). Incrementar para re-emitir una versión corregida.'
+        description: 'Rev del parche Android (locks + ctype V8; sufijo +androidN del tag de dist). Incrementar para re-emitir una versión corregida.'
         required: false
         default: '1'
       android_patch:
@@ -159,8 +162,7 @@ jobs:
           ref: ${{ needs.check.outputs.upstream_sha }}
           path: upstream
 
-      - name: Checkout del proyecto (generador de parche, pin por SHA del run)
-        if: ${{ inputs.android_patch == 'true' }}
+      - name: Checkout del proyecto (generador de parche y tablas ctype, pin por SHA del run)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
@@ -276,14 +278,22 @@ jobs:
             '  va_list ap; va_start(ap, fmt); int r = vsscanf(str, fmt, ap); va_end(ap); return r;' \
             '}' \
             'size_t __mbrlen(const char *s, size_t n, mbstate_t *ps) { return mbrlen(s, n, ps); }' \
-            '' \
-            'static const int32_t toupper_tbl[384] = {0};' \
-            'const int32_t **__ctype_toupper_loc(void) { static const int32_t *p = toupper_tbl + 128; return &p; }' \
-            'static const int32_t tolower_tbl[384] = {0};' \
-            'const int32_t **__ctype_tolower_loc(void) { static const int32_t *p = tolower_tbl + 128; return &p; }' \
-            'static const uint16_t b_tbl[384] = {0};' \
-            'const uint16_t **__ctype_b_loc(void) { static const uint16_t *p = b_tbl + 128; return &p; }' \
             > "$RUNNER_TEMP/bionic_compat.c"
+          # Tablas ctype glibc REALES (locale C) + funciones __ctype_*_loc,
+          # generadas por scripts/gen-ctype-tables.py (determinista, fail-closed).
+          # Las tablas de CEROS del shim original rompían std::isalnum del
+          # prebuilt glibc de v8 ((*__ctype_b_loc())[c] & _ISalnum): el CHECK
+          # IsValidMappingName("v8-sandbox") del init del sandbox de V8 fallaba
+          # (SIGTRAP / "trace trap") al usar el code tool (buscar archivos).
+          python3 "$GITHUB_WORKSPACE/project/scripts/gen-ctype-tables.py" >> "$RUNNER_TEMP/bionic_compat.c"
+          # Fail-closed: el fragmento debe traer las tres funciones y la tabla
+          # b con los bits reales de glibc (0xd808 = digit|xdigit|print|graph|
+          # alnum para '0', verificado contra locale/C-ctype.c); si el script
+          # produjo basura o falló, abortar antes de compilar.
+          grep -qi '0xd808' "$RUNNER_TEMP/bionic_compat.c" || {
+            echo "ERROR: tablas ctype no generadas (b_tbl sin bits reales)"; exit 1; }
+          grep -qE '__ctype_(b|toupper|tolower)_loc\(void\)' "$RUNNER_TEMP/bionic_compat.c" || {
+            echo "ERROR: faltan funciones __ctype_*_loc en bionic_compat.c"; exit 1; }
           "$NDK_TC/aarch64-linux-android29-clang" -c "$RUNNER_TEMP/bionic_compat.c" -o "$RUNNER_TEMP/bionic_compat.o"
           "$NDK_TC/llvm-ar" rcs "$RUNNER_TEMP/libbionic_compat.a" "$RUNNER_TEMP/bionic_compat.o"
 
