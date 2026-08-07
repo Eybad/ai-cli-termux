@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 # ── Inventario esperado de call sites (archivo relativo a codex-rs/, línea 1-based) ──
-# Fuente: escaneo exhaustivo de codex-rust-v0.146.0 (17 sitios en 10 archivos).
+# Fuente: escaneo exhaustivo de codex-rust-v0.147.0 (18 sitios en 11 archivos).
 # Si el source upstream cambia cualquiera de estos, el generador aborta.
 INVENTORY = [
     ("arg0/src/lib.rs", 380, "lock_file", "try_lock"),
@@ -47,6 +47,7 @@ INVENTORY = [
     ("network-proxy/src/certs.rs", 633, "lock_file", "try_lock"),
     ("rmcp-client/src/oauth/refresh_lock.rs", 72, "file", "try_lock"),
     ("rmcp-client/src/oauth/store_lock.rs", 94, "file", "try_lock"),
+    ("rollout/src/maintenance.rs", 36, "file", "try_lock"),
     ("thread-store/src/local/writer_lock.rs", 64, "file", "try_lock"),
     ("thread-store/src/local/writer_lock.rs", 109, "file", "lock"),
     ("thread-store/src/local/writer_lock.rs", 143, "file", "try_lock"),
@@ -61,6 +62,7 @@ CRATE_ROOTS = {
     "message-history/src/lib.rs",
     "network-proxy/src/lib.rs",
     "rmcp-client/src/lib.rs",
+    "rollout/src/lib.rs",
     "thread-store/src/lib.rs",
 }
 
@@ -391,7 +393,7 @@ def main():
         if "mod file_lock_shim" not in (src / root).read_text(encoding="utf-8"):
             raise SystemExit(f"ERROR: post-check: shim ausente en {root}")
 
-    print(f"OK: parche aplicado — 17 call sites → crate::file_lock_shim, versión {args.dist_version}")
+    print(f"OK: parche aplicado — 18 call sites → crate::file_lock_shim, versión {args.dist_version}")
     return 0
 
 

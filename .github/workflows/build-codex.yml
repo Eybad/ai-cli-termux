@@ -236,7 +236,8 @@ jobs:
       - name: Descargar prebuilt rusty_v8 para aarch64
         run: |
           set -euo pipefail
-          V8_URL="https://github.com/denoland/rusty_v8/releases/download/v149.2.0/librusty_v8_release_aarch64-unknown-linux-gnu.a.gz"
+          # Versión pineada al crate v8 del Cargo.lock upstream (0.147.0 → 150.4.0).
+          V8_URL="https://github.com/denoland/rusty_v8/releases/download/v150.4.0/librusty_v8_release_aarch64-unknown-linux-gnu.a.gz"
           curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/rusty_v8.a.gz" "$V8_URL"
           gzip -d "$RUNNER_TEMP/rusty_v8.a.gz"
           echo "RUSTY_V8_ARCHIVE=$RUNNER_TEMP/rusty_v8.a" >> "$GITHUB_ENV"
