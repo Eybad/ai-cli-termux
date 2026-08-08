@@ -288,6 +288,7 @@ jobs:
             '#include <string.h>' \
             '#include <sys/stat.h>' \
             '#include <sys/syscall.h>' \
+            '#include <sys/mman.h>' \
             '#include <unistd.h>' \
             '' \
             'void *__libc_stack_end = 0;' \
@@ -321,45 +322,70 @@ jobs:
             '/* V8 turboshaft usa bcmp (BSD/glibc); bionic lo tiene desde API 30 */' \
             'int bcmp(const void *s1, const void *s2, size_t n) { return memcmp(s1, s2, n); }' \
             '' \
-            '/* Android rechaza mprotect() con addr no alineado (EINVAL); el sandbox' \
-            '   de V8 de openai protege los últimos 20 bytes de su región con addr' \
-            '   no alineado a página. Linux de escritorio lo tolera (por eso el code' \
-            '   tool funciona upstream); el kernel Android devuelve EINVAL y el CHECK' \
-            '   de V8 (solo reintenta con ENOMEM) aborta con SIGTRAP al iniciar el' \
-            '   code tool. Alinear el rango a la página real (sysconf) y delegar a' \
-            '   la syscall, replicando el comportamiento Linux. */' \
+            '/* El sandbox de V8 de openai llama mprotect + madvise sobre rangos que' \
+            '   no cubren páginas completas (p.ej. los últimos ~20 bytes de su' \
+            '   región, con addr no alineado a página). El kernel Android los' \
+            '   rechaza (EINVAL) y el CHECK de V8 (solo reintenta con ENOMEM)' \
+            '   abortaba con SIGTRAP al iniciar el code tool. La alineación' \
+            '   EXPANSIVA (floor addr .. ceil end) resolvía el EINVAL pero, para' \
+            '   operaciones DESTRUCTIVAS (PROT_NONE / MADV_DONTNEED), revocaba o' \
+            '   descartaba la página entera compartida con datos vivos de V8' \
+            '   -> SIGSEGV (SEGV_MAPERR) en el siguiente acceso (0x..f02a, el' \
+            '   code tool crasheaba con "host closed its stdout"). Fix: las' \
+            '   destructivas se aplican SOLO a páginas completamente contenidas' \
+            '   en el rango pedido; rango fraccional -> no-op exitoso (el CHECK' \
+            '   de V8 solo reintenta con ENOMEM, éxito es correcto). Las' \
+            '   aditivas (dar permisos) mantienen la expansión, inocua. */' \
             '/* used+retain: el shim se linkea con -ffunction-sections y el lld del' \
             '   NDK aplica gc-sections; sin RETAIN el símbolo puede quedar fuera' \
             '   del binario si la ref del prebuilt se resuelve por la libc' \
             '   dinámica en vez de por el .a (el nm-check del CI lo detecta). */' \
+            '__attribute__((used, retain))' \
+            'static size_t shim_inner_range(uintptr_t addr, size_t len, uintptr_t *out_start) {' \
+            '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
+            '  uintptr_t first = (addr + page - 1) & ~(page - 1);' \
+            '  uintptr_t last = (addr + len) & ~(page - 1);' \
+            '  if (last <= first) return 0;' \
+            '  *out_start = first;' \
+            '  return (size_t)(last - first);' \
+            '}' \
             '__attribute__((used, retain))' \
             'int mprotect(void *addr, size_t len, int prot);' \
             '__attribute__((used, retain))' \
             'int mprotect(void *addr, size_t len, int prot) {' \
             '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
             '  uintptr_t a = (uintptr_t)addr;' \
-            '  uintptr_t aligned = a & ~(page - 1);' \
-            '  uintptr_t end = a + len;' \
-            '  size_t nlen = ((end + page - 1) & ~(page - 1)) - aligned;' \
-            '  return (int)syscall(SYS_mprotect, aligned, nlen, prot);' \
+            '  uintptr_t first, last;' \
+            '  if (prot == 0) { /* PROT_NONE: destructivo, sin expansión */' \
+            '    size_t n = shim_inner_range(a, len, &first);' \
+            '    if (n == 0) return 0;' \
+            '    return (int)syscall(SYS_mprotect, first, n, prot);' \
+            '  }' \
+            '  /* Aditivo (dar permisos): expansión inocua, replica Linux */' \
+            '  first = a & ~(page - 1);' \
+            '  last = (a + len + page - 1) & ~(page - 1);' \
+            '  return (int)syscall(SYS_mprotect, first, last - first, prot);' \
             '}' \
             '' \
-            '/* El sandbox de V8 libera las últimas 20 bytes de su región con' \
-            '   mprotect(addr, 20, PROT_NONE) + madvise(addr, 20, MADV_DONTNEED)' \
-            '   sobre el MISMO addr no alineado: el kernel Android rechaza' \
-            '   ambos (EINVAL) y el CHECK de V8 aborta con SIGTRAP tras el' \
-            '   fallo de madvise (brk #0 en SetPermissions). Misma alineación' \
-            '   que el shim de mprotect. */' \
+            '/* El sandbox de V8 descarta las últimas ~20 bytes de su región con' \
+            '   madvise(addr, MADV_DONTNEED) sobre el mismo addr no alineado;' \
+            '   mismo criterio que mprotect: destructivo -> solo páginas' \
+            '   completamente contenidas, fracción -> no-op exitoso. */' \
             '__attribute__((used, retain))' \
             'int madvise(void *addr, size_t len, int advice);' \
             '__attribute__((used, retain))' \
             'int madvise(void *addr, size_t len, int advice) {' \
             '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
             '  uintptr_t a = (uintptr_t)addr;' \
-            '  uintptr_t aligned = a & ~(page - 1);' \
-            '  uintptr_t end = a + len;' \
-            '  size_t nlen = ((end + page - 1) & ~(page - 1)) - aligned;' \
-            '  return (int)syscall(SYS_madvise, aligned, nlen, advice);' \
+            '  uintptr_t first, last;' \
+            '  if (advice == MADV_DONTNEED || advice == MADV_FREE) { /* destructivo */' \
+            '    size_t n = shim_inner_range(a, len, &first);' \
+            '    if (n == 0) return 0;' \
+            '    return (int)syscall(SYS_madvise, first, n, advice);' \
+            '  }' \
+            '  first = a & ~(page - 1);' \
+            '  last = (a + len + page - 1) & ~(page - 1);' \
+            '  return (int)syscall(SYS_madvise, first, last - first, advice);' \
             '}' \
             '' \
             'int __vfprintf_chk(FILE *st, int fl, const char *fmt, va_list ap) { return vfprintf(st, fmt, ap); }' \
@@ -660,7 +686,7 @@ jobs:
           if [[ "$ANDROID_PATCH" == "true" ]]; then
             printf '%s\n' \
               "" \
-              "**arm64**: incluye el parche Android: file_lock_shim (flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325), el shim bionic_compat de símbolos glibc que bionic no provee (__xstat/__fxstat/__lxstat, bcmp, tablas ctype reales, etc.) y los shims de mprotect/madvise que alinean addr/len a página: el sandbox de V8 de openai llama mprotect + madvise con addr no alineado (los últimos 20 bytes de su región), el kernel Android los rechaza (EINVAL) y el CHECK de V8 abortaba con SIGTRAP al iniciar el code tool (Linux de escritorio lo tolera, por eso CI no lo detectaba)." \
+              "**arm64**: incluye el parche Android: file_lock_shim (flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325), el shim bionic_compat de símbolos glibc que bionic no provee (__xstat/__fxstat/__lxstat, bcmp, tablas ctype reales, etc.) y los shims de mprotect/madvise que el sandbox de V8 de openai llama con addr no alineado (los últimos ~20 bytes de su región): el kernel Android los rechaza (EINVAL) y el CHECK de V8 abortaba con SIGTRAP al iniciar el code tool. Para las llamadas destructivas (PROT_NONE / MADV_DONTNEED / MADV_FREE) el shim aplica la syscall solo a páginas completamente contenidas en el rango pedido (fracción -> no-op exitoso): la alineación expansiva previa revocaba/descartaba la página entera compartida con datos vivos y el code tool crasheaba con SIGSEGV ("host closed its stdout"). Las llamadas aditivas (dar permisos) mantienen la expansión, inocua." \
               >> "$NOTES_FILE"
           fi
           gh release create "$DIST_TAG" \
