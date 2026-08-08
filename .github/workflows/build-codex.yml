@@ -328,6 +328,13 @@ jobs:
             '   de V8 (solo reintenta con ENOMEM) aborta con SIGTRAP al iniciar el' \
             '   code tool. Alinear el rango a la página real (sysconf) y delegar a' \
             '   la syscall, replicando el comportamiento Linux. */' \
+            '/* used+retain: el shim se linkea con -ffunction-sections y el lld del' \
+            '   NDK aplica gc-sections; sin RETAIN el símbolo puede quedar fuera' \
+            '   del binario si la ref del prebuilt se resuelve por la libc' \
+            '   dinámica en vez de por el .a (el nm-check del CI lo detecta). */' \
+            '__attribute__((used, retain))' \
+            'int mprotect(void *addr, size_t len, int prot);' \
+            '__attribute__((used, retain))' \
             'int mprotect(void *addr, size_t len, int prot) {' \
             '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
             '  uintptr_t a = (uintptr_t)addr;' \
@@ -394,7 +401,12 @@ jobs:
           export RANLIB="$NDK_TC/llvm-ranlib"
           export PATH="$NDK_TC:$PATH"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_TC/aarch64-linux-android29-clang"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L native=${{ runner.temp }} -l static=bionic_compat"
+          # El shim entra con --whole-archive SOLO para bionic_compat: garantiza
+          # que el .o se extraiga y linkee aunque ninguna ref del graph (orden de
+          # los .a en el link line, resolución por libc dinámica) lo demande.
+          # Sin riesgo de duplicados: es el único .a estático con esas
+          # definiciones y libc es dinámica (interposición normal del ejecutable).
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L native=${{ runner.temp }} -C link-arg=-Wl,--whole-archive -l static=bionic_compat -C link-arg=-Wl,--no-whole-archive"
           # El Cargo.lock del tag upstream a veces está desincronizado con su
           # Cargo.toml (mantenimiento de openai): actualizar solo openssl-sys para que
           # openssl-src quede registrado sin tocar versiones probadas de otras deps (ej. rama-*).
@@ -439,8 +451,16 @@ jobs:
           # símbolo definido por bionic_compat resuelve las llamadas del
           # prebuilt de v8; si quedara undefined, el fix no llegó al binario).
           NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' T mprotect$' || {
-            echo "ERROR: mprotect (shim) no definido en codex-code-mode-host"; exit 1; }
+          if ! "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' T mprotect$'; then
+            echo "ERROR: mprotect (shim) no definido en codex-code-mode-host"
+            echo "=== Diagnóstico (nm del host, grep mprotect) ==="
+            "$NDK_TC/llvm-nm" "$HOST" | grep -i mprotect || echo "(sin rastros de mprotect en el host)"
+            echo "=== readelf symtab del host, grep mprotect ==="
+            "$NDK_TC/llvm-readelf" -sW "$HOST" | grep -i mprotect || echo "(sin símbolos mprotect)"
+            echo "=== secciones del .o del shim (bionic_compat.o) ==="
+            "$NDK_TC/llvm-readelf" -SW "$RUNNER_TEMP/bionic_compat.o" | grep -iE 'mprotect|__xstat' || echo "(sin secciones mprotect/__xstat)"
+            exit 1
+          fi
           "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' U mprotect(@|$)' && {
             echo "ERROR: mprotect queda undefined en codex-code-mode-host"; exit 1; }
 
