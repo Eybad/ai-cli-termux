@@ -438,6 +438,7 @@ jobs:
           # Fail-closed: el shim mprotect debe estar LINKADO en el host (el
           # símbolo definido por bionic_compat resuelve las llamadas del
           # prebuilt de v8; si quedara undefined, el fix no llegó al binario).
+          NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' T mprotect$' || {
             echo "ERROR: mprotect (shim) no definido en codex-code-mode-host"; exit 1; }
           "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' U mprotect(@|$)' && {
