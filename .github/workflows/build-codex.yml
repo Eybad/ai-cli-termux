@@ -344,6 +344,24 @@ jobs:
             '  return (int)syscall(SYS_mprotect, aligned, nlen, prot);' \
             '}' \
             '' \
+            '/* El sandbox de V8 libera las últimas 20 bytes de su región con' \
+            '   mprotect(addr, 20, PROT_NONE) + madvise(addr, 20, MADV_DONTNEED)' \
+            '   sobre el MISMO addr no alineado: el kernel Android rechaza' \
+            '   ambos (EINVAL) y el CHECK de V8 aborta con SIGTRAP tras el' \
+            '   fallo de madvise (brk #0 en SetPermissions). Misma alineación' \
+            '   que el shim de mprotect. */' \
+            '__attribute__((used, retain))' \
+            'int madvise(void *addr, size_t len, int advice);' \
+            '__attribute__((used, retain))' \
+            'int madvise(void *addr, size_t len, int advice) {' \
+            '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
+            '  uintptr_t a = (uintptr_t)addr;' \
+            '  uintptr_t aligned = a & ~(page - 1);' \
+            '  uintptr_t end = a + len;' \
+            '  size_t nlen = ((end + page - 1) & ~(page - 1)) - aligned;' \
+            '  return (int)syscall(SYS_madvise, aligned, nlen, advice);' \
+            '}' \
+            '' \
             'int __vfprintf_chk(FILE *st, int fl, const char *fmt, va_list ap) { return vfprintf(st, fmt, ap); }' \
             'int __isoc99_sscanf(const char *str, const char *fmt, ...) {' \
             '  va_list ap; va_start(ap, fmt); int r = vsscanf(str, fmt, ap); va_end(ap); return r;' \
@@ -366,11 +384,13 @@ jobs:
           grep -qE '__ctype_(b|toupper|tolower)_loc\(void\)' "$RUNNER_TEMP/bionic_compat.c" || {
             echo "ERROR: faltan funciones __ctype_*_loc en bionic_compat.c"; exit 1; }
           "$NDK_TC/aarch64-linux-android29-clang" -c "$RUNNER_TEMP/bionic_compat.c" -o "$RUNNER_TEMP/bionic_compat.o"
-          # Fail-closed: el objeto debe definir el shim de mprotect (fix del
-          # SIGTRAP del code tool en Android). Si el compilador/NDK lo omitió,
-          # abortar antes de empaquetar.
-          "$NDK_TC/llvm-nm" "$RUNNER_TEMP/bionic_compat.o" | grep -qE ' T mprotect$' || {
-            echo "ERROR: shim mprotect no definido en bionic_compat.o"; exit 1; }
+          # Fail-closed: el objeto debe definir los shims de mprotect y madvise
+          # (fix del SIGTRAP del code tool en Android). Si el compilador/NDK los
+          # omitió, abortar antes de empaquetar.
+          "$NDK_TC/llvm-nm" "$RUNNER_TEMP/bionic_compat.o" | grep -qE ' T (mprotect|madvise)$' || {
+            echo "ERROR: shims mprotect/madvise no definidos en bionic_compat.o"; exit 1; }
+          [[ "$("$NDK_TC/llvm-nm" "$RUNNER_TEMP/bionic_compat.o" | grep -cE ' T (mprotect|madvise)$')" -eq 2 ]] || {
+            echo "ERROR: faltan shims en bionic_compat.o"; exit 1; }
           "$NDK_TC/llvm-ar" rcs "$RUNNER_TEMP/libbionic_compat.a" "$RUNNER_TEMP/bionic_compat.o"
 
       - name: Parchear openssl-sys (vendored) para bionic
@@ -447,24 +467,26 @@ jobs:
           [[ -f "$HOST" ]] || { echo "ERROR: codex-code-mode-host no generado"; exit 1; }
           file "$HOST" | grep -qE 'ELF 64-bit.*ARM aarch64' || { file "$HOST"; exit 1; }
 
-          # Fail-closed: el shim mprotect debe estar LINKADO en el host (el
-          # símbolo definido por bionic_compat resuelve las llamadas del
-          # prebuilt de v8; si quedara undefined, el fix no llegó al binario).
-          # OJO: no usar llvm-nm para esto — su formato de salida difiere entre
-          # ELF relocatable (.o) y dinámico (el check con nm daba falsos
-          # negativos aunque el símbolo estuviera). llvm-readelf -sW tiene
-          # formato estable: $4=Type $5=Bind $7=Ndx/UND $8=Name.
+          # Fail-closed: los shims mprotect y madvise deben estar LINKADOS en el
+          # host (los símbolos definidos por bionic_compat resuelven las
+          # llamadas del prebuilt de v8; si quedaran undefined, el fix no llegó
+          # al binario). OJO: no usar llvm-nm para esto — su formato de salida
+          # difiere entre ELF relocatable (.o) y dinámico (el check con nm daba
+          # falsos negativos aunque el símbolo estuviera). llvm-readelf -sW
+          # tiene formato estable: $4=Type $5=Bind $7=Ndx/UND $8=Name.
           NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          if ! "$NDK_TC/llvm-readelf" -sW "$HOST" | awk '$5=="GLOBAL" && $8=="mprotect"' | grep -q .; then
-            echo "ERROR: mprotect (shim) no definido en codex-code-mode-host"
-            echo "=== Diagnóstico (readelf symtab del host, grep mprotect) ==="
-            "$NDK_TC/llvm-readelf" -sW "$HOST" | grep -i mprotect || echo "(sin símbolos mprotect)"
-            echo "=== secciones del .o del shim (bionic_compat.o) ==="
-            "$NDK_TC/llvm-readelf" -SW "$RUNNER_TEMP/bionic_compat.o" | grep -iE 'mprotect|__xstat' || echo "(sin secciones mprotect/__xstat)"
-            exit 1
-          fi
-          if "$NDK_TC/llvm-readelf" -sW "$HOST" | awk '$5=="GLOBAL" && $7=="UND" && $8=="mprotect"' | grep -q .; then
-            echo "ERROR: mprotect queda undefined en codex-code-mode-host"; exit 1; fi
+          for SYM in mprotect madvise; do
+            if ! "$NDK_TC/llvm-readelf" -sW "$HOST" | awk -v s="$SYM" '$5=="GLOBAL" && $8==s' | grep -q .; then
+              echo "ERROR: $SYM (shim) no definido en codex-code-mode-host"
+              echo "=== Diagnóstico (readelf symtab del host, grep $SYM) ==="
+              "$NDK_TC/llvm-readelf" -sW "$HOST" | grep -i "$SYM" || echo "(sin símbolos $SYM)"
+              echo "=== secciones del .o del shim (bionic_compat.o) ==="
+              "$NDK_TC/llvm-readelf" -SW "$RUNNER_TEMP/bionic_compat.o" | grep -iE 'mprotect|madvise' || echo "(sin secciones mprotect/madvise)"
+              exit 1
+            fi
+            if "$NDK_TC/llvm-readelf" -sW "$HOST" | awk -v s="$SYM" '$5=="GLOBAL" && $7=="UND" && $8==s' | grep -q .; then
+              echo "ERROR: $SYM queda undefined en codex-code-mode-host"; exit 1; fi
+          done
 
           mkdir -p stage
           cp "$BIN" stage/codex
@@ -638,7 +660,7 @@ jobs:
           if [[ "$ANDROID_PATCH" == "true" ]]; then
             printf '%s\n' \
               "" \
-              "**arm64**: incluye el parche Android: file_lock_shim (flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325), el shim bionic_compat de símbolos glibc que bionic no provee (__xstat/__fxstat/__lxstat, bcmp, tablas ctype reales, etc.) y un shim de mprotect que alinea el addr a página: el sandbox de V8 de openai llama mprotect con addr no alineado, el kernel Android lo rechaza (EINVAL) y el CHECK de V8 abortaba con SIGTRAP al iniciar el code tool (Linux de escritorio lo tolera, por eso CI no lo detectaba)." \
+              "**arm64**: incluye el parche Android: file_lock_shim (flock(2); std::fs::File::lock* devuelve Unsupported en android, rust-lang/rust#148325), el shim bionic_compat de símbolos glibc que bionic no provee (__xstat/__fxstat/__lxstat, bcmp, tablas ctype reales, etc.) y los shims de mprotect/madvise que alinean addr/len a página: el sandbox de V8 de openai llama mprotect + madvise con addr no alineado (los últimos 20 bytes de su región), el kernel Android los rechaza (EINVAL) y el CHECK de V8 abortaba con SIGTRAP al iniciar el code tool (Linux de escritorio lo tolera, por eso CI no lo detectaba)." \
               >> "$NOTES_FILE"
           fi
           gh release create "$DIST_TAG" \
