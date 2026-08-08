@@ -450,19 +450,21 @@ jobs:
           # Fail-closed: el shim mprotect debe estar LINKADO en el host (el
           # símbolo definido por bionic_compat resuelve las llamadas del
           # prebuilt de v8; si quedara undefined, el fix no llegó al binario).
+          # OJO: no usar llvm-nm para esto — su formato de salida difiere entre
+          # ELF relocatable (.o) y dinámico (el check con nm daba falsos
+          # negativos aunque el símbolo estuviera). llvm-readelf -sW tiene
+          # formato estable: $4=Type $5=Bind $7=Ndx/UND $8=Name.
           NDK_TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          if ! "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' T mprotect$'; then
+          if ! "$NDK_TC/llvm-readelf" -sW "$HOST" | awk '$5=="GLOBAL" && $8=="mprotect"' | grep -q .; then
             echo "ERROR: mprotect (shim) no definido en codex-code-mode-host"
-            echo "=== Diagnóstico (nm del host, grep mprotect) ==="
-            "$NDK_TC/llvm-nm" "$HOST" | grep -i mprotect || echo "(sin rastros de mprotect en el host)"
-            echo "=== readelf symtab del host, grep mprotect ==="
+            echo "=== Diagnóstico (readelf symtab del host, grep mprotect) ==="
             "$NDK_TC/llvm-readelf" -sW "$HOST" | grep -i mprotect || echo "(sin símbolos mprotect)"
             echo "=== secciones del .o del shim (bionic_compat.o) ==="
             "$NDK_TC/llvm-readelf" -SW "$RUNNER_TEMP/bionic_compat.o" | grep -iE 'mprotect|__xstat' || echo "(sin secciones mprotect/__xstat)"
             exit 1
           fi
-          "$NDK_TC/llvm-nm" "$HOST" | grep -qE ' U mprotect(@|$)' && {
-            echo "ERROR: mprotect queda undefined en codex-code-mode-host"; exit 1; }
+          if "$NDK_TC/llvm-readelf" -sW "$HOST" | awk '$5=="GLOBAL" && $7=="UND" && $8=="mprotect"' | grep -q .; then
+            echo "ERROR: mprotect queda undefined en codex-code-mode-host"; exit 1; fi
 
           mkdir -p stage
           cp "$BIN" stage/codex
