@@ -178,12 +178,17 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ needs.check.outputs.upstream_sha }}
           path: upstream
+          # El token no debe quedar persistido en .git/config de un checkout
+          # cuyo código se ejecuta (build.rs, generadores): el clone igual se
+          # autentica, solo no queda almacenado para código posterior.
+          persist-credentials: false
 
       - name: Checkout del proyecto (generador de parche y tablas ctype, pin por SHA del run)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: project
+          persist-credentials: false
 
       - name: Aplicar parche de locks Android (generador fail-closed)
         if: needs.check.outputs.android_patch == 'true'
