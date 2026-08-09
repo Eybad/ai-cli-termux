@@ -173,14 +173,14 @@ jobs:
       RUSTUP_TOOLCHAIN: '1.96.0'
     steps:
       - name: Checkout código oficial de OpenAI (pin por commit SHA)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ needs.check.outputs.upstream_sha }}
           path: upstream
 
       - name: Checkout del proyecto (generador de parche y tablas ctype, pin por SHA del run)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: project
