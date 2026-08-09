@@ -207,7 +207,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             upstream/codex-rs/target
-          key: codex-rs-${{ runner.os }}-${{ hashFiles('upstream/codex-rs/Cargo.lock') }}
+          # La key incluye scripts/*.py: un cambio en gen-ctype-tables.py o
+          # gen-codex-lock-patch.py debe invalidar el cache (el parche regenera
+          # el source; sin esto se reusaría un target viejo sin recompilar).
+          key: codex-rs-${{ runner.os }}-${{ hashFiles('upstream/codex-rs/Cargo.lock', 'project/scripts/*.py') }}
           restore-keys: |
             codex-rs-${{ runner.os }}-
 
