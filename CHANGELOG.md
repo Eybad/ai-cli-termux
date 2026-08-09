@@ -4,6 +4,13 @@ Todas las versiones notables de ai-cli-termux se documentan en este archivo.
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
+## [1.3.0] - 2026-08-09
+
+### Fixed
+
+- **codex: SIGSEGV del code tool (`code-mode host closed its stdout`) al abrir/leer archivos**. El shim `bionic_compat` de `mprotect`/`madvise` (build en CI) alineaba los rangos hacia afuera (floor→ceil); para operaciones destructivas (`PROT_NONE`, `MADV_DONTNEED`) sobre rangos fraccionales de V8 (los últimos ~20 bytes de su región, addr no alineado) revocaba la página completa con datos vivos → SIGSEGV en el siguiente acceso. Ahora las destructivas son **no expansivas**: se aplican solo a páginas completamente contenidas (`ceil(addr)`..`floor(addr+len)`) y un rango fraccional es no-op con éxito (el CHECK de V8 solo reintenta ante `ENOMEM`); las aditivas siguen expansivas (inocuas). Release `v0.147.0+android5` (build en CI, digest + attestation, fail-closed).
+- **workflow codex**: el nm-check del host ahora usa `readelf -sW` (el `nm` del NDK daba falsos negativos en los símbolos del shim).
+
 ## [1.2.0] - 2026-08-06
 
 ### Added
