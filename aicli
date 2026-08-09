@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-AICLI_VERSION="1.2.0"
+AICLI_VERSION="1.3.0"
 # Marca de propiedad del wrapper en $PREFIX/bin/aicli (fail-closed en
 # self-install/self-update: nunca se pisa un binario que no sea nuestro).
 AICLI_MARK="aicli-managed: ai-cli-termux"
@@ -120,7 +120,7 @@ aicli — gestor de CLIs de IA para Termux (instala, actualiza, audita; sin proo
 Uso: aicli <subcomando> [opciones]
   aicli list [--offline] [--json] [<tool>]
   aicli install <tool> [-v X.Y.Z | --sha256 <hash> | --require-attestation]
-  aicli update <tool> | remove <tool> | verify <tool>
+  aicli update <tool> | aicli update --all | remove <tool> | verify <tool>
   aicli help [<subcomando>|<tool>] | doctor | completion <bash|zsh|fish>
   aicli self-install | self-update | --version
 
@@ -148,6 +148,8 @@ Subcomandos:
                             --sha256 <hash>, --require-attestation
                             (ver 'aicli install --help')
   update <tool>             Actualizar a la última versión disponible
+  update --all              Actualizar todos los CLIs instalados (una falla no
+                            detiene al resto; exit 1 si alguno falló)
   remove <tool>             Desinstalar por completo
   verify <tool>             Auditar la integridad de la instalación (10 pasos)
   list [opciones]           Listar CLIs: estado, versión instalada y
@@ -211,14 +213,21 @@ EOF
       ;;
     update)
       cat <<'EOF'
-aicli update <tool>
+aicli update <tool> | aicli update --all
 
 Actualiza un CLI a la última versión disponible. Mantiene las actualizaciones
 dentro del pipeline fail-closed del instalador (checksum + attestation),
 incluso para CLIs con updater propio (que el wrapper bloquea).
 
+  aicli update <tool>     Actualiza un CLI
+  aicli update --all      Actualiza todos los CLIs instalados, secuencial.
+                          Una falla no detiene al resto; el resumen final y el
+                          exit code lo reflejan (0 todo OK, 1 hubo fallas).
+                          Los CLIs no instalados se omiten.
+
 Ejemplos:
   aicli update agy
+  aicli update --all
 EOF
       ;;
     remove)
@@ -583,8 +592,39 @@ cmd_install() {
 }
 
 cmd_update() {
-  [[ $# -ge 1 ]] || { err "Uso: aicli update <tool>"; return 2; }
+  [[ $# -ge 1 ]] || { err "Uso: aicli update <tool> | aicli update --all"; return 2; }
   [[ "$1" == "-h" || "$1" == "--help" ]] && { help_sub update; return 0; }
+
+  if [[ "$1" == "--all" ]]; then
+    [[ $# -eq 1 ]] || {
+      err "--all no acepta más argumentos."
+      return 2
+    }
+    # Actualiza todos los CLIs instalados (manifest presente), secuencial.
+    # Una falla no detiene al resto; el resumen final y el exit code lo reflejan.
+    local tool failed=0 updated=0 skipped=0
+    for tool in $(list_registry); do
+      if [[ ! -f "$PREFIX/libexec/$tool/manifest.txt" ]]; then
+        info "$tool: no instalado — omitido"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      printf '%s\n' "Actualizando $tool..."
+      if bash "$INSTALL_SH" "$tool" --update; then
+        updated=$((updated + 1))
+      else
+        err "$tool: falló la actualización"
+        failed=$((failed + 1))
+      fi
+    done
+    if [[ $failed -gt 0 ]]; then
+      err "Resumen: $updated actualizados, $failed con error, $skipped omitidos."
+      return 1
+    fi
+    info "Resumen: $updated actualizados, $failed con error, $skipped omitidos."
+    return 0
+  fi
+
   validate_tool "$1"
   [[ $# -eq 1 ]] || {
     err "update no acepta flags. Para una versión específica: aicli install <tool> -v X.Y.Z"
@@ -713,8 +753,11 @@ _aicli() {
       ;;
     2)
       case "\$sub" in
-        install|update|remove|verify|list)
+        install|remove|verify|list)
           COMPREPLY=( \$(compgen -W "$tools" -- "\$cur") )
+          ;;
+        update)
+          COMPREPLY=( \$(compgen -W "$tools --all" -- "\$cur") )
           ;;
         completion)
           COMPREPLY=( \$(compgen -W "bash zsh fish" -- "\$cur") )
@@ -739,7 +782,8 @@ _aicli() {
     compadd $SUBCOMMANDS $tools --version --help --no-color
   elif (( CURRENT == 3 )); then
     case "\$words[2]" in
-      install|update|remove|verify|list) compadd $tools ;;
+      install|remove|verify|list) compadd $tools ;;
+      update) compadd $tools --all ;;
       completion) compadd bash zsh fish ;;
     esac
   fi
@@ -756,6 +800,7 @@ complete -c aicli -f -a "$SUBCOMMANDS $tools --version --help --no-color" -d 'ai
 for t in install update remove verify list
   complete -c aicli -n "__fish_seen_subcommand_from \$t" -f -a "$tools" -d 'CLI de IA'
 end
+complete -c aicli -n "__fish_seen_subcommand_from update" -f -a "--all" -d 'Actualizar todos los CLIs instalados'
 complete -c aicli -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 EOF
 }
