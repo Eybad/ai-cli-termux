@@ -1,12 +1,2 @@
-# Binarios descargados/extraídos (no trackear en git)
-opencode
-opencode-linux-arm64.tar.gz
-
-# Archivos temporales de prueba
-test-*.tar.gz
-test_exec.sh
-test_wrapper.sh
-.gemini/
-
 # Artefactos de Python (generador de parches)
 __pycache__/

@@ -14,11 +14,11 @@ bash verify.sh <tool>           # verificar integridad post-instalación
 shellcheck install.sh verify.sh # lint obligatorio antes de commit
 ```
 
-El workflow `.github/workflows/update-hashes.yml` actualiza `sha256.txt` vía CI (solo tools con `RELEASE_SOURCE=github`).
+Las herramientas con `CHECKSUM_SOURCE=hashfile` dependen de `sha256.txt` (única fuente de versión y checksum; instrucciones de actualización dentro del archivo).
 
 ## Checksums (fail-closed, sin mantenimiento manual)
 
-La versión y el checksum default se resuelven automáticamente: digest del asset desde la GitHub API (`CHECKSUM_SOURCE=release_digest`, opencode y codex) o manifest JSON del vendor (`manifest`, agy y kiro-cli). `sha256.txt` es **pinning opcional**: si hay entrada para el tag instalado, el pin del repo gana. Nunca instalar sin hash verificado.
+La versión y el checksum default se resuelven automáticamente: digest del asset desde la GitHub API (`CHECKSUM_SOURCE=release_digest`, opencode y codex) o manifest JSON del vendor (`manifest`, agy y kiro-cli). `sha256.txt` es **pinning opcional** para esas tools (si hay entrada para el tag instalado, el pin del repo gana) y **fuente obligatoria** para `hashfile`. Nunca instalar sin hash verificado.
 
 ## Design principles
 
@@ -44,10 +44,11 @@ Si la respuesta es sí, no tocar `install.sh`.
 |---|---|
 | Agregar/quitar un tool | `registry/<tool>.conf` + `sha256.txt` |
 | Cambiar ENV, flags, o parches de un tool | `registry/<tool>.conf` (WRAPPER_ENV, hooks) |
+| Helpers compartidos de hooks (shims, etc.) | `registry/lib/*.sh` (source desde `pre_wrapper_hook`; no matchea `registry/*.conf`) |
 | Modificar el pipeline de instalación | `install.sh` (solo si no se puede en .conf) |
 | Agregar/quitar pasos de verificación | `verify.sh` |
 | Actualizar hash de un release existente | `sha256.txt` |
-| Automatizar actualización de hashes en CI | `.github/workflows/update-hashes.yml` |
+| Lint/validación CI de scripts y confs | `.github/workflows/ci.yml` |
 | Build propio de un tool (sin builds compatibles con Android) | `.github/workflows/build-codex.yml` (patrón codex) |
 | Parche de source upstream (generado, no versionado) | `scripts/gen-codex-lock-patch.py` (inventario fail-closed) |
 | Agregar/quitar subcomandos o comportamiento del gestor | `aicli` (fachada; nunca lógica de instalación) |

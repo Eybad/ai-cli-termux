@@ -1,25 +1,21 @@
-# sha256.txt — Hashes de tarballs por herramienta (pinning OPCIONAL)
+# sha256.txt — Hashes de tarballs por herramienta
 #
-# Formato:  <tool>/<tag>  <checksum>
+# Formato:  <tool>/<tag>[:<arch>]  <checksum>
+#           <arch> opcional (arm64/amd64) para pins específicos de arquitectura.
 #
 # ── Rol actual ─────────────────────────────────────────────────────────────────
 #
-# Este archivo ya NO es la fuente obligatoria de checksums: el flujo default de
-# cada herramienta obtiene el hash de forma automática y fail-closed:
+# OBLIGATORIO para herramientas con CHECKSUM_SOURCE=hashfile: son la única
+# fuente de versión y checksum (vendor sin manifest JSON ni digest público de
+# assets). Sin entrada no hay instalación (fail-closed).
 #
-#   opencode   → digest SHA256 del asset desde la GitHub API (release_digest)
-#   agy        → SHA512 del manifest JSON de Google (manifest)
-#   kiro-cli   → SHA256 del manifest.json del CDN de Amazon (manifest)
+# OPCIONAL para el resto: versión y checksum se resuelven solos de forma
+# fail-closed (digest SHA256 del asset desde la GitHub API con release_digest,
+# o SHA512/SHA256 del manifest JSON del vendor con manifest). Si existe una
+# entrada para el tag que se está instalando, install.sh la usa en lugar del
+# digest remoto (el pin del repo gana).
 #
-# Este archivo queda como capa OPCIONAL de pinning para verificaciones
-# independientes del vendor o instalaciones reproducibles:
-#
-#   - Si existe una entrada para el tag que se está instalando, install.sh la
-#     usa en lugar del digest remoto (el pin del repo gana).
-#   - `--sha256 <hash>` sigue pineando un checksum explícito.
-#   - Herramientas nuevas con CHECKSUM_SOURCE=hashfile siguen dependiendo de él.
-#
-# ── Cómo agregar un hash nuevo ──────────────────────────────────────────────────
+# ── Cómo agregar un hash nuevo ─────────────────────────────────────────────────
 #
 #   TAG=v1.18.9
 #   TOOL=opencode
@@ -28,8 +24,12 @@
 #
 # Confirmá la attestation antes de agregar (requiere gh autenticado):
 #
-#   gh release verify-asset "$TAG" opencode-linux-arm64.tar.gz \
-#     --repo anomalyco/opencode
+#   gh attestation verify <tarball> \
+#     --repo <user>/<repo> --predicate-type <predicate>
+#
+# Para herramientas hashfile la actualización es manual: detectar la versión
+# nueva en la fuente del vendor, descargar el tarball exacto, sha256sum y
+# actualizar la entrada acá.
 #
 # ── Notas sobre colisiones de hash ─────────────────────────────────────────────
 #
@@ -42,7 +42,6 @@
 
 # opencode — https://github.com/anomalyco/opencode/releases
 # Pin opcional: la instalación default usa el digest de la GitHub API.
-opencode/v1.18.9  b16bd7593ea960a25d9c6849b3023bcd9b9244a6f51675341fd2052043b0670f
 
 # kiro-cli — usa el SHA256 del manifest.json del CDN (stable/latest/manifest.json)
 # No agregar entradas para kiro-cli acá: el manifest remoto es la fuente.
@@ -50,8 +49,7 @@ opencode/v1.18.9  b16bd7593ea960a25d9c6849b3023bcd9b9244a6f51675341fd2052043b067
 # agy (Antigravity CLI) — usa el SHA512 del manifest JSON de Google.
 # No agregar entradas para agy acá.
 
-# cursor-agent — CDN propio (downloads.cursor.com/lab/<version>/linux/<arch>/...).
-# Pin obligatorio (CHECKSUM_SOURCE=hashfile): el vendor no publica checksums
-# ni manifest. Actualización manual: detectar la versión nueva en el script
-# de install de cursor.com, descargar el tarball, sha256sum y actualizar acá.
+# Tool hashfile (CDN propio sin manifest ni digest público) — pin OBLIGATORIO.
+# Actualización manual: detectar la versión nueva en el script de install del
+# vendor, descargar el tarball, sha256sum y actualizar la entrada.
 cursor-agent/v2026.07.23-e383d2b  f40b99647cb24e0da885e97620a2048034f1fe8961910d573d827d77c4d26dcb

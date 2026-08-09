@@ -668,6 +668,7 @@ github_release_json() {
   body=$(mktemp)
   code=$(curl -sS --proto '=https' --tlsv1.2 -L \
            --connect-timeout 10 --max-time 300 \
+           --retry 3 --retry-delay 2 --retry-all-errors \
            -H 'Accept: application/vnd.github+json' \
            "${auth_header[@]}" \
            -o "$body" -w '%{http_code}' \
@@ -693,6 +694,7 @@ github_latest_release_with_asset() {
   body=$(mktemp)
   code=$(curl -sS --proto '=https' --tlsv1.2 -L \
            --connect-timeout 10 --max-time 300 \
+           --retry 3 --retry-delay 2 --retry-all-errors \
            -H 'Accept: application/vnd.github+json' \
            "${auth_header[@]}" \
            -o "$body" -w '%{http_code}' \
@@ -750,7 +752,7 @@ resolve_version() {
       expanded_url=$(expand_template "$MANIFEST_URL")
       info "Consultando manifest remoto..."
       local manifest_json
-      manifest_json=$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 "$expanded_url" 2>/dev/null || true)
+      manifest_json=$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 --retry-all-errors "$expanded_url" 2>/dev/null || true)
       [[ -n "$manifest_json" ]] || { err "No se pudo descargar el manifest desde $expanded_url"; exit 1; }
 
       version_key=$(expand_template "$MANIFEST_KEY_VERSION")
@@ -804,7 +806,7 @@ resolve_version() {
         VERSION=$(latest_hashfile_version)
         if [[ -z "$VERSION" ]]; then
           err "$DISPLAY_NAME: no hay ninguna versión registrada en $HASH_FILE."
-          err "Agregá el hash de la versión actual (ver update-hashes.yml) o usá -v <version>."
+          err "Agregá el hash de la versión actual (instrucciones dentro de $HASH_FILE) o usá -v <version>."
           exit 1
         fi
         info "$DISPLAY_NAME: usando última versión registrada ($VERSION)."
@@ -970,8 +972,8 @@ download() {
   TMP_FILE=$(mktemp "$tmp_dir/$APP_NAME-install-XXXXXX.tar.gz")
 
   info "Descargando $DISPLAY_NAME $VERSION..."
-  if ! curl -fL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 -o "$TMP_FILE" "$url"; then
-    err "Falló la descarga desde $url"
+  if ! curl -fL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 --retry-all-errors -o "$TMP_FILE" "$url"; then
+    err "Falló la descarga desde $(printf '%s' "$url" | tr -d '[:cntrl:]')"
     exit 1
   fi
 }

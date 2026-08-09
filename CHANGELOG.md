@@ -4,6 +4,25 @@ Todas las versiones notables de ai-cli-termux se documentan en este archivo.
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
+## [Unreleased]
+
+### Added
+
+- **CI automático** (`.github/workflows/ci.yml`): shellcheck estricto de `install.sh`/`verify.sh`/`aicli`, shellcheck de `registry/*.conf` y `registry/lib/*.sh`, sintaxis Python de los generadores/parches y validación declarativa de los registros (campos obligatorios + invariantes EXEC_DIRECT/EXTRA_BINS/ENTRY_POINT/ALIASES/RELEASE_SOURCE). Corre en push a main y PRs.
+- **`registry/lib/shims.sh`**: helpers compartidos de `pre_wrapper_hook` (`tool_shims_reset`, `tool_browser_shims`, `tool_clipboard_shims`). codex/agy/cursor-agent sourcean el lib en vez de duplicar ~200 líneas; lógica idéntica (ownership por marcador, migración pre-ownership, guardias FIFO-safe, contrato reset-antes-de-append con fail-safe). cursor-agent sigue sin crear shims de portapapeles.
+- **`aicli update --all`**: actualiza todos los CLIs instalados (manifest presente), secuencial; una falla no detiene al resto y el exit code lo refleja (0 todo OK, 1 hubo fallas). `AICLI_VERSION` → 1.3.0. Completions bash/zsh/fish actualizadas.
+- **Dependabot** (`.github/dependabot.yml`, github-actions semanal) para refrescar los pins por SHA de las actions, y **SECURITY.md** (canal de reporte privado + modelo de confianza de la cadena).
+
+### Removed
+
+- **Workflow `update-hashes.yml`**: la actualización de hashes vía CI era la pieza más manual y redundante (digest API + attestation ya son automáticos y fail-closed). `sha256.txt` queda como fuente obligatoria para tools `hashfile` y pinning opcional para el resto, con instrucciones dentro del propio archivo. Pin opcional de `opencode/v1.18.9` eliminado.
+
+### Changed
+
+- `install.sh`: `curl` con `--retry 3 --retry-delay 2 --retry-all-errors` en descargas y fetches de API/manifest (eran vulnerables a cortes transitorios de red).
+- Mensaje de error de `url_template` sin versión registrada apunta a las instrucciones de `sha256.txt` en lugar del workflow eliminado.
+- `registry/opencode.conf`: nota de cabecera corregida (modo loader glibc, `NEEDS_PATCHELF=false`; decía "patchelf requerido").
+
 ## [1.3.0] - 2026-08-09
 
 ### Fixed
@@ -21,6 +40,9 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 - Completions dinámicos: incluyen los tools del registry en el momento de generación.
 
 ## [1.1.0] - 2026-08-05
+
+> [!NOTE]
+> La versión 1.1.0 no tiene tag propio: quedó incluida en el tag v1.2.0.
 
 ### Added
 
@@ -52,4 +74,3 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 - Patrón "build en CI" (codex): compilación bionic/Android del código oficial en GitHub Actions con attestation SLSA, publicado en el repo de distribución dedicado (`ai-cli-termux-dist`).
 - `EXEC_DIRECT`: binarios nativos sin overlay glibc (ELF estático musl o compilado bionic/Android).
 - Shims de navegador y portapapeles para el flujo OAuth en Termux (`xdg-open` → `termux-open-url`, etc.), registrados en `shims.txt` y removidos en la desinstalación.
-- Workflow CI de actualización de hashes (`update-hashes.yml`).
