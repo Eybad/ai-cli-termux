@@ -1,10 +1,20 @@
-# Dependabot — actualización automática de GitHub Actions
+# Dependabot — señal de versión nueva para GitHub Actions
 #
-# Las actions del repo están pineadas por commit SHA (inmutable, fail-closed).
-# Dependabot detecta la versión del tag al que apunta el SHA (las actions
-# llevan el comentario "# vN" al lado del SHA) y abre PRs de actualización
-# cuando el upstream libera una versión nueva. Revisar y mergear esos PRs
-# mantiene los pins al día sin romper la inmutabilidad.
+# Las actions del repo están pineadas por commit SHA (inmutable, fail-closed),
+# con el comentario "# vN" al lado del SHA. Dependabot reconoce el pin SHA y
+# abre PRs que actualizan SHA -> SHA nuevo + comentario (verificado: los SHAs
+# de las PRs apuntan al commit exacto del tag nuevo) — no convierte a tag
+# mutable. La política de pins no se rompe al mergear.
+#
+# Criterio de merge de una PR de dependabot:
+#   - Validar el run del workflow afectado (el PR de checkout/cache dispara
+#     ci.yml; build-codex.yml valida con un workflow_dispatch manual o el
+#     cron diario) y mergear solo si pasa.
+#   - upload-artifact/download-artifact se migran SIEMPRE juntos al mismo
+#     major (formato de artefactos incompatible entre majors): cerrar la PR
+#     individual y testear el bump conjunto.
+#   - Si la PR no se mergea, cerrarla: dependabot la reabre semanalmente y
+#     sigue cumpliendo su rol de señal gratuita de "hay versión nueva".
 
 version: 2
 updates:
