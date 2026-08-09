@@ -9,7 +9,7 @@
 [![Android](https://img.shields.io/badge/Android-10%2B-3ddc84?style=flat-square&logo=android&logoColor=white)](https://www.android.com/)
 [![Termux](https://img.shields.io/badge/Termux-F--Droid-000000?style=flat-square&logo=terminal)](https://f-droid.org/en/packages/com.termux/)
 
-[Features](#features) • [Herramientas soportadas](#herramientas-soportadas) • [Requisitos](#requisitos) • [Instalación](#instalación) • [Gestor aicli](#gestor-aicli) • [Actualización automática](#actualización-automática) • [Verificación](#verificación) • [Cómo funciona](#cómo-funciona) • [Soluciones técnicas de Android](#soluciones-técnicas-de-android) • [Agregar una CLI nueva](#agregar-una-cli-nueva) • [Estructura del repositorio](#estructura-del-repositorio)
+[Features](#features) • [Herramientas soportadas](#herramientas-soportadas) • [Requisitos](#requisitos) • [Instalación](#instalación) • [Gestor aicli](#gestor-aicli) • [Opciones](#opciones) • [Actualización automática](#actualización-automática) • [Verificación](#verificación) • [Cómo funciona](#cómo-funciona) • [Soluciones técnicas de Android](#soluciones-técnicas-de-android) • [Agregar una CLI nueva](#agregar-una-cli-nueva) • [Estructura del repositorio](#estructura-del-repositorio)
 
 </div>
 
@@ -42,51 +42,78 @@ Instala y audita CLIs de inteligencia artificial — [opencode](https://github.c
 ## Requisitos
 
 - **Dispositivo**: Android 10+ (`aarch64`) o host Linux (`x86_64`).
-- **Termux**: instalado desde **F-Droid** o **GitHub Releases** (la versión de Google Play está obsoleta).
-- **Paquetes base**:
+- **Termux**: desde **F-Droid** o **GitHub Releases**.
+- **Paquetes base** — cubren el clon, el instalador y el TLS de las CLIs:
 
   ```bash
-  pkg install git python ca-certificates -y
+  pkg install git curl tar coreutils gawk jq ca-certificates -y
   ```
 
-- **Almacenamiento**: ~400 MB por herramienta (kiro-cli: ~1 GB; codex: ~1.3 GB, binario sin strip).
-- **gh** (opcional): para verificar la attestation SLSA de los releases de codex (`verify.sh` emite un WARN si no está instalado; el resto de la verificación no lo requiere).
+  - `python3`: solo para **agy** (parche de compatibilidad Android).
+  - Opcionales: `gh` (attestation de codex), `bash-completion` (completions), `unzip` (fix del TUI de kiro-cli), `ripgrep` (code tool de codex).
+
+- **Almacenamiento**: ~400 MB por herramienta (kiro-cli: ~1 GB; codex: ~1.3 GB).
+
+> [!TIP]
+> El overlay glibc (`glibc-repo` + `glibc-runner`) se instala automáticamente durante la primera instalación; `patchelf` también, cuando la herramienta lo requiere. No hay que instalarlos a mano.
 
 ## Instalación
 
 ```bash
 git clone https://github.com/Eybad/ai-cli-termux.git
 cd ai-cli-termux
-bash aicli self-install   # instala el gestor en $PREFIX/bin
+bash aicli self-install   # deja aicli disponible desde cualquier directorio
 ```
 
-Desde cualquier directorio:
+Primeros pasos:
 
 ```bash
-aicli install opencode    # instala la última versión verificada
-aicli list                # estado local + actualizaciones disponibles
+aicli list                    # 1) ver las herramientas disponibles y su estado
+aicli install <herramienta>   # 2) instalar la última versión verificada (ej: opencode)
+aicli verify <herramienta>    # 3) auditar la instalación (opcional)
 ```
+
+`<herramienta>` es el nombre de la CLI (`<tool>` en la ayuda del gestor): opencode, agy, codex, ...
 
 ## Gestor aicli
 
-`aicli` es la fachada recomendada sobre `install.sh`/`verify.sh`: gestiona los CLIs sin reemplazar sus comandos propios (cada CLI se usa con su propia ayuda: `opencode --help`, `codex exec`, ...).
+`aicli` es la fachada recomendada sobre `install.sh`/`verify.sh`: gestiona los CLIs sin reemplazar sus comandos propios.
 
-| Subcomando | Descripción |
+### Uso rápido
+
+| Si querés… | Ejecutá |
 |---|---|
-| `aicli list [--offline] [--json] [<tool>]` | Estado local (manifest) + actualización disponible. UPDATE: `sí`/`no`/`n/d`. Exit 0 siempre (informativo) |
-| `aicli install <tool> [-v X.Y.Z \| --sha256 <hash> \| --require-attestation]` | Instalar (passthrough de flags a `install.sh`) |
-| `aicli update <tool>` (`upgrade`) | Actualizar a la última versión (`install.sh <tool> --update`) |
-| `aicli remove <tool>` (`uninstall`) | Desinstalar (`install.sh <tool> -u`) |
-| `aicli verify <tool>` | Auditar integridad (10 pasos, `verify.sh`) |
-| `aicli help [<subcomando>\|<tool>]` | Ayuda general, de un subcomando o de una herramienta (`aicli help codex`) |
-| `aicli doctor` | Diagnóstico del entorno (repo, arch, deps, wrapper, loader glibc) |
-| `aicli completion <bash\|zsh\|fish>` | Completions a stdout (tools del registry dinámicos) |
-| `aicli self-install` / `self-update` | Instalar / actualizar el wrapper propio (fail-closed: nunca pisa un binario ajeno) |
+| Instalar una CLI | `aicli install <tool>` |
+| Actualizar una CLI | `aicli update <tool>` |
+| Actualizar todas las instaladas | `aicli update --all` |
+| Desinstalar una CLI | `aicli remove <tool>` |
+| Verificar la integridad | `aicli verify <tool>` |
+| Ver estado y actualizaciones | `aicli list` |
+| Diagnosticar el entorno | `aicli doctor` |
+| Ayuda | `aicli help [comando \| tool]` |
 
-Convenciones: `--help`/`--version` a stdout con exit 0, errores a stderr, exit `2` = uso inválido, `NO_COLOR`/`TERM=dumb`/no-TTY/`--no-color` desactivan colores.
+`<tool>` es el nombre de la CLI (opencode, agy, codex, ...).
+
+### Subcomandos
+
+| Comando | Qué hace |
+|---|---|
+| `aicli list [--offline] [--json] [<tool>]` | Estado local (versión del manifest) y actualización disponible (`sí`/`no`/`n/d`). Exit 0 siempre (informativo) |
+| `aicli install <tool> [-v X.Y.Z \| --sha256 <hash> \| --require-attestation]` | Instalar (flags passthrough a `install.sh`) |
+| `aicli update <tool>` | Actualizar a la última versión disponible |
+| `aicli update --all` | Actualizar todas las instaladas (una falla no detiene al resto; exit 1 si hubo fallas) |
+| `aicli remove <tool>` | Desinstalar por completo |
+| `aicli verify <tool>` | Auditar la integridad (10 pasos; exit 1 ante cualquier fallo) |
+| `aicli help [<subcomando> \| <tool>]` | Ayuda general, de un subcomando o de una CLI |
+| `aicli doctor` | Diagnóstico del entorno (repo, arch, deps, wrapper, loader glibc) |
+| `aicli completion <bash \| zsh \| fish>` | Completions a stdout (herramientas del registry dinámicas) |
+| `aicli self-install` / `self-update` | Instalar / actualizar el wrapper propio (nunca pisa un binario ajeno) |
 
 > [!NOTE]
-> `install.sh` y `verify.sh` siguen funcionando directo; los comandos del gestor son equivalentes (`aicli update <tool>` = `bash install.sh <tool> --update`).
+> `--help`/`--version` a stdout con exit 0, errores a stderr, exit `2` = uso inválido, `NO_COLOR`/`TERM=dumb`/no-TTY/`--no-color` desactivan colores.
+
+> [!NOTE]
+> `install.sh` y `verify.sh` siguen funcionando directo; los subcomandos del gestor son equivalentes (`aicli update <tool>` = `bash install.sh <tool> --update`).
 
 ### Instalación por herramienta
 
@@ -148,20 +175,38 @@ fi
 
 `bun.sha256` no se toca: el launcher compara ese archivo contra el hash del build glibc v1.3.13 que espera, y solo re-descarga si difieren; el binario en sí no se valida. Por eso el binario queda en v1.3.14 (la build Android más cercana; las builds Android de bun existen desde v1.3.14, no hay build Android de v1.3.13) con el sha file de v1.3.13.
 
-## Opciones comunes
+## Opciones
+
+### Instalación (passthrough a `install.sh`)
 
 | Opción | Descripción |
 |---|---|
 | `-v, --version <X.Y.Z>` | Instalar una versión específica |
-| `--update` | Actualizar a la última versión disponible si ya hay una anterior |
-| `-r, --reinstall` | Forzar reinstalación |
-| `-u, --uninstall` | Desinstalar por completo |
 | `--sha256 <hash>` | Pinear el checksum del tarball explícitamente |
 | `--require-attestation` | Abortar si no se puede verificar la attestation (solo tools de GitHub) |
-| `-h, --help` | Mostrar la ayuda completa |
 
 > [!IMPORTANT]
 > `--sha256 <hash>` desactiva la resolución automática de checksum: el hash se toma tal cual lo pasás. Verificá vos mismo que sea el correcto antes de instalarlo.
+
+### Instalador directo (`install.sh`)
+
+| Opción | Descripción |
+|---|---|
+| `--update` | Actualizar a la última versión disponible |
+| `-r, --reinstall` | Forzar reinstalación |
+| `-u, --uninstall` | Desinstalar por completo |
+| `-h, --help` | Mostrar la ayuda completa |
+
+El gestor los expone como subcomandos: `aicli update <tool>` y `aicli remove <tool>`.
+
+### Globales de `aicli`
+
+| Opción | Descripción |
+|---|---|
+| `-h, --help` | Ayuda |
+| `--version` | Versión del gestor |
+| `--no-color` | Desactivar colores |
+| `--offline`, `--json` | De `aicli list`: sin red / salida máquina |
 
 ## Actualización automática
 
@@ -178,7 +223,7 @@ aicli update <tool>
 - **cursor-agent**: última versión registrada en `sha256.txt` (pin manual; el vendor no publica endpoint "latest" — ver [Instalación por herramienta](#instalación-por-herramienta)). Detecta versiones con prerelease/build (ej: `2026.07.23-e383d2b`).
 
 > [!NOTE]
-> Para la mayoría de las herramientas no hace falta tocar `sha256.txt`: la versión y el checksum se resuelven automáticamente y fail-closed desde la fuente del vendor (el archivo queda como capa opcional de pinning). **Excepción: `cursor-agent`** — su pin en `sha256.txt` es la única fuente de versiones (CDN sin manifest), y `--update` toma de ahí la última registrada. Instrucciones de actualización dentro del propio `sha256.txt`.
+> No hace falta tocar `sha256.txt` para la mayoría de las herramientas (pinning opcional). **Excepción: `cursor-agent`** — su pin es la única fuente de versiones (CDN sin manifest); instrucciones dentro del propio archivo.
 
 ## Verificación
 
