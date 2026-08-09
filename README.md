@@ -4,7 +4,7 @@
 
 **CLIs de IA ejecutadas de forma nativa en Termux, sin proot**
 
-[![Update hashes](https://img.shields.io/github/actions/workflow/status/Eybad/ai-cli-termux/update-hashes.yml?style=flat-square&label=update-hashes)](https://github.com/Eybad/ai-cli-termux/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/Eybad/ai-cli-termux/ci.yml?style=flat-square&label=ci)](https://github.com/Eybad/ai-cli-termux/actions)
 [![Build codex](https://img.shields.io/github/actions/workflow/status/Eybad/ai-cli-termux/build-codex.yml?style=flat-square&label=build-codex)](https://github.com/Eybad/ai-cli-termux/actions)
 [![Android](https://img.shields.io/badge/Android-10%2B-3ddc84?style=flat-square&logo=android&logoColor=white)](https://www.android.com/)
 [![Termux](https://img.shields.io/badge/Termux-F--Droid-000000?style=flat-square&logo=terminal)](https://f-droid.org/en/packages/com.termux/)
@@ -24,7 +24,7 @@ Instala y audita CLIs de inteligencia artificial — [opencode](https://github.c
 - **Nativo, sin proot** — binarios ELF glibc ejecutados vía el loader de Termux (`ld-linux-aarch64.so.1`), con `patchelf` y wrappers que resuelven las diferencias con Android (seccomp, DNS, certificados).
 - **Framework modular** — cada CLI vive en un `registry/*.conf`: variables, entorno, parches y hooks. Todo lo específico de una herramienta está en su registro.
 - **Última versión automática** — versión y checksum se resuelven solos desde la GitHub API, el manifest de Google o el manifest del CDN de Amazon.
-- **Fail-closed** — sin checksum verificado no se instala. `sha256.txt` queda como pinning opcional para verificaciones independientes del vendor.
+- **Fail-closed** — sin checksum verificado no se instala. `sha256.txt` es la fuente obligatoria para tools `hashfile` (CDN sin manifest) y pinning opcional para el resto.
 - **Parches adaptativos** — agy se auto-parchea (syscall `faccessat2` + TCMalloc VA48→VA39 si aplica) con smoke test posterior. `--update` funciona sin mantenimiento manual entre versiones.
 - **Build en CI** — codex se compila en GitHub Actions desde el código oficial (bionic arm64 para Android, musl verificado para amd64) y se publica con digest y attestation en un repo de distribución dedicado.
 - **Auditable** — `verify.sh` audita la instalación en 10 pasos y detecta adulteración posterior al chequeo de hashes registrados en `manifest.txt`.
@@ -178,9 +178,7 @@ aicli update <tool>
 - **cursor-agent**: última versión registrada en `sha256.txt` (pin manual; el vendor no publica endpoint "latest" — ver [Instalación por herramienta](#instalación-por-herramienta)). Detecta versiones con prerelease/build (ej: `2026.07.23-e383d2b`).
 
 > [!NOTE]
-> Para la mayoría de las herramientas no hace falta tocar `sha256.txt`: la versión y el checksum se resuelven automáticamente y fail-closed desde la fuente del vendor (el archivo queda como capa opcional de pinning). **Excepción: `cursor-agent`** — su pin en `sha256.txt` es la única fuente de versiones (CDN sin manifest), y `--update` toma de ahí la última registrada.
-
-El workflow CI [update-hashes.yml](.github/workflows/update-hashes.yml) actualiza `sha256.txt` automáticamente para las tools con `RELEASE_SOURCE=github`.
+> Para la mayoría de las herramientas no hace falta tocar `sha256.txt`: la versión y el checksum se resuelven automáticamente y fail-closed desde la fuente del vendor (el archivo queda como capa opcional de pinning). **Excepción: `cursor-agent`** — su pin en `sha256.txt` es la única fuente de versiones (CDN sin manifest), y `--update` toma de ahí la última registrada. Instrucciones de actualización dentro del propio `sha256.txt`.
 
 ## Verificación
 
@@ -279,13 +277,20 @@ ai-cli-termux/
 │   ├── kiro-cli.conf
 │   ├── codex.conf
 │   ├── cursor-agent.conf
+│   ├── lib/shims.sh             # Helpers compartidos de hooks (shims, etc.)
 │   └── patch_va39.py            # Parche adaptativo ARM64 (VA39 + faccessat2)
 ├── scripts/
 │   ├── gen-codex-lock-patch.py  # Generador fail-closed del parche de locks (CI)
 │   └── gen-ctype-tables.py      # Tablas ctype glibc para el shim de V8 (CI)
 ├── docs/
 │   └── adr/0001-release-scheme.md
-└── .github/workflows/
-    ├── build-codex.yml          # Build bionic arm64 + musl verificado (cron diario)
-    └── update-hashes.yml        # Actualiza sha256.txt (CI)
+└── .github/
+    ├── dependabot.yml           # Actualización semanal de actions (pins por SHA)
+    └── workflows/
+        ├── build-codex.yml      # Build bionic arm64 + musl verificado (cron diario)
+        └── ci.yml               # Lint + validación de confs (push/PR)
 ```
+
+## Seguridad
+
+¿Encontraste una vulnerabilidad en el instalador, los registros o los workflows? Consultá [SECURITY.md](SECURITY.md) para el canal de reporte privado y el modelo de confianza de la cadena (checksums fail-closed, attestation, TOFU del CDN de Cursor).

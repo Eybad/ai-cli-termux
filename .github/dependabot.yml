@@ -1,0 +1,14 @@
+# Dependabot — actualización automática de GitHub Actions
+#
+# Las actions del repo están pineadas por commit SHA (inmutable, fail-closed).
+# Dependabot detecta la versión del tag al que apunta el SHA (las actions
+# llevan el comentario "# vN" al lado del SHA) y abre PRs de actualización
+# cuando el upstream libera una versión nueva. Revisar y mergear esos PRs
+# mantiene los pins al día sin romper la inmutabilidad.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

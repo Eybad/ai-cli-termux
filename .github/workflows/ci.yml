@@ -1,0 +1,161 @@
+name: CI
+
+# Lint y validación estática del repo (push a main y PRs):
+#
+#   1. shellcheck sobre install.sh, verify.sh, aicli, registry/*.conf y
+#      registry/lib/*.sh — el mismo lint que AGENTS.md exige antes de commit,
+#      ahora automático. El binario se descarga de koalaman/shellcheck (release
+#      oficial) y se verifica contra su checksum SHA-256 (fail-closed).
+#   2. Sintaxis Python de los generadores/parches (gen-codex-lock-patch.py,
+#      gen-ctype-tables.py, patch_va39.py).
+#   3. Validación declarativa de registry/*.conf: campos obligatorios,
+#      valores permitidos e invariantes del instalador (EXEC_DIRECT/EXTRA_BINS/
+#      ENTRY_POINT/ALIASES/RELEASE_SOURCE/CHECKSUM_SOURCE). Sin dependencias
+#      nuevas: solo bash + awk + grep, los mismos disponibles en el runner.
+#
+# Sin red durante los steps salvo las dos descargas pinheadas (checkout y
+# shellcheck). Permisos mínimos: solo lectura del contenido.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint y validación
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Instalar shellcheck (pin v0.11.0, checksum verificado)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/shellcheck
+          curl -fsSL --retry 3 -o /tmp/shellcheck/sc.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/shellcheck/sc.tar.xz' | sha256sum -c -
+          tar -xJf /tmp/shellcheck/sc.tar.xz -C /tmp/shellcheck
+          sudo install -m 0755 /tmp/shellcheck/shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
+
+      - name: Shellcheck
+        run: |
+          set -euo pipefail
+          # Estricto (cero findings) en el código ejecutable:
+          shellcheck install.sh verify.sh aicli
+          # Confs: archivos sourceados por install.sh — SC2034 (variables
+          # consumidas por el instalador) es falso positivo; -S error solo
+          # falla ante errores reales.
+          shellcheck -s bash -S error registry/*.conf
+          # Lib de hooks: código real (lleva directivas shellcheck en cabecera).
+          shopt -s nullglob
+          lib_files=(registry/lib/*.sh)
+          if [[ ${#lib_files[@]} -gt 0 ]]; then
+            shellcheck "${lib_files[@]}"
+          fi
+
+      - name: Sintaxis Python (generadores y parches)
+        env:
+          PYTHONPYCACHEPREFIX: /tmp/pycache
+        run: |
+          set -euo pipefail
+          # PYTHONPYCACHEPREFIX: los .pyc van a /tmp, el checkout queda limpio
+          python3 -m py_compile -q \
+            scripts/gen-codex-lock-patch.py scripts/gen-ctype-tables.py registry/patch_va39.py
+
+      - name: Validar registry/*.conf
+        run: |
+          set -euo pipefail
+          fail=0
+          required_fields="APP_NAME DISPLAY_NAME RELEASE_SOURCE CHECKSUM_ALGO CHECKSUM_SOURCE ELF_NAME"
+          valid_release_sources="github manifest_json url_template"
+          valid_checksum_sources="release_digest manifest hashfile"
+          valid_algos="sha256 sha512"
+
+          get() {
+            # Solo el valor: sin comentarios en línea (#) ni comillas envolventes
+            awk -F= -v k="$1" '{ sub(/\r$/, ""); if ($1 == k) { sub(/^[^=]*=/, ""); sub(/[ \t]#.*$/, ""); print; exit } }' "$conf"
+          }
+          unq() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' <<< "$1"; }
+
+          for conf in registry/*.conf; do
+            [[ -f "$conf" ]] || continue
+            for field in $required_fields; do
+              val=$(unq "$(get "$field")")
+              if [[ -z "$val" ]]; then
+                echo "::error file=$conf::$field es obligatorio (vacío o ausente)"
+                fail=1
+              fi
+            done
+
+            rs=$(unq "$(get RELEASE_SOURCE)")
+            cs=$(unq "$(get CHECKSUM_SOURCE)")
+            algo=$(unq "$(get CHECKSUM_ALGO)")
+            ed=$(unq "$(get EXEC_DIRECT)")
+            np=$(unq "$(get NEEDS_PATCHELF)")
+            eb=$(unq "$(get EXTRA_BINS)")
+            ep=$(unq "$(get ENTRY_POINT)")
+            al=$(unq "$(get ALIASES)")
+            app=$(unq "$(get APP_NAME)")
+            elf=$(unq "$(get ELF_NAME)")
+
+            # Mismo charset que _name_is_valid de install.sh (con rechazo de
+            # "."/".." como token completo): evita que un valor raro llegue a
+            # las comparaciones regex del resto del paso.
+            for fname in "$app" "$elf"; do
+              [[ -n "$fname" && "$fname" =~ ^[a-zA-Z0-9._-]+$ && "$fname" != "." && "$fname" != ".." ]] || {
+                echo "::error file=$conf::APP_NAME/ELF_NAME inválido: '$fname' (solo [a-zA-Z0-9._-], sin '.' ni '..')"
+                fail=1
+              }
+            done
+
+            case " $valid_release_sources " in
+              *" $rs "*) ;;
+              *) echo "::error file=$conf::RELEASE_SOURCE inválido: '$rs' (válidos: $valid_release_sources)"; fail=1 ;;
+            esac
+            case " $valid_checksum_sources " in
+              *" $cs "*) ;;
+              *) echo "::error file=$conf::CHECKSUM_SOURCE inválido: '$cs' (válidos: $valid_checksum_sources)"; fail=1 ;;
+            esac
+            case " $valid_algos " in
+              *" $algo "*) ;;
+              *) echo "::error file=$conf::CHECKSUM_ALGO inválido: '$algo' (válidos: $valid_algos)"; fail=1 ;;
+            esac
+
+            # Invariantes del instalador (install.sh: preflight)
+            if [[ "$ed" == "true" && "$np" != "false" ]]; then
+              echo "::error file=$conf::EXEC_DIRECT=true requiere NEEDS_PATCHELF=false"
+              fail=1
+            fi
+            if [[ -n "$eb$ep$al" && "$np" != "true" ]]; then
+              echo "::error file=$conf::EXTRA_BINS/ENTRY_POINT/ALIASES definidos requieren NEEDS_PATCHELF=true"
+              fail=1
+            fi
+
+            case "$rs" in
+              github)
+                [[ -n "$(get REPO)" ]] || { echo "::error file=$conf::RELEASE_SOURCE=github requiere REPO"; fail=1; }
+                [[ -n "$(get ARCHIVE_TEMPLATE)" ]] || { echo "::error file=$conf::RELEASE_SOURCE=github requiere ARCHIVE_TEMPLATE"; fail=1; }
+                ;;
+              manifest_json)
+                [[ -n "$(get MANIFEST_URL)" ]] || { echo "::error file=$conf::RELEASE_SOURCE=manifest_json requiere MANIFEST_URL"; fail=1; }
+                ;;
+              url_template)
+                [[ -n "$(get DOWNLOAD_URL_TEMPLATE)" ]] || { echo "::error file=$conf::RELEASE_SOURCE=url_template requiere DOWNLOAD_URL_TEMPLATE"; fail=1; }
+                ;;
+            esac
+
+            # hashfile: sin entrada en sha256.txt el instalador aborta fail-closed
+            # match literal de prefijo (sin regex: "." de APP_NAME no es
+            # wildcard). sub() va como regla separada: como condición retorna 0
+            # cuando no hay \r y mataría la entrada.
+            if [[ "$cs" == "hashfile" && -n "$app" ]] \
+              && ! awk -v app="$app" '{ sub(/\r$/, "") } substr($1, 1, length(app)+1) == app "/" { found = 1 } END { exit !found }' sha256.txt; then
+              echo "::error file=$conf::CHECKSUM_SOURCE=hashfile sin entrada en sha256.txt (fail-closed: no instala)"
+              fail=1
+            fi
+          done
+          exit $fail
