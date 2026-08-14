@@ -38,6 +38,7 @@ Instala y audita CLIs de inteligencia artificial — [opencode](https://github.c
 | **`kiro-cli`** (Kiro CLI) | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 del `manifest.json` oficial | TUI vía runtime bun parcheado; `EXTRA_BINS` |
 | **`codex`** (OpenAI Codex) | [Repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) — **build propio en CI** desde el código oficial (Apache-2.0) | SHA256 del asset vía GitHub API + attestation SLSA del workflow | Binario nativo bionic (arm64, sin proot) o musl verificado (amd64); `EXEC_DIRECT` |
 | **`cursor-agent`** (Cursor Agent CLI) | [CDN propio](https://downloads.cursor.com/lab/...) (`url_template`, sin endpoint "latest" público) | SHA256 del tarball pineado a mano en `sha256.txt` | Bundle node embebido patcheado, alias `agent`, `agent update` bloqueado |
+| **`copilot`** (GitHub Copilot CLI) | [GitHub Releases](https://github.com/github/copilot-cli) | SHA256 del asset vía GitHub API | Runtime Node/V8 embebido self-contained patcheado a glibc; addons nativos glibc-only; auto-update deshabilitado (`COPILOT_AUTO_UPDATE=false` + `update` bloqueado) |
 
 ## Requisitos
 
