@@ -1,2 +1,5 @@
 # Artefactos de Python (generador de parches)
 __pycache__/
+
+# Config local del agente opencode (comandos, agentes, skills propios del entorno)
+.opencode/
