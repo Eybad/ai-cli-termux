@@ -9,7 +9,7 @@
 #   1. Inserta el módulo `file_lock_shim` en el crate root de cada crate con
 #      call sites (delega en std fuera de Android; usa flock(2) directo en
 #      Android, mapeando EWOULDBLOCK a std::fs::TryLockError::WouldBlock).
-#   2. Reemplaza los 18 call sites conocidos por crate::file_lock_shim::{...}(&file),
+#   2. Reemplaza los 19 call sites conocidos por crate::file_lock_shim::{...}(&file),
 #      preservando `?`, `match` y `map_err` de cada llamada.
 #      (El prefijo crate:: es obligatorio: desde Rust 1.96 los paths no
 #      calificados hacia módulos del crate root ya no resuelven desde submódulos
@@ -30,12 +30,12 @@ import sys
 from pathlib import Path
 
 # ── Inventario esperado de call sites (archivo relativo a codex-rs/, línea 1-based) ──
-# Fuente: escaneo exhaustivo de codex-rust-v0.147.0 (18 sitios en 11 archivos).
+# Fuente: escaneo exhaustivo de codex-rs v0.150.1 (19 sitios en 11 archivos).
 # Si el source upstream cambia cualquiera de estos, el generador aborta.
 INVENTORY = [
-    ("arg0/src/lib.rs", 380, "lock_file", "try_lock"),
-    ("arg0/src/lib.rs", 513, "lock_file", "try_lock"),
-    ("arg0/src/lib.rs", 731, "lock_file", "try_lock"),
+    ("arg0/src/lib.rs", 385, "lock_file", "try_lock"),
+    ("arg0/src/lib.rs", 526, "lock_file", "try_lock"),
+    ("arg0/src/lib.rs", 790, "lock_file", "try_lock"),
     ("app-server-transport/src/transport/unix_socket.rs", 151, "file", "lock"),
     ("core/src/installation_id.rs", 32, "file", "lock"),
     ("execpolicy/src/amend.rs", 157, "file", "lock"),
@@ -46,7 +46,8 @@ INVENTORY = [
     ("network-proxy/src/certs.rs", 540, "file", "lock"),
     ("network-proxy/src/certs.rs", 633, "lock_file", "try_lock"),
     ("rmcp-client/src/oauth/refresh_lock.rs", 72, "file", "try_lock"),
-    ("rmcp-client/src/oauth/store_lock.rs", 94, "file", "try_lock"),
+    ("rmcp-client/src/oauth/store_lock.rs", 127, "file", "try_lock_shared"),
+    ("rmcp-client/src/oauth/store_lock.rs", 128, "file", "try_lock"),
     ("rollout/src/maintenance.rs", 36, "file", "try_lock"),
     ("thread-store/src/local/writer_lock.rs", 64, "file", "try_lock"),
     ("thread-store/src/local/writer_lock.rs", 109, "file", "lock"),
@@ -393,7 +394,7 @@ def main():
         if "mod file_lock_shim" not in (src / root).read_text(encoding="utf-8"):
             raise SystemExit(f"ERROR: post-check: shim ausente en {root}")
 
-    print(f"OK: parche aplicado — 18 call sites → crate::file_lock_shim, versión {args.dist_version}")
+    print(f"OK: parche aplicado — 19 call sites → crate::file_lock_shim, versión {args.dist_version}")
     return 0
 
 
