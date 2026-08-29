@@ -383,16 +383,118 @@ cmd_help() {
 }
 
 # ── list ──────────────────────────────────────────────────────────────────────
-# Contrato interno: la última versión se resuelve con install.sh
-# --resolve-version (interfaz máquina: stdout = "TARGET_VERSION=<v>").
-# Parse defensivo: cualquier desvío del contrato cuenta como n/d (el listado
-# nunca se rompe por un cambio de formato).
-resolve_latest() {
-  local tool="$1" out
-  out=$(timeout 20 bash "$INSTALL_SH" "$tool" --resolve-version 2>/dev/null || true)
-  case "$out" in
-    TARGET_VERSION=*) printf '%s' "${out#TARGET_VERSION=}" ;;
-  esac
+# Cache para resultados de resolución de versión. TTL: 5 minutos.
+# Directorio privado (mktemp -d + chmod 700) para evitar symlink TOCTOU.
+RESOLVE_CACHE_TTL=300  # segundos
+RESOLVE_CACHE_DIR=""  # se inicializa en resolve_all_latest (mktemp -d)
+
+# Helpers de caché (centralizados para evitar duplicación).
+# Lee la edad de un archivo en segundos (POSIX: ls -l + awk).
+_cache_file_age() {
+  local file="$1"
+  ls -l "$file" 2>/dev/null | awk '{print $6, $7, $8}' | {
+    read -r month day time_or_year
+    # Formato: "Aug 28 12:23" o "Jan  5  2025"
+    local file_ts
+    if printf '%s' "$time_or_year" | grep -q ':'; then
+      # Formato con hora: "Aug 28 12:23" — asumir año actual
+      file_ts=$(date -d "$month $day $time_or_year $(date +%Y)" +%s 2>/dev/null || echo 0)
+    else
+      # Formato con año: "Jan  5  2025"
+      file_ts=$(date -d "$month $day $time_or_year" +%s 2>/dev/null || echo 0)
+    fi
+    local now_ts
+    now_ts=$(date +%s)
+    printf '%s' $(( now_ts - file_ts ))
+  }
+}
+
+# Retorna 0 si la caché es válida (existe, no es symlink, y no expiró), 1 si no.
+_cache_is_valid() {
+  local cache_file="$1"
+  test -f "$cache_file" || return 1
+  test -L "$cache_file" && return 1  # symlink → inválido (TOCTOU)
+  local age
+  age=$(_cache_file_age "$cache_file")
+  test "$age" -lt "$RESOLVE_CACHE_TTL"
+}
+
+# Lee el resultado de la caché (solo archivos regulares, no symlinks).
+_cache_get() {
+  local cache_file="$1"
+  test -f "$cache_file" || return 1
+  test -L "$cache_file" && return 1  # symlink → rechazar
+  cat "$cache_file"
+}
+
+# Escribe un resultado a la caché (solo si no es symlink).
+_cache_set() {
+  local cache_file="$1" value="$2"
+  # Si ya existe y es symlink, no pisar (fail-closed).
+  test -L "$cache_file" && return 1
+  mkdir -p "$(dirname "$cache_file")"
+  printf '%s' "$value" > "$cache_file"
+}
+
+# Limpia archivos de caché expirados.
+_cleanup_resolve_cache() {
+  test -d "$RESOLVE_CACHE_DIR" || return 0
+  local f age
+  for f in "$RESOLVE_CACHE_DIR"/*.latest; do
+    test -f "$f" || continue
+    test -L "$f" && { rm -f "$f"; continue; }  # symlinks se eliminan
+    age=$(_cache_file_age "$f")
+    if test "$age" -ge "$RESOLVE_CACHE_TTL"; then
+      rm -f "$f"
+    fi
+  done
+}
+
+# Resuelve todas las versiones en paralelo.
+# Delega en install.sh --resolve-version (contrato máquina estable).
+# $1 = nombre del array de tools (nameref).
+resolve_all_latest() {
+  local -n _tools_ref=$1
+
+  # Directorio de caché predecible bajo $TMPDIR (privado en Termux, drwx------).
+  # Se reutiliza entre invocaciones para persistir la caché.
+  if test -z "$RESOLVE_CACHE_DIR" || ! test -d "$RESOLVE_CACHE_DIR"; then
+    RESOLVE_CACHE_DIR="${TMPDIR:-/tmp}/aicli_resolve"
+    mkdir -p "$RESOLVE_CACHE_DIR"
+    chmod 700 "$RESOLVE_CACHE_DIR"
+  fi
+
+  local tool cache_file pids=()
+  for tool in "${_tools_ref[@]}"; do
+    test -f "$PREFIX/libexec/$tool/manifest.txt" || continue
+    cache_file="$RESOLVE_CACHE_DIR/${tool}.latest"
+
+    # Si la caché es válida, no lanzar subproceso.
+    if _cache_is_valid "$cache_file"; then
+      _cache_get "$cache_file" > "$RESOLVE_CACHE_DIR/${tool}.result"
+      continue
+    fi
+
+    # Lanzar resolución en background (un solo fork, no N).
+    (
+      version=$(timeout 20 bash "$INSTALL_SH" "$tool" --resolve-version 2>/dev/null || true)
+      case "$version" in
+        TARGET_VERSION=*) version="${version#TARGET_VERSION=}" ;;
+        *) version="" ;;
+      esac
+      _cache_set "$cache_file" "$version"
+      printf '%s' "$version" > "$RESOLVE_CACHE_DIR/${tool}.result"
+    ) &
+    pids+=("$!")
+  done
+
+  # Esperar todos los subprocesos en paralelo.
+  local p
+  for p in "${pids[@]:-}"; do
+    test -n "$p" && wait "$p" || true
+  done
+
+  _cleanup_resolve_cache
 }
 
 json_escape() {
@@ -458,20 +560,11 @@ cmd_list() {
     return 1
   }
 
-  # Consultas de red en paralelo (timeout individual de 20s): N tools no
-  # bloquean el listado N×20s en serie.
-  local tmp; tmp=$(mktemp -d)
-  local pids=()
-  for tool in "${names[@]}"; do
-    if [[ "$offline" == true ]]; then
-      continue
-    fi
-    [[ -f "$PREFIX/libexec/$tool/manifest.txt" ]] || continue
-    ( resolve_latest "$tool" > "$tmp/latest_$tool" ) &
-    pids+=("$!")
-  done
-  local p
-  for p in "${pids[@]:-}"; do [[ -n "$p" ]] && wait "$p" || true; done
+  # Consultas de red en paralelo (un solo proceso, curls paralelos, caché).
+  # N tools no bloquean el listado N×20s en serie.
+  if [[ "$offline" != true ]]; then
+    resolve_all_latest names
+  fi
 
   for tool in "${names[@]}"; do
     f="$REGISTRY_DIR/$tool.conf"
@@ -486,7 +579,7 @@ cmd_list() {
       installed_at=$(manifest_get installed_at "$mf")
       installed="si"
       if [[ "$offline" != true ]]; then
-        latest=$(cat "$tmp/latest_$tool" 2>/dev/null || true)
+        latest=$(cat "$RESOLVE_CACHE_DIR/${tool}.result" 2>/dev/null || true)
         if [[ -n "$latest" ]]; then
           if [[ -n "$version" && "$latest" == "$version" ]]; then
             update="no"
@@ -504,7 +597,6 @@ cmd_list() {
     fi
     rows+=("$tool$USEP$display$USEP$desc$USEP$installed$USEP$version$USEP$installed_at$USEP$update$USEP$latest")
   done
-  rm -rf "$tmp"
 
   if [[ "$json" == true ]]; then
     print_json_rows "${rows[@]}"
