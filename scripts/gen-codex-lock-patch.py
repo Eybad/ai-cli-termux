@@ -30,13 +30,13 @@ import sys
 from pathlib import Path
 
 # ── Inventario esperado de call sites (archivo relativo a codex-rs/, línea 1-based) ──
-# Fuente: escaneo exhaustivo de codex-rs v0.150.1 (19 sitios en 11 archivos).
+# Fuente: escaneo exhaustivo de codex-rs v0.154.0 (19 sitios en 11 archivos).
 # Si el source upstream cambia cualquiera de estos, el generador aborta.
 INVENTORY = [
     ("arg0/src/lib.rs", 385, "lock_file", "try_lock"),
     ("arg0/src/lib.rs", 526, "lock_file", "try_lock"),
     ("arg0/src/lib.rs", 790, "lock_file", "try_lock"),
-    ("app-server-transport/src/transport/unix_socket.rs", 151, "file", "lock"),
+    ("app-server-transport/src/transport/unix_socket.rs", 223, "file", "lock"),
     ("core/src/installation_id.rs", 32, "file", "lock"),
     ("execpolicy/src/amend.rs", 157, "file", "lock"),
     ("message-history/src/lib.rs", 163, "history_file", "try_lock"),
