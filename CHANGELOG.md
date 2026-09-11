@@ -23,6 +23,7 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 - `install.sh`: `curl` con `--retry 3 --retry-delay 2 --retry-all-errors` en descargas y fetches de API/manifest (eran vulnerables a cortes transitorios de red).
 - Mensaje de error de `url_template` sin versión registrada apunta a las instrucciones de `sha256.txt` en lugar del workflow eliminado.
 - `registry/opencode.conf`: nota de cabecera corregida (modo loader glibc, `NEEDS_PATCHELF=false`; decía "patchelf requerido").
+- `registry/opencode.conf`: attestation deshabilitada (`ATTEST_PREDICATE=""`). Los releases los publica el bot `opencode-agent[bot]` con firma dotcom (SAN `dotcom.releases.github.com`), que `gh attestation verify --repo` descarta por exigir identidad de Actions workflow: la verificación siempre daba `fallida`. El fail-closed queda en el digest SHA256 de la GitHub API.
 
 ## [1.3.0] - 2026-08-09
 

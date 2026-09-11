@@ -33,7 +33,7 @@ Instala y audita CLIs de inteligencia artificial — [opencode](https://github.c
 
 | Herramienta | Distribución | Verificación de integridad | Notas |
 |---|---|---|---|
-| **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | SHA256 del asset vía GitHub API + [Attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) (Sigstore) | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
+| **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | SHA256 del asset vía GitHub API | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
 | **`agy`** (Antigravity CLI) | [endpoint de actualización de Google](https://antigravity.google) (Cloud Run, manifest JSON) | SHA512 dinámico del manifest | Parche adaptativo VA39 + `faccessat2`, shim `libc.so`, DNS cgo |
 | **`kiro-cli`** (Kiro CLI) | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 del `manifest.json` oficial | TUI vía runtime bun parcheado; `EXTRA_BINS` |
 | **`codex`** (OpenAI Codex) | [Repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) — **build propio en CI** desde el código oficial (Apache-2.0) | SHA256 del asset vía GitHub API + attestation SLSA del workflow | Binario nativo bionic (arm64, sin proot) o musl verificado (amd64); `EXEC_DIRECT` |
