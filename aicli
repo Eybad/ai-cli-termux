@@ -389,34 +389,22 @@ RESOLVE_CACHE_TTL=300  # segundos
 RESOLVE_CACHE_DIR=""  # se inicializa en resolve_all_latest (mktemp -d)
 
 # Helpers de caché (centralizados para evitar duplicación).
-# Lee la edad de un archivo en segundos (POSIX: ls -l + awk).
-_cache_file_age() {
-  local file="$1"
-  ls -l "$file" 2>/dev/null | awk '{print $6, $7, $8}' | {
-    read -r month day time_or_year
-    # Formato: "Aug 28 12:23" o "Jan  5  2025"
-    local file_ts
-    if printf '%s' "$time_or_year" | grep -q ':'; then
-      # Formato con hora: "Aug 28 12:23" — asumir año actual
-      file_ts=$(date -d "$month $day $time_or_year $(date +%Y)" +%s 2>/dev/null || echo 0)
-    else
-      # Formato con año: "Jan  5  2025"
-      file_ts=$(date -d "$month $day $time_or_year" +%s 2>/dev/null || echo 0)
-    fi
-    local now_ts
-    now_ts=$(date +%s)
-    printf '%s' $(( now_ts - file_ts ))
-  }
-}
-
+# Formato del archivo: línea 1 = epoch de expiración, línea 2 = valor.
+# Sin mtime (sin ls/stat/date -d): solo `date +%s` + awk (dep ya exigida
+# en doctor). Archivos viejos (solo valor, sin expiración) se consideran
+# inválidos y se regeneran solos.
 # Retorna 0 si la caché es válida (existe, no es symlink, y no expiró), 1 si no.
 _cache_is_valid() {
   local cache_file="$1"
   test -f "$cache_file" || return 1
   test -L "$cache_file" && return 1  # symlink → inválido (TOCTOU)
-  local age
-  age=$(_cache_file_age "$cache_file")
-  test "$age" -lt "$RESOLVE_CACHE_TTL"
+  local expiry now_ts
+  expiry=$(awk 'NR==1{print; exit}' "$cache_file" 2>/dev/null) || return 1
+  case "$expiry" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  now_ts=$(date +%s)
+  test "$now_ts" -lt "$expiry"
 }
 
 # Lee el resultado de la caché (solo archivos regulares, no symlinks).
@@ -424,7 +412,7 @@ _cache_get() {
   local cache_file="$1"
   test -f "$cache_file" || return 1
   test -L "$cache_file" && return 1  # symlink → rechazar
-  cat "$cache_file"
+  awk 'NR==2{print; exit}' "$cache_file" 2>/dev/null
 }
 
 # Escribe un resultado a la caché (solo si no es symlink).
@@ -433,18 +421,19 @@ _cache_set() {
   # Si ya existe y es symlink, no pisar (fail-closed).
   test -L "$cache_file" && return 1
   mkdir -p "$(dirname "$cache_file")"
-  printf '%s' "$value" > "$cache_file"
+  local now_ts expiry
+  now_ts=$(date +%s)
+  expiry=$((now_ts + RESOLVE_CACHE_TTL))
+  printf '%s\n%s\n' "$expiry" "$value" > "$cache_file"
 }
 
 # Limpia archivos de caché expirados.
 _cleanup_resolve_cache() {
   test -d "$RESOLVE_CACHE_DIR" || return 0
-  local f age
+  local f
   for f in "$RESOLVE_CACHE_DIR"/*.latest; do
     test -f "$f" || continue
-    test -L "$f" && { rm -f "$f"; continue; }  # symlinks se eliminan
-    age=$(_cache_file_age "$f")
-    if test "$age" -ge "$RESOLVE_CACHE_TTL"; then
+    if test -L "$f" || ! _cache_is_valid "$f"; then
       rm -f "$f"
     fi
   done
@@ -457,9 +446,10 @@ resolve_all_latest() {
   local -n _tools_ref=$1
 
   # Directorio de caché predecible bajo $TMPDIR (privado en Termux, drwx------).
-  # Se reutiliza entre invocaciones para persistir la caché.
+  # Se reutiliza entre invocaciones para persistir la caché. Fallback igual
+  # que install.sh (nunca /tmp directo: no existe en Termux).
   if test -z "$RESOLVE_CACHE_DIR" || ! test -d "$RESOLVE_CACHE_DIR"; then
-    RESOLVE_CACHE_DIR="${TMPDIR:-/tmp}/aicli_resolve"
+    RESOLVE_CACHE_DIR="${TMPDIR:-$PREFIX/tmp}/aicli_resolve"
     mkdir -p "$RESOLVE_CACHE_DIR"
     chmod 700 "$RESOLVE_CACHE_DIR"
   fi
