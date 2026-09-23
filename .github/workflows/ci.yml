@@ -7,7 +7,8 @@ name: CI
 #      ahora automático. El binario se descarga de koalaman/shellcheck (release
 #      oficial) y se verifica contra su checksum SHA-256 (fail-closed).
 #   2. Sintaxis Python de los generadores/parches (gen-codex-lock-patch.py,
-#      gen-ctype-tables.py, patch_va39.py).
+#      gen-ctype-tables.py, patch_va39.py) + tests del generador de locks
+#      (fixtures sintéticos, sin red ni clone upstream).
 #   3. Validación declarativa de registry/*.conf: campos obligatorios,
 #      valores permitidos e invariantes del instalador (EXEC_DIRECT/EXTRA_BINS/
 #      ENTRY_POINT/ALIASES/RELEASE_SOURCE/CHECKSUM_SOURCE). Sin dependencias
@@ -67,6 +68,13 @@ jobs:
           # PYTHONPYCACHEPREFIX: los .pyc van a /tmp, el checkout queda limpio
           python3 -m py_compile -q \
             scripts/gen-codex-lock-patch.py scripts/gen-ctype-tables.py registry/patch_va39.py
+
+      - name: Tests del generador de locks (fixtures sintéticos)
+        env:
+          PYTHONPYCACHEPREFIX: /tmp/pycache
+        run: |
+          set -euo pipefail
+          python3 scripts/test-gen-codex-lock-patch.py
 
       - name: Validar registry/*.conf
         run: |

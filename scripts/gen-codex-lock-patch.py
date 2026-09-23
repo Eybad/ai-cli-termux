@@ -9,15 +9,22 @@
 #   1. Inserta el módulo `file_lock_shim` en el crate root de cada crate con
 #      call sites (delega en std fuera de Android; usa flock(2) directo en
 #      Android, mapeando EWOULDBLOCK a std::fs::TryLockError::WouldBlock).
-#   2. Reemplaza los 21 call sites conocidos por crate::file_lock_shim::{...}(&file),
+#   2. Reemplaza todos los call sites por crate::file_lock_shim::{...}(&recv),
 #      preservando `?`, `match` y `map_err` de cada llamada.
 #      (El prefijo crate:: es obligatorio: desde Rust 1.96 los paths no
 #      calificados hacia módulos del crate root ya no resuelven desde submódulos
 #      anidados — E0433 —; ver docs/adr/0001-release-scheme.md.)
 #   3. Bump de [workspace.package] version → <core>+<build> (--dist-version).
 #
-# Fail-closed: si el source difiere del inventario esperado (sitio faltante o
-# nuevo), aborta con un informe y no deja un árbol a medio parchear.
+# Inventario semántico (sin números de línea): INVENTORY es un multiset por
+# archivo de pares (receiver, método). El generador ubica cada par por
+# contenido y verifica que el multiset escaneado coincida exactamente. Un
+# desplazamiento de líneas en el source upstream NO rompe el inventario; una
+# deriva semántica (par nuevo, par removido, cantidad distinta, archivo nuevo)
+# aborta con el inventario propuesto listo para revisar y pegar.
+#
+# Fail-closed: si el source difiere del inventario esperado, aborta con un
+# informe y no deja un árbol a medio parchear.
 #
 # Uso:
 #   gen-codex-lock-patch.py --src <codex-rs> --dist-version <X.Y.Z+BUILD> [--apply]
@@ -27,51 +34,64 @@
 import argparse
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
-# ── Inventario esperado de call sites (archivo relativo a codex-rs/, línea 1-based) ──
+# ── Inventario esperado de call sites (archivo relativo a codex-rs/) ──
+# Formato: {archivo: {(receiver, método): cantidad}}. Sin números de línea: el
+# generador ubica cada par por contenido y verifica el multiset completo.
 # Fuente: escaneo exhaustivo de codex-rs v0.156.1 (22 sitios en 13 archivos).
-# Si el source upstream cambia cualquiera de estos, el generador aborta.
-INVENTORY = [
-    ("arg0/src/lib.rs", 388, "lock_file", "try_lock"),
-    ("arg0/src/lib.rs", 529, "lock_file", "try_lock"),
-    ("arg0/src/lib.rs", 793, "lock_file", "try_lock"),
-    ("app-server-transport/src/transport/unix_socket.rs", 315, "file", "lock"),
-    ("core/src/installation_id.rs", 32, "file", "lock"),
-    ("execpolicy/src/amend.rs", 157, "file", "lock"),
-    ("login/src/gateway_auth_storage.rs", 33, "file", "try_lock"),
-    ("message-history/src/lib.rs", 163, "history_file", "try_lock"),
-    ("message-history/src/lib.rs", 385, "file", "try_lock_shared"),
-    ("message-history/src/batch.rs", 124, "file", "try_lock_shared"),
-    ("network-proxy/src/certs.rs", 532, "file", "lock_shared"),
-    ("network-proxy/src/certs.rs", 540, "file", "lock"),
-    ("network-proxy/src/certs.rs", 633, "lock_file", "try_lock"),
-    ("rmcp-client/src/oauth/refresh_lock.rs", 72, "file", "try_lock"),
-    ("rmcp-client/src/oauth/store_lock.rs", 127, "file", "try_lock_shared"),
-    ("rmcp-client/src/oauth/store_lock.rs", 128, "file", "try_lock"),
-    ("rollout/src/maintenance.rs", 36, "file", "try_lock"),
-    ("rollout/src/writer_lock.rs", 65, "file", "try_lock"),
-    ("rollout/src/writer_lock.rs", 98, "file", "try_lock"),
-    ("rollout/src/writer_lock.rs", 116, "file", "lock"),
-    ("rollout/src/writer_lock.rs", 149, "file", "try_lock"),
-    ("user-verification/src/lifecycle_lock.rs", 56, "file", "try_lock"),
-]
-
-# Crate root donde se inserta `mod file_shim` por cada archivo con call sites.
-CRATE_ROOTS = {
-    "arg0/src/lib.rs",
-    "app-server-transport/src/lib.rs",
-    "core/src/lib.rs",
-    "execpolicy/src/lib.rs",
-    "login/src/lib.rs",
-    "message-history/src/lib.rs",
-    "network-proxy/src/lib.rs",
-    "rmcp-client/src/lib.rs",
-    "rollout/src/lib.rs",
-    "user-verification/src/lib.rs",
+INVENTORY = {
+    "arg0/src/lib.rs": {("lock_file", "try_lock"): 3},
+    "app-server-transport/src/transport/unix_socket.rs": {("file", "lock"): 1},
+    "core/src/installation_id.rs": {("file", "lock"): 1},
+    "execpolicy/src/amend.rs": {("file", "lock"): 1},
+    "login/src/gateway_auth_storage.rs": {("file", "try_lock"): 1},
+    "message-history/src/batch.rs": {("file", "try_lock_shared"): 1},
+    "message-history/src/lib.rs": {("history_file", "try_lock"): 1, ("file", "try_lock_shared"): 1},
+    "network-proxy/src/certs.rs": {("file", "lock_shared"): 1, ("file", "lock"): 1, ("lock_file", "try_lock"): 1},
+    "rmcp-client/src/oauth/refresh_lock.rs": {("file", "try_lock"): 1},
+    "rmcp-client/src/oauth/store_lock.rs": {("file", "try_lock_shared"): 1, ("file", "try_lock"): 1},
+    "rollout/src/maintenance.rs": {("file", "try_lock"): 1},
+    "rollout/src/writer_lock.rs": {("file", "try_lock"): 3, ("file", "lock"): 1},
+    "user-verification/src/lifecycle_lock.rs": {("file", "try_lock"): 1},
 }
 
 METHODS = ("try_lock", "lock", "lock_shared", "try_lock_shared")
+
+# Receiver: cadena punteada cuyo último identificador contiene "file" (heurística
+# que limita el escaneo a receivers tipo archivo; el compilador es el gate final
+# para receivers que no sean std::fs::File). Exige la llamada completa `()` en
+# una línea: un call site multi-línea no se escanea → verify_inventory aborta
+# ANTES de modificar el árbol (fail-closed, sin árbol a medio parchear).
+SITE_RE = re.compile(r"\b((?:[\w]+\.)*\w*file\w*)\.(try_lock|lock|lock_shared|try_lock_shared)\(")
+
+
+def strip_line_comment(line: str) -> str:
+    """Corta la línea en el primer `//` fuera de un string literal.
+
+    Un comentario trailing (`x = file.lock()?; // file.try_lock()`) no debe
+    contarse como call site ni reescribirse. Los `/* */` en línea propia ya los
+    descarta is_comment; un bloque `/* */` inline no se maneja (upstream usa
+    `//`; un miss aborta fail-closed por conteo).
+    """
+    in_str = False
+    i = 0
+    while i < len(line) - 1:
+        c = line[i]
+        if in_str:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "/" and line[i + 1] == "/":
+                return line[:i]
+        i += 1
+    return line
 
 SHIM = """// ─────────────────────────────────────────────────────────────────────────
 // file_lock_shim: compatibilidad Android para File::{try_,}{lock,lock_shared}
@@ -199,7 +219,6 @@ mod file_lock_shim {
 
 CORE_RE = re.compile(r"^version\s*=\s*\"([0-9]+\.[0-9]+\.[0-9]+(?:\+[0-9A-Za-z._-]+)?)\"\s*$")
 DIST_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\+[0-9A-Za-z._-]+$")
-SITE_RE = re.compile(r"\b\w*file\w*\.(try_lock|lock|lock_shared|try_lock_shared)\(")
 
 
 def is_comment(line: str) -> bool:
@@ -234,7 +253,7 @@ def workspace_version(src: Path) -> str:
 
 
 def scan_sites(src: Path):
-    """Todos los call sites de receiver file-like en el árbol (fuera de comentarios)."""
+    """Todos los call sites (rel, receiver, method) fuera de comentarios."""
     sites = []
     for p in sorted(src.rglob("*.rs")):
         if "target" in p.parts:
@@ -242,48 +261,135 @@ def scan_sites(src: Path):
         for i, line in enumerate(read_lines(p), start=1):
             if is_comment(line):
                 continue
-            for m in SITE_RE.finditer(line):
-                sites.append((str(p.relative_to(src)), i, m.group(0)))
+            # Pre-filtro barato: SITE_RE exige receiver con "file" y método con
+            # "lock"; sin ambos substrings la línea no puede matchear (evita el
+            # regex sobre miles de líneas irrelevantes).
+            if "file" not in line or "lock" not in line:
+                continue
+            for m in SITE_RE.finditer(strip_line_comment(line)):
+                sites.append((str(p.relative_to(src)), m.group(1), m.group(2)))
     return sites
 
 
+def site_multiset(sites):
+    """Multiset por archivo de (receiver, method)."""
+    per_file = {}
+    for rel, recv, method in sites:
+        per_file.setdefault(rel, Counter())[(recv, method)] += 1
+    return per_file
+
+
 def verify_inventory(src: Path):
-    """Cada sitio esperado debe estar presente textualmente en su línea exacta."""
-    missing = []
-    for rel, lineno, recv, method in INVENTORY:
-        p = src / rel
-        if not p.is_file():
-            missing.append(f"{rel}: archivo faltante")
+    """Compara el multiset escaneado contra INVENTORY; devuelve (problemas, escaneado)."""
+    scanned = site_multiset(scan_sites(src))
+    problems = []
+    for rel, pairs in INVENTORY.items():
+        got = scanned.get(rel)
+        if got is None:
+            problems.append(f"{rel}: archivo sin call sites (esperado {dict(pairs)})")
             continue
-        lines = read_lines(p)
-        if lineno > len(lines):
-            missing.append(f"{rel}:{lineno}: archivo más corto que el inventario")
-            continue
-        needle = f"{recv}.{method}()"
-        if needle not in lines[lineno - 1]:
-            missing.append(f"{rel}:{lineno}: no contiene '{needle}'")
-    return missing
+        for key, expected in pairs.items():
+            actual = got.get(key, 0)
+            if actual != expected:
+                problems.append(
+                    f"{rel}: {key[0]}.{key[1]}() esperado {expected}, obtenido {actual}"
+                )
+    for rel, pairs in scanned.items():
+        expected = INVENTORY.get(rel)
+        if expected is None:
+            problems.append(f"{rel}: call sites nuevos no contemplados ({dict(pairs)})")
+        else:
+            for key, count in pairs.items():
+                if key not in expected:
+                    problems.append(f"{rel}: par nuevo ({key[0]}, {key[1]}) ×{count}")
+    return problems, scanned
 
 
-def apply_replacements(src: Path):
-    """Reemplaza cada call site en su línea exacta (fail-closed si algo difiere)."""
-    for rel, lineno, recv, method in INVENTORY:
+def proposed_inventory(scanned) -> str:
+    """Inventario propuesto como literal Python (revisar y pegar en INVENTORY)."""
+    lines = ["INVENTORY = {"]
+    for rel in sorted(scanned):
+        pairs = ", ".join(
+            f'("{r}", "{m}"): {c}' for (r, m), c in sorted(scanned[rel].items())
+        )
+        lines.append(f'    "{rel}": {{{pairs}}},')
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def derive_crate_roots(src: Path, site_files):
+    """Crate root de cada archivo con call sites: sube hasta src/lib.rs o src/main.rs."""
+    roots = set()
+    for rel in site_files:
+        d = (src / rel).parent
+        while True:
+            found = None
+            for root_name in ("lib.rs", "main.rs"):
+                if (d / root_name).is_file():
+                    found = f"{d.relative_to(src)}/{root_name}"
+                    break
+            if found:
+                roots.add(found)
+                break
+            if d == src:
+                raise SystemExit(f"ERROR: crate root no encontrado para {rel}")
+            d = d.parent
+    return roots
+
+
+def apply_replacements(src: Path, sites):
+    """Reemplaza todas las ocurrencias de cada par (receiver, method) por el shim.
+
+    Alternación longest-first con \b: evita que un receiver corto (file)
+    corrompa uno largo (lock_file, self.file) por substring. El patrón consume
+    la llamada completa `recv.method()` (ambos paréntesis) y el reemplazo
+    produce `crate::file_lock_shim::method(&recv)`: el `?`/`match`/`map_err`
+    que sigue a la llamada queda intacto.
+    """
+    by_file = {}
+    for rel, recv, method in sites:
+        by_file.setdefault(rel, []).append((recv, method))
+    for rel, pairs in by_file.items():
         p = src / rel
         lines = read_lines(p)
-        needle = f"{recv}.{method}()"
-        replacement = f"crate::file_lock_shim::{method}(&{recv})"
-        line = lines[lineno - 1]
-        if line.count(needle) != 1:
+        ordered = sorted(set(pairs), key=lambda r: len(r[0]), reverse=True)
+        alts = []
+        for i, (recv, method) in enumerate(ordered):
+            alts.append(f"(?P<r{i}>{re.escape(recv)})\\.(?P<m{i}>{method})\\(\\)")
+        pattern = re.compile(r"\b(?:" + "|".join(alts) + ")")
+
+        def repl(m):
+            for i, (recv, method) in enumerate(ordered):
+                if m.group(f"r{i}") is not None:
+                    return f"crate::file_lock_shim::{method}(&{recv})"
+            raise AssertionError("alternación sin match")  # inalcanzable
+
+        total = 0
+        for i, line in enumerate(lines):
+            if is_comment(line):
+                continue
+            if "file" not in line or "lock" not in line:
+                continue
+            prefix = strip_line_comment(line)
+            if prefix == line:
+                new_line, n = pattern.subn(repl, line)
+            else:
+                # Comentario trailing: reemplazar solo en el prefijo real.
+                new_line, n = pattern.subn(repl, prefix)
+                new_line += line[len(prefix):]
+            if n:
+                lines[i] = new_line
+                total += n
+        expected = sum(c for _, c in Counter(pairs).items())
+        if total != expected:
             raise SystemExit(
-                f"ERROR: {rel}:{lineno}: '{needle}' aparece {line.count(needle)} veces "
-                f"(esperado 1); el inventario no coincide con el source"
+                f"ERROR: {rel}: se reemplazaron {total} call sites, esperado {expected}"
             )
-        lines[lineno - 1] = line.replace(needle, replacement)
         write_lines(p, lines)
 
 
-def insert_shim(src: Path):
-    for root in sorted(CRATE_ROOTS):
+def insert_shim(src: Path, roots):
+    for root in sorted(roots):
         p = src / root
         if not p.is_file():
             raise SystemExit(f"ERROR: crate root faltante: {root}")
@@ -317,14 +423,32 @@ def bump_version(src: Path, dist_version: str):
     write_lines(cargo, lines)
 
 
-def main():
+def has_shim(src: Path) -> bool:
+    """¿Algún .rs del árbol contiene el shim? (gate de idempotencia)."""
+    for p in src.rglob("*.rs"):
+        if "target" in p.parts:
+            continue
+        if "mod file_lock_shim" in p.read_text(encoding="utf-8"):
+            return True
+    return False
+
+
+def report_drift(problems, scanned):
+    print("ERROR: el source no coincide con el inventario esperado:", file=sys.stderr)
+    for pr in problems:
+        print(f"  - {pr}", file=sys.stderr)
+    print("\nInventario propuesto (revisar y pegar en INVENTORY):", file=sys.stderr)
+    print(proposed_inventory(scanned), file=sys.stderr)
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Generador del parche de locks de archivo para Android (File::lock* en codex)"
     )
     ap.add_argument("--src", required=True, help="directorio raíz de codex-rs (contiene Cargo.toml)")
     ap.add_argument("--dist-version", required=True, help="versión del dist, ej: 0.146.0+android1")
     ap.add_argument("--apply", action="store_true", help="modificar el source (default: solo verificar)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     src = Path(args.src).resolve()
     if not (src / "Cargo.toml").is_file():
@@ -345,17 +469,20 @@ def main():
             f"Cargo.toml del workspace"
         )
 
-    # Estado ya-parcheado (idempotencia): shim en todos los crate roots + versión con build.
-    already = (
-        all(Path(src / r).is_file() and "mod file_lock_shim" in (Path(src / r).read_text(encoding="utf-8"))
-            for r in CRATE_ROOTS)
-        and "+" in full_version
-    )
+    sites = scan_sites(src)
+    # Estado ya-parcheado (idempotencia): versión con +build, sin call sites
+    # activos y con el shim presente en el árbol (gate equivalente al del
+    # generador anterior: shim en todos los crate roots).
+    already = ("+" in full_version) and not sites and has_shim(src)
 
     if not args.apply:
         if already:
             print(f"OK: source ya parcheado (versión {full_version})")
             return 0
+        problems, scanned = verify_inventory(src)
+        if problems:
+            report_drift(problems, scanned)
+            return 1
         print(f"INFO: source sin parchear (versión {core})")
         return 1
 
@@ -363,42 +490,30 @@ def main():
         print(f"OK: source ya parcheado (versión {full_version}); nada que hacer")
         return 0
 
-    missing = verify_inventory(src)
-    if missing:
-        print("ERROR: el source no coincide con el inventario esperado:", file=sys.stderr)
-        for m in missing:
-            print(f"  - {m}", file=sys.stderr)
+    problems, scanned = verify_inventory(src)
+    if problems:
+        report_drift(problems, scanned)
         raise SystemExit(1)
 
-    new_sites = scan_sites(src)
-    known = {(rel, line) for rel, line, _, _ in INVENTORY}
-    unknown = [s for s in new_sites if (s[0], s[1]) not in known]
-    if unknown:
-        print("ERROR: call sites nuevos no contemplados en el inventario (fail-closed):",
-              file=sys.stderr)
-        for rel, line, text in unknown:
-            print(f"  - {rel}:{line}: {text}", file=sys.stderr)
-        print("Actualizá INVENTORY/CRATE_ROOTS del generador tras revisarlos.", file=sys.stderr)
-        raise SystemExit(1)
-
-    insert_shim(src)
-    apply_replacements(src)
+    roots = derive_crate_roots(src, [s[0] for s in sites])
+    insert_shim(src, roots)
+    apply_replacements(src, sites)
     bump_version(src, args.dist_version)
 
     # Post-checks (fail-closed: si algo quedó sin parchear, abortar).
     remaining = scan_sites(src)
     if remaining:
         print("ERROR: post-check fallido, quedan call sites activos:", file=sys.stderr)
-        for rel, line, text in remaining:
-            print(f"  - {rel}:{line}: {text}", file=sys.stderr)
+        for rel, recv, method in remaining:
+            print(f"  - {rel}: {recv}.{method}()", file=sys.stderr)
         raise SystemExit(1)
     if workspace_version(src) != args.dist_version:
         raise SystemExit(f"ERROR: post-check: versión no bumpada a {args.dist_version}")
-    for root in sorted(CRATE_ROOTS):
+    for root in sorted(roots):
         if "mod file_lock_shim" not in (src / root).read_text(encoding="utf-8"):
             raise SystemExit(f"ERROR: post-check: shim ausente en {root}")
 
-    print(f"OK: parche aplicado — {len(INVENTORY)} call sites → crate::file_lock_shim, versión {args.dist_version}")
+    print(f"OK: parche aplicado — {len(sites)} call sites → crate::file_lock_shim, versión {args.dist_version}")
     return 0
 
 

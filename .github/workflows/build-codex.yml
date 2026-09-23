@@ -255,19 +255,25 @@ jobs:
           # (codex-rs/code-mode-runtime/Cargo.toml → v8_enable_sandbox implica
           # v8_enable_pointer_compression): el build.rs de v8 exige el par
           # prebuilt+binding "ptrcomp_sandbox_release_aarch64-linux-android", que
-          # denoland NO publica. OpenAI los publica en su release rusty-v8-v150.4.0
-          # (compilados con bazel, mismo v8 150.4.0, mismo canal que distribuye
-          # los binarios oficiales del code tool). Versión pineada al crate v8
-          # del Cargo.lock upstream (0.147.0 → 150.4.0).
-          V8_BASE="https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0"
+          # denoland NO publica. OpenAI los publica en su release rusty-v8-v<VER>
+          # (compilados con bazel, mismo v8, mismo canal que distribuye los
+          # binarios oficiales del code tool). La versión se deriva del crate v8
+          # del Cargo.lock upstream (sin pin manual: un bump de v8 en el lock
+          # resuelve solo; si el release rusty-v8-v<VER> no existe, el digest
+          # falla fail-closed).
+          V8_VER=$(awk '/^name = "v8"$/{f=1;next} f&&/^version = /{gsub(/"/,"",$3);print $3;exit}' upstream/codex-rs/Cargo.lock)
+          [[ "$V8_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "ERROR: versión de v8 inválida en Cargo.lock: '$V8_VER'"; exit 1; }
+          V8_TAG="rusty-v8-v${V8_VER}"
+          V8_BASE="https://github.com/openai/codex/releases/download/${V8_TAG}"
+          echo "rusty_v8 derivado del Cargo.lock: ${V8_VER}"
           for NAME in \
             librusty_v8_ptrcomp_sandbox_release_aarch64-unknown-linux-gnu.a.gz \
             src_binding_ptrcomp_sandbox_release_aarch64-unknown-linux-gnu.rs
           do
             # Digest del asset desde la API del release (patrón fail-closed del job amd64).
-            EXPECTED=$(gh api repos/openai/codex/releases/tags/rusty-v8-v150.4.0 \
+            EXPECTED=$(gh api repos/openai/codex/releases/tags/${V8_TAG} \
               --jq ".assets[] | select(.name == \"$NAME\") | .digest" | sed 's/^sha256://')
-            [[ -n "$EXPECTED" ]] || { echo "ERROR: digest no resuelto para $NAME"; exit 1; }
+            [[ -n "$EXPECTED" ]] || { echo "ERROR: digest no resuelto para $NAME (release ${V8_TAG})"; exit 1; }
             curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/$NAME" "$V8_BASE/$NAME"
             GOT=$(sha256sum "$RUNNER_TEMP/$NAME" | cut -d' ' -f1)
             if [[ "$GOT" != "$EXPECTED" ]]; then
