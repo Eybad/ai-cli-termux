@@ -30,15 +30,16 @@ import sys
 from pathlib import Path
 
 # ── Inventario esperado de call sites (archivo relativo a codex-rs/, línea 1-based) ──
-# Fuente: escaneo exhaustivo de codex-rs v0.155.0 (21 sitios en 12 archivos).
+# Fuente: escaneo exhaustivo de codex-rs v0.156.1 (22 sitios en 13 archivos).
 # Si el source upstream cambia cualquiera de estos, el generador aborta.
 INVENTORY = [
-    ("arg0/src/lib.rs", 385, "lock_file", "try_lock"),
-    ("arg0/src/lib.rs", 526, "lock_file", "try_lock"),
-    ("arg0/src/lib.rs", 790, "lock_file", "try_lock"),
-    ("app-server-transport/src/transport/unix_socket.rs", 223, "file", "lock"),
+    ("arg0/src/lib.rs", 388, "lock_file", "try_lock"),
+    ("arg0/src/lib.rs", 529, "lock_file", "try_lock"),
+    ("arg0/src/lib.rs", 793, "lock_file", "try_lock"),
+    ("app-server-transport/src/transport/unix_socket.rs", 315, "file", "lock"),
     ("core/src/installation_id.rs", 32, "file", "lock"),
     ("execpolicy/src/amend.rs", 157, "file", "lock"),
+    ("login/src/gateway_auth_storage.rs", 33, "file", "try_lock"),
     ("message-history/src/lib.rs", 163, "history_file", "try_lock"),
     ("message-history/src/lib.rs", 385, "file", "try_lock_shared"),
     ("message-history/src/batch.rs", 124, "file", "try_lock_shared"),
@@ -62,6 +63,7 @@ CRATE_ROOTS = {
     "app-server-transport/src/lib.rs",
     "core/src/lib.rs",
     "execpolicy/src/lib.rs",
+    "login/src/lib.rs",
     "message-history/src/lib.rs",
     "network-proxy/src/lib.rs",
     "rmcp-client/src/lib.rs",
