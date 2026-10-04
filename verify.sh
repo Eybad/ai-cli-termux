@@ -312,6 +312,23 @@ else
   fail "Wrapper no encontrado o no ejecutable: $WRAPPER"
 fi
 
+# ── 8.0. Args por defecto (WRAPPER_DEFAULT_ARGS del .conf) ──────────────────
+# Si el .conf define defaults, el wrapper debe contenerlos: un wrapper de una
+# instalación previa al knob los omite. Solo WARN, el CLI sigue andando.
+if [[ -n "${WRAPPER_DEFAULT_ARGS:-}" && -x "$WRAPPER" ]]; then
+  _default_toks=()
+  read -ra _default_toks <<< "$WRAPPER_DEFAULT_ARGS" || true
+  _i=0
+  for (( _i=0; _i<${#_default_toks[@]}; _i++ )); do
+    if ! grep -qF -- "${_default_toks[_i]}" "$WRAPPER"; then
+      warn "El wrapper no trae los args por defecto ($WRAPPER_DEFAULT_ARGS)"
+      note "Reinstalá con: bash install.sh $APP_NAME -r"
+      break
+    fi
+  done
+  unset _default_toks _i
+fi
+
 # ── 8.1. Aliases (ALIASES del .conf/manifest) ─────────────────────────────────
 # El manifest es la fuente de verdad instalada; fallback al .conf (mismo
 # patrón que extra_bins, sección 5.2). Sin aliases → se omite: la mayoría de

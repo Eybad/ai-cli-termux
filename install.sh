@@ -189,6 +189,12 @@ ALIASES=""
 # Subcomandos denegados en el wrapper (ej: WRAPPER_DENY_ARGS="update" en codex).
 # Default vacío: el bloque de denegación no se genera.
 WRAPPER_DENY_ARGS=""
+# Args por defecto del wrapper (ej: WRAPPER_DEFAULT_ARGS="--disable daemon_auto_start"
+# en codex). Se insertan entre el binario y los args del usuario, así el usuario
+# puede overridearlos repitiendo el flag después. Solo tokens seguros de una
+# palabra (sin espacios, comillas ni metacaracteres de shell); fail-closed si el
+# .conf es inválido. Default vacío: el exec queda `"$@"` pelado.
+WRAPPER_DEFAULT_ARGS=""
 
 # shellcheck source=/dev/null
 source "$CONF"
@@ -1187,9 +1193,28 @@ _write_wrapper() {
   # Ejecución: el binario patcheado (o el entry point del bundle si el .conf
   # define ENTRY_POINT — create_wrapper pasa el target a ejecutar). En el modo
   # loader (sin patchelf) el exec va vía loader glibc con --library-path.
-  local exec_cmd="exec \"\$EXEC_TARGET\" \"\$@\""
+  # WRAPPER_DEFAULT_ARGS (tokens validados abajo) se insertan entre el binario
+  # y los args del usuario: el usuario puede overridearlos repitiendo el flag.
+  local default_args="" tok
+  if [[ -n "$WRAPPER_DEFAULT_ARGS" ]]; then
+    # read -ra: el split por IFS no expande globs (un `*` en el .conf no debe
+    # listar archivos del cwd antes de validar).
+    local -a default_toks=()
+    read -ra default_toks <<< "$WRAPPER_DEFAULT_ARGS" || true
+    local i
+    for (( i=0; i<${#default_toks[@]}; i++ )); do
+      tok="${default_toks[i]}"
+      [[ "$tok" =~ ^(--?)?[a-zA-Z0-9_][a-zA-Z0-9_.,=+-]*$ ]] || {
+        err "WRAPPER_DEFAULT_ARGS inválido en $CONF: '$tok' (solo tokens [a-zA-Z0-9_.,=+-] con '-'/'--' inicial opcional, sin espacios ni metacaracteres)."
+        exit 1
+      }
+      default_args+=" $tok"
+    done
+    unset default_toks
+  fi
+  local exec_cmd="exec \"\$EXEC_TARGET\"${default_args} \"\$@\""
   if [[ "$NEEDS_PATCHELF" == false && "$EXEC_DIRECT" != true ]]; then
-    exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$EXEC_TARGET\" \"\$@\""
+    exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$EXEC_TARGET\"${default_args} \"\$@\""
   fi
 
   # Subcomandos denegados por configuración (WRAPPER_DENY_ARGS del .conf):
