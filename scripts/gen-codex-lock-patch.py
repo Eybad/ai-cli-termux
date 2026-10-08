@@ -40,7 +40,7 @@ from pathlib import Path
 # ── Inventario esperado de call sites (archivo relativo a codex-rs/) ──
 # Formato: {archivo: {(receiver, método): cantidad}}. Sin números de línea: el
 # generador ubica cada par por contenido y verifica el multiset completo.
-# Fuente: escaneo exhaustivo de codex-rs v0.156.1 (22 sitios en 13 archivos).
+# Fuente: escaneo exhaustivo de codex-rs v0.161.0 (23 sitios en 14 archivos).
 INVENTORY = {
     "arg0/src/lib.rs": {("lock_file", "try_lock"): 3},
     "app-server-transport/src/transport/unix_socket.rs": {("file", "lock"): 1},
@@ -55,6 +55,7 @@ INVENTORY = {
     "rollout/src/maintenance.rs": {("file", "try_lock"): 1},
     "rollout/src/writer_lock.rs": {("file", "try_lock"): 3, ("file", "lock"): 1},
     "user-verification/src/lifecycle_lock.rs": {("file", "try_lock"): 1},
+    "windows-sandbox-rs/tests/support/src/lib.rs": {("file", "lock"): 1},
 }
 
 METHODS = ("try_lock", "lock", "lock_shared", "try_lock_shared")
