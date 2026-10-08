@@ -25,7 +25,7 @@ Instala y audita CLIs de inteligencia artificial — [opencode](https://github.c
 - **Framework modular** — cada CLI vive en un `registry/*.conf`: variables, entorno, parches y hooks. Todo lo específico de una herramienta está en su registro.
 - **Última versión automática** — versión y checksum se resuelven solos desde la GitHub API, el manifest de Google o el manifest del CDN de Amazon.
 - **Fail-closed** — sin checksum verificado no se instala. `sha256.txt` es la fuente obligatoria para tools `hashfile` (CDN sin manifest) y pinning opcional para el resto.
-- **Parches adaptativos** — agy se auto-parchea (syscall `faccessat2` + TCMalloc VA48→VA39 si aplica) con smoke test posterior. `--update` funciona sin mantenimiento manual entre versiones.
+- **Binario nativo** — agy usa el build Android oficial de Google (bionic, `EXEC_DIRECT`): instalación directa sin parches ni mantenimiento manual entre versiones.
 - **Build en CI** — codex se compila en GitHub Actions desde el código oficial (bionic arm64 para Android, musl verificado para amd64) y se publica con digest y attestation en un repo de distribución dedicado.
 - **Auditable** — `verify.sh` audita la instalación en 10 pasos y detecta adulteración posterior al chequeo de hashes registrados en `manifest.txt`.
 
@@ -34,7 +34,7 @@ Instala y audita CLIs de inteligencia artificial — [opencode](https://github.c
 | Herramienta | Distribución | Verificación de integridad | Notas |
 |---|---|---|---|
 | **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | SHA256 del asset vía GitHub API | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
-| **`agy`** (Antigravity CLI) | [endpoint de actualización de Google](https://antigravity.google) (Cloud Run, manifest JSON) | SHA512 dinámico del manifest | Parche adaptativo VA39 + `faccessat2`, shim `libc.so`, DNS cgo |
+| **`agy`** (Antigravity CLI) | [endpoint de actualización de Google](https://antigravity.google) (Cloud Run, manifest JSON) | SHA512 dinámico del manifest | Binario nativo bionic en Android (manifest `android_arm64`, `EXEC_DIRECT`) |
 | **`kiro-cli`** (Kiro CLI) | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 del `manifest.json` oficial | TUI vía runtime bun parcheado; `EXTRA_BINS` |
 | **`codex`** (OpenAI Codex) | [Repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) — **build propio en CI** desde el código oficial (Apache-2.0) | SHA256 del asset vía GitHub API + attestation SLSA del workflow | Binario nativo bionic (arm64, sin proot) o musl verificado (amd64); `EXEC_DIRECT` |
 | **`cursor-agent`** (Cursor Agent CLI) | [CDN propio](https://downloads.cursor.com/lab/...) (`url_template`, sin endpoint "latest" público) | SHA256 del tarball pineado a mano en `sha256.txt` | Bundle node embebido patcheado, alias `agent`, `agent update` bloqueado |
@@ -50,7 +50,6 @@ Instala y audita CLIs de inteligencia artificial — [opencode](https://github.c
   pkg install git curl tar coreutils gawk jq ca-certificates -y
   ```
 
-  - `python3`: solo para **agy** (parche de compatibilidad Android).
   - Opcionales: `gh` (attestation de codex), `bash-completion` (completions), `unzip` (fix del TUI de kiro-cli), `ripgrep` (code tool de codex).
 
 - **Almacenamiento**: ~400 MB por herramienta (kiro-cli: ~1 GB; codex: ~1.3 GB).
@@ -127,7 +126,7 @@ aicli install cursor-agent -v 2026.07.23-e383d2b  # ejemplo: versión pineada (v
 
 **opencode** — digest SHA256 verificado contra la GitHub API (el pin de `sha256.txt` gana si existe).
 
-**agy** — el hook de instalación aplica el parche adaptativo (VA39 + `faccessat2`, ver [Soluciones técnicas de Android](#soluciones-técnicas-de-android)) y ejecuta un smoke test (`--version`) post-parche: si algo no se puede resolver, la instalación aborta y se restaura la versión anterior.
+**agy** — build Android oficial de Google (bionic nativo, `EXEC_DIRECT`): instalación directa sin parches; `verify_install` confirma `--version` y `verify.sh` audita el hash post-instalación.
 
 **kiro-cli** — el TUI delega el render en un runtime bun que el cliente descarga a `~/.local/share/kiro-cli/`; el build descargado es glibc y no corre en Termux. Ver [TUI en Termux: fix del runtime bun](#tui-en-termux-fix-del-runtime-bun).
 
@@ -250,20 +249,12 @@ Los parches puntuales que resuelven cada incompatibilidad de Android están deta
 
 ## Soluciones técnicas de Android
 
-### 1. Parche de kernel VA39 + syscall `faccessat2` (agy)
+### 1. Build nativo Android (agy)
 
-Los binarios de Google se compilan para Linux servidor y traen dos incompatibilidades con Android:
+Google publica un build específico para Android (`cli_android_arm64.tar.gz`, ELF bionic con interpreter `/system/bin/linker64`), distinto del build Linux servidor. `registry/agy.conf` lo consume vía `MANIFEST_URL_AARCH64` con `EXEC_DIRECT=true`: ejecución directa sin overlay glibc, sin `patchelf`, sin parches binarios y sin `python3`. En `x86_64` (host Linux) se usa el manifest linux como fallback. El ruteo por arquitectura es genérico en `install.sh` (cualquier tool con manifests por OS puede reusarlo).
 
-- La política seccomp bloquea `faccessat2` (syscall 439, usada por Go en `os/exec.LookPath`) → `SIGSYS` garantizado en **todas** las versiones (probado en 1.1.8 y 1.1.9).
-- Algunas versiones (ej. 1.1.8) usan TCMalloc compilado para **VA48**; Android expone solo 39 bits → crash `MmapAligned() failed` (corregido por Google desde 1.1.9).
-
-> [!IMPORTANT]
-> `ai-cli-termux` integra un script auditable de hex-patching local (`registry/patch_va39.py`), ejecutado automáticamente durante el `pre_wrapper_hook`:
-> - **Fase A (siempre)**: reescribe `faccessat2` (nr 439) → `faccessat` (nr 48) en todos los sitios del binario.
-> - **Fase B (adaptativa)**: solo si el binario muestra firmas fuertes de TCMalloc VA48 (tags `2<<42`, máscara random de mmap), reescribe las instrucciones ARM64 (bit 42→35) y el límite de `MmapAligned` (`1<<48`→`1<<39`), limitado a segmentos ejecutables para no corromper datos.
-> - **Fail-closed**: si hay firmas de problemas que el parche no puede resolver, la instalación aborta y se restaura la versión anterior. Resultado: `--update` funciona automáticamente entre versiones de agy, sin mantenimiento manual.
-
-Análisis técnico original: [google-antigravity/antigravity-cli#64](https://github.com/google-antigravity/antigravity-cli/issues/64).
+> [!NOTE]
+> Hasta la versión 1.2.x agy se instalaba desde el build Linux con un hex-patch adaptativo local (`faccessat2`→`faccessat` + TCMalloc VA48→VA39). El build oficial Android lo volvió innecesario y el parche se eliminó. Detalle histórico: [google-antigravity/antigravity-cli#64](https://github.com/google-antigravity/antigravity-cli/issues/64).
 
 ### 2. Resolución DNS y TLS en binarios Go
 
@@ -279,7 +270,7 @@ En la glibc de Termux, `/usr/glibc/lib/libc.so` es un script ASCII del linker, n
 
 ## Integridad (doble capa de hashes)
 
-Como `patchelf` y `patch_va39.py` modifican el binario durante la instalación, el sistema registra dos checksums:
+Como `patchelf` modifica el binario durante la instalación, el sistema registra dos checksums:
 
 1. **Tarball**: verificado al descargar (digest del vendor, pin de `sha256.txt` o `--sha256`) — sin hash verificado no se instala.
 2. **Binario instalado**: hash recalculado tras los parches y guardado en `manifest.txt`; `verify.sh` lo compara en cada auditoría para detectar adulteración posterior.
@@ -289,13 +280,13 @@ Como `patchelf` y `patch_va39.py` modifican el binario durante la instalación, 
 1. Crear `registry/<tool>.conf` con los campos obligatorios: `APP_NAME`, `DISPLAY_NAME`, `RELEASE_SOURCE`, `CHECKSUM_ALGO`, `CHECKSUM_SOURCE`, `ELF_NAME`.
 2. Si `CHECKSUM_SOURCE=hashfile`, agregar la entrada correspondiente en `sha256.txt`.
 3. Si la CLI delega el TUI a binarios compañeros del mismo bundle (ej: `kiro-cli` → `kiro-cli-chat`), listarlos en `EXTRA_BINS`: se patchean igual que el binario principal y reciben wrapper propio en `$PREFIX/bin`.
-4. Si la CLI necesita entorno o parches, implementar `pre_wrapper_hook` o `post_install_hook` (ver `registry/agy.conf`).
+4. Si la CLI necesita entorno o parches, implementar `pre_wrapper_hook` o `post_install_hook` (ver `registry/codex.conf`).
 5. Usar `registry/opencode.conf`, `registry/agy.conf` y `registry/kiro-cli.conf` como ejemplos canónicos.
 
 | `RELEASE_SOURCE` | Requiere | Checksum |
 |---|---|---|
 | `github` | `REPO`, `ARCHIVE_TEMPLATE` | `release_digest` (SHA256 del asset vía GitHub API) o `hashfile` |
-| `manifest_json` | `MANIFEST_URL`, `MANIFEST_KEY_*` | `manifest` (agy: Google; kiro-cli: Amazon) |
+| `manifest_json` | `MANIFEST_URL`, `MANIFEST_KEY_*` (+ `MANIFEST_URL_AARCH64`/`_X86_64` opcionales por OS) | `manifest` (agy: Google; kiro-cli: Amazon) |
 | `url_template` | `DOWNLOAD_URL_TEMPLATE` | `hashfile` (disponible para CDNs sin manifest) |
 
 | `CHECKSUM_SOURCE` | Descripción | Fail-closed |
@@ -324,7 +315,6 @@ ai-cli-termux/
 │   ├── codex.conf
 │   ├── cursor-agent.conf
 │   ├── lib/shims.sh             # Helpers compartidos de hooks (shims, etc.)
-│   └── patch_va39.py            # Parche adaptativo ARM64 (VA39 + faccessat2)
 ├── scripts/
 │   ├── gen-codex-lock-patch.py  # Generador fail-closed del parche de locks (CI)
 │   ├── test-gen-codex-lock-patch.py  # Tests del generador (fixtures sintéticos, CI)

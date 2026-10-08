@@ -6,8 +6,8 @@ name: CI
 #      registry/lib/*.sh — el mismo lint que AGENTS.md exige antes de commit,
 #      ahora automático. El binario se descarga de koalaman/shellcheck (release
 #      oficial) y se verifica contra su checksum SHA-256 (fail-closed).
-#   2. Sintaxis Python de los generadores/parches (gen-codex-lock-patch.py,
-#      gen-ctype-tables.py, patch_va39.py) + tests del generador de locks
+#   2. Sintaxis Python de los generadores (gen-codex-lock-patch.py,
+#      gen-ctype-tables.py) + tests del generador de locks
 #      (fixtures sintéticos, sin red ni clone upstream).
 #   3. Validación declarativa de registry/*.conf: campos obligatorios,
 #      valores permitidos e invariantes del instalador (EXEC_DIRECT/EXTRA_BINS/
@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
           # PYTHONPYCACHEPREFIX: los .pyc van a /tmp, el checkout queda limpio
           python3 -m py_compile -q \
-            scripts/gen-codex-lock-patch.py scripts/gen-ctype-tables.py registry/patch_va39.py
+            scripts/gen-codex-lock-patch.py scripts/gen-ctype-tables.py
 
       - name: Tests del generador de locks (fixtures sintéticos)
         env:
@@ -151,7 +151,7 @@ jobs:
                 [[ -n "$(get ARCHIVE_TEMPLATE)" ]] || { echo "::error file=$conf::RELEASE_SOURCE=github requiere ARCHIVE_TEMPLATE"; fail=1; }
                 ;;
               manifest_json)
-                [[ -n "$(get MANIFEST_URL)" ]] || { echo "::error file=$conf::RELEASE_SOURCE=manifest_json requiere MANIFEST_URL"; fail=1; }
+                [[ -n "$(get MANIFEST_URL)$(get MANIFEST_URL_AARCH64)$(get MANIFEST_URL_X86_64)" ]] || { echo "::error file=$conf::RELEASE_SOURCE=manifest_json requiere MANIFEST_URL (o MANIFEST_URL_AARCH64/_X86_64)"; fail=1; }
                 ;;
               url_template)
                 [[ -n "$(get DOWNLOAD_URL_TEMPLATE)" ]] || { echo "::error file=$conf::RELEASE_SOURCE=url_template requiere DOWNLOAD_URL_TEMPLATE"; fail=1; }

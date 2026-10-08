@@ -156,6 +156,11 @@ fi
 # Variables con defaults seguros antes de cargar el .conf
 APP_NAME=""; DISPLAY_NAME=""; REPO=""
 RELEASE_SOURCE=""; ARCHIVE_TEMPLATE=""; MANIFEST_URL=""
+# Overrides opcionales del manifest por arquitectura (uname -m): si hay valor
+# para la arquitectura actual, se usa en vez de MANIFEST_URL. Permite que un
+# tool publique manifests distintos por OS (ej: agy → android en aarch64,
+# linux en x86_64) sin condicionales por tool en el instalador.
+MANIFEST_URL_AARCH64=""; MANIFEST_URL_X86_64=""
 MANIFEST_KEY_VERSION="version"; MANIFEST_KEY_URL="url"; MANIFEST_KEY_CHECKSUM="sha512"
 CHECKSUM_ALGO="sha256"; CHECKSUM_SOURCE="hashfile"
 ATTEST_PREDICATE=""; ATTEST_REPO=""; ELF_NAME=""; NEEDS_PATCHELF=true
@@ -307,8 +312,8 @@ case "$RELEASE_SOURCE" in
       err "$CONF: RELEASE_SOURCE=github requiere REPO y ARCHIVE_TEMPLATE."; exit 1; }
     ;;
   manifest_json)
-    [[ -n "$MANIFEST_URL" ]] || {
-      err "$CONF: RELEASE_SOURCE=manifest_json requiere MANIFEST_URL."; exit 1; }
+    [[ -n "$MANIFEST_URL$MANIFEST_URL_AARCH64$MANIFEST_URL_X86_64" ]] || {
+      err "$CONF: RELEASE_SOURCE=manifest_json requiere MANIFEST_URL (o MANIFEST_URL_AARCH64/_X86_64)."; exit 1; }
     ;;
   url_template)
     [[ -n "$DOWNLOAD_URL_TEMPLATE" ]] || {
@@ -754,8 +759,20 @@ resolve_version() {
       # La versión la provee el manifest remoto (Google, CDN de Amazon, ...).
       # Si se pasó -v, se usa solo para verificación post-descarga.
       # Las claves MANIFEST_KEY_* pueden ser filtros jq con {ARCH} expandible.
+      # La URL efectiva admite overrides por arquitectura (MANIFEST_URL_AARCH64 /
+      # MANIFEST_URL_X86_64): si hay valor para la actual, gana al MANIFEST_URL
+      # genérico. Mismo criterio que ARCH_OVERRIDE_* (uname -m, no ARCH).
+      local manifest_url="$MANIFEST_URL"
+      case "$(uname -m)" in
+        aarch64) [[ -n "$MANIFEST_URL_AARCH64" ]] && manifest_url="$MANIFEST_URL_AARCH64" ;;
+        x86_64)  [[ -n "$MANIFEST_URL_X86_64" ]]  && manifest_url="$MANIFEST_URL_X86_64" ;;
+      esac
+      [[ -n "$manifest_url" ]] || {
+        err "Sin MANIFEST_URL para esta arquitectura ($(uname -m)) en $CONF."
+        exit 1
+      }
       local expanded_url version_key url_key checksum_key
-      expanded_url=$(expand_template "$MANIFEST_URL")
+      expanded_url=$(expand_template "$manifest_url")
       info "Consultando manifest remoto..."
       local manifest_json
       manifest_json=$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 --retry-all-errors "$expanded_url" 2>/dev/null || true)
