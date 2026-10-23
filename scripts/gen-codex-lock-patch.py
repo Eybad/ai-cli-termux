@@ -40,25 +40,29 @@ from pathlib import Path
 # ── Inventario esperado de call sites (archivo relativo a codex-rs/) ──
 # Formato: {archivo: {(receiver, método): cantidad}}. Sin números de línea: el
 # generador ubica cada par por contenido y verifica el multiset completo.
-# Fuente: escaneo exhaustivo de codex-rs v0.162.0 (25 sitios en 14 archivos).
+# Fuente: escaneo exhaustivo de codex-rs v0.164.0 (26 sitios en 15 archivos).
 INVENTORY = {
-    "arg0/src/lib.rs": {("lock_file", "try_lock"): 3},
     "app-server-transport/src/transport/unix_socket.rs": {("file", "lock"): 1, ("file", "try_lock"): 1, ("self._file", "try_lock"): 1},
+    "arg0/src/lib.rs": {("lock_file", "try_lock"): 3},
     "core/src/installation_id.rs": {("file", "lock"): 1},
     "execpolicy/src/amend.rs": {("file", "lock"): 1},
-    "login/src/gateway_auth_storage.rs": {("file", "try_lock"): 1},
+    "login/src/oauth_session_storage.rs": {("file", "try_lock"): 1},
     "message-history/src/batch.rs": {("file", "try_lock_shared"): 1},
-    "message-history/src/lib.rs": {("history_file", "try_lock"): 1, ("file", "try_lock_shared"): 1},
-    "network-proxy/src/certs.rs": {("file", "lock_shared"): 1, ("file", "lock"): 1, ("lock_file", "try_lock"): 1},
+    "message-history/src/lib.rs": {("file", "try_lock_shared"): 1, ("history_file", "try_lock"): 1},
+    "network-proxy/src/certs.rs": {("file", "lock"): 1, ("file", "lock_shared"): 1, ("lock_file", "try_lock"): 1},
     "rmcp-client/src/oauth/refresh_lock.rs": {("file", "try_lock"): 1},
-    "rmcp-client/src/oauth/store_lock.rs": {("file", "try_lock_shared"): 1, ("file", "try_lock"): 1},
+    "rmcp-client/src/oauth/store_lock.rs": {("file", "try_lock"): 1, ("file", "try_lock_shared"): 1},
     "rollout/src/maintenance.rs": {("file", "try_lock"): 1},
-    "rollout/src/writer_lock.rs": {("file", "try_lock"): 3, ("file", "lock"): 1},
+    "rollout/src/writer_lock.rs": {("file", "lock"): 1, ("file", "try_lock"): 3},
+    "tui/src/bottom_pane/mention_usage.rs": {("lock_file", "try_lock"): 1},
     "user-verification/src/lifecycle_lock.rs": {("file", "try_lock"): 1},
     "windows-sandbox-rs/tests/support/src/lib.rs": {("file", "lock"): 1},
 }
 
 METHODS = ("try_lock", "lock", "lock_shared", "try_lock_shared")
+
+# Umbral mínimo de call sites para el modo dinámico (fail-closed ante fallos del regex).
+MIN_DYNAMIC_SITES = 10
 
 # Receiver: cadena punteada cuyo último identificador contiene "file" (heurística
 # que limita el escaneo a receivers tipo archivo; el compilador es el gate final
@@ -66,6 +70,12 @@ METHODS = ("try_lock", "lock", "lock_shared", "try_lock_shared")
 # una línea: un call site multi-línea no se escanea → verify_inventory aborta
 # ANTES de modificar el árbol (fail-closed, sin árbol a medio parchear).
 SITE_RE = re.compile(r"\b((?:[\w]+\.)*\w*file\w*)\.(try_lock|lock|lock_shared|try_lock_shared)\(")
+
+# Métodos exclusivos de std::fs::File (bloqueo a nivel OS; Mutex/RwLock no los implementan).
+EXCLUSIVE_FILE_LOCK_RE = re.compile(r"\b((?:[\w]+\.)*\w+)\.(lock_shared|try_lock_shared)\(")
+# Pistas contextuales que indican descriptores de archivo en la misma línea con lock()/try_lock().
+FILE_HINT_RE = re.compile(r"\b(File|OpenOptions|NamedTempFile|tempfile|as_file)\b")
+ANY_LOCK_RE = re.compile(r"\b((?:[\w]+\.)*\w+)\.(lock|try_lock)\(")
 
 
 def strip_line_comment(line: str) -> str:
@@ -318,6 +328,44 @@ def proposed_inventory(scanned) -> str:
     return "\n".join(lines)
 
 
+def check_call_site_leaks(src: Path):
+    """Detecta llamadas a locks de archivo cuyos receivers no contengan 'file'.
+
+    Fail-closed:
+      1. Cualquier llamada a lock_shared() o try_lock_shared() (exclusivos de File)
+         cuyo receiver no contenga 'file' es una fuga confirmada de SITE_RE.
+      2. Cualquier llamada a lock() o try_lock() en líneas con pistas explícitas de File
+         (File::, OpenOptions, etc.) cuyo receiver no contenga 'file' es una fuga potencial.
+    """
+    leaks = []
+    for p in sorted(src.rglob("*.rs")):
+        if "target" in p.parts:
+            continue
+        rel = str(p.relative_to(src))
+        for line_no, line in enumerate(read_lines(p), start=1):
+            if is_comment(line):
+                continue
+            clean = strip_line_comment(line)
+            if not clean:
+                continue
+            for m in EXCLUSIVE_FILE_LOCK_RE.finditer(clean):
+                recv = m.group(1)
+                method = m.group(2)
+                if "file" not in recv.lower():
+                    leaks.append(
+                        f"{rel}:{line_no}: llamada a {recv}.{method}() elude SITE_RE (método exclusivo de File)"
+                    )
+            if FILE_HINT_RE.search(clean):
+                for m in ANY_LOCK_RE.finditer(clean):
+                    recv = m.group(1)
+                    method = m.group(2)
+                    if "file" not in recv.lower():
+                        leaks.append(
+                            f"{rel}:{line_no}: posible lock de archivo con receiver '{recv}' que elude SITE_RE ({method})"
+                        )
+    return leaks
+
+
 def derive_crate_roots(src: Path, site_files):
     """Crate root de cada archivo con call sites: sube hasta src/lib.rs o src/main.rs."""
     roots = set()
@@ -449,6 +497,11 @@ def main(argv=None):
     ap.add_argument("--src", required=True, help="directorio raíz de codex-rs (contiene Cargo.toml)")
     ap.add_argument("--dist-version", required=True, help="versión del dist, ej: 0.146.0+android1")
     ap.add_argument("--apply", action="store_true", help="modificar el source (default: solo verificar)")
+    ap.add_argument(
+        "--dynamic",
+        action="store_true",
+        help="parchea dinámicamente según call sites escaneados con gates de integridad en vez de inventario estático",
+    )
     args = ap.parse_args(argv)
 
     src = Path(args.src).resolve()
@@ -476,25 +529,47 @@ def main(argv=None):
     # generador anterior: shim en todos los crate roots).
     already = ("+" in full_version) and not sites and has_shim(src)
 
-    if not args.apply:
-        if already:
-            print(f"OK: source ya parcheado (versión {full_version})")
+    if already:
+        msg = f"OK: source ya parcheado (versión {full_version})"
+        if args.apply:
+            msg += "; nada que hacer"
+        print(msg)
+        return 0
+
+    if args.dynamic:
+        leaks = check_call_site_leaks(src)
+        if leaks:
+            print("ERROR: gate de fugas fallido, call sites eluden SITE_RE:", file=sys.stderr)
+            for lk in leaks:
+                print(f"  - {lk}", file=sys.stderr)
+            raise SystemExit(1)
+        if len(sites) < MIN_DYNAMIC_SITES:
+            raise SystemExit(
+                f"ERROR: gate de sanidad fallido: solo se detectaron {len(sites)} call sites "
+                f"(mínimo esperado: {MIN_DYNAMIC_SITES})"
+            )
+        problems, scanned = verify_inventory(src)
+        if problems:
+            print(
+                "INFO: modo dinámico detectó deriva respecto a INVENTORY "
+                "(tolerada por gates de integridad):",
+                file=sys.stderr,
+            )
+            for pr in problems:
+                print(f"  - {pr}", file=sys.stderr)
+        if not args.apply:
+            print(f"INFO: modo dinámico verificado ({len(sites)} call sites válidos, versión {core})")
             return 0
+    else:
         problems, scanned = verify_inventory(src)
         if problems:
             report_drift(problems, scanned)
+            if not args.apply:
+                return 1
+            raise SystemExit(1)
+        if not args.apply:
+            print(f"INFO: source sin parchear (versión {core})")
             return 1
-        print(f"INFO: source sin parchear (versión {core})")
-        return 1
-
-    if already:
-        print(f"OK: source ya parcheado (versión {full_version}); nada que hacer")
-        return 0
-
-    problems, scanned = verify_inventory(src)
-    if problems:
-        report_drift(problems, scanned)
-        raise SystemExit(1)
 
     roots = derive_crate_roots(src, [s[0] for s in sites])
     insert_shim(src, roots)

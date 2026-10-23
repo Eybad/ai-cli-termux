@@ -262,5 +262,94 @@ class TestApply(unittest.TestCase):
                 gen.INVENTORY = old
 
 
+class TestDynamicApply(unittest.TestCase):
+    def test_dynamic_tolerates_inventory_drift(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            old_inv = gen.INVENTORY
+            old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+            # Inventario desactualizado que normalmente abortaría
+            gen.INVENTORY = {
+                "alpha/src/lib.rs": {("lock_file", "try_lock"): 1}
+            }
+            gen.MIN_DYNAMIC_SITES = 5  # el fixture tiene 7 sitios
+            try:
+                rc = gen.main([
+                    "--apply",
+                    "--dynamic",
+                    "--src", str(root),
+                    "--dist-version", "0.1.0+android1",
+                ])
+                self.assertEqual(rc, 0)
+                beta_lib = (root / "beta/src/lib.rs").read_text()
+                self.assertIn("crate::file_lock_shim::try_lock(&file)?;", beta_lib)
+                self.assertIn('version = "0.1.0+android1"', (root / "Cargo.toml").read_text())
+            finally:
+                gen.INVENTORY = old_inv
+                gen.MIN_DYNAMIC_SITES = old_min
+
+    def test_dynamic_sanity_threshold_fails_when_too_few_sites(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+            gen.MIN_DYNAMIC_SITES = 15  # el fixture tiene 7, debe abortar
+            try:
+                with self.assertRaises(SystemExit):
+                    gen.main([
+                        "--apply",
+                        "--dynamic",
+                        "--src", str(root),
+                        "--dist-version", "0.1.0+android1",
+                    ])
+            finally:
+                gen.MIN_DYNAMIC_SITES = old_min
+
+    def test_dynamic_leak_check_aborts_on_exclusive_method(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            # Agregar llamada a lock_shared con receiver que no contiene "file"
+            beta_lib = root / "beta/src/lib.rs"
+            beta_lib.write_text(
+                beta_lib.read_text() + "\npub fn leak() { let h: std::fs::File = todo!(); h.lock_shared().unwrap(); }\n"
+            )
+            old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+            gen.MIN_DYNAMIC_SITES = 5
+            try:
+                with self.assertRaises(SystemExit):
+                    gen.main([
+                        "--apply",
+                        "--dynamic",
+                        "--src", str(root),
+                        "--dist-version", "0.1.0+android1",
+                    ])
+            finally:
+                gen.MIN_DYNAMIC_SITES = old_min
+
+    def test_dynamic_leak_check_aborts_on_file_hint_with_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            # Agregar llamada a lock() con pista File:: y receiver sin 'file'
+            beta_lib = root / "beta/src/lib.rs"
+            beta_lib.write_text(
+                beta_lib.read_text() + '\npub fn leak() { let fd = std::fs::File::open("x")?; fd.lock()?; Ok(()) }\n'
+            )
+            old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+            gen.MIN_DYNAMIC_SITES = 5
+            try:
+                with self.assertRaises(SystemExit):
+                    gen.main([
+                        "--apply",
+                        "--dynamic",
+                        "--src", str(root),
+                        "--dist-version", "0.1.0+android1",
+                    ])
+            finally:
+                gen.MIN_DYNAMIC_SITES = old_min
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

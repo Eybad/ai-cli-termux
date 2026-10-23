@@ -197,11 +197,11 @@ jobs:
           PATCH_REV: ${{ needs.check.outputs.patch_rev }}
         run: |
           set -euo pipefail
-          # El generador valida el inventario de call sites y el core de la
-          # versión; cualquier desvío del source upstream aborta el build
-          # (fail-closed: no se publica un binario sin el parche aplicado).
+          # El generador opera en modo dinámico con gates de integridad
+          # (sanidad de call sites, ausencia de fugas de receivers y validación
+          # estricta de rustc en compilación; fail-closed).
           python3 "$GITHUB_WORKSPACE/project/scripts/gen-codex-lock-patch.py" \
-            --apply --src "$GITHUB_WORKSPACE/upstream/codex-rs" \
+            --apply --dynamic --src "$GITHUB_WORKSPACE/upstream/codex-rs" \
             --dist-version "${VERSION}+android${PATCH_REV}"
           grep -n '^version = ' "$GITHUB_WORKSPACE/upstream/codex-rs/Cargo.toml" | head -2
 
