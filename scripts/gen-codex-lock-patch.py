@@ -40,12 +40,13 @@ from pathlib import Path
 # ── Inventario esperado de call sites (archivo relativo a codex-rs/) ──
 # Formato: {archivo: {(receiver, método): cantidad}}. Sin números de línea: el
 # generador ubica cada par por contenido y verifica el multiset completo.
-# Fuente: escaneo exhaustivo de codex-rs v0.164.0 (26 sitios en 15 archivos).
+# Fuente: escaneo exhaustivo de codex-rs v0.164.0 (27 sitios en 16 archivos).
 INVENTORY = {
     "app-server-transport/src/transport/unix_socket.rs": {("file", "lock"): 1, ("file", "try_lock"): 1, ("self._file", "try_lock"): 1},
     "arg0/src/lib.rs": {("lock_file", "try_lock"): 3},
     "core/src/installation_id.rs": {("file", "lock"): 1},
     "execpolicy/src/amend.rs": {("file", "lock"): 1},
+    "file-system/src/local_logs.rs": {("directory", "try_lock_shared"): 1},
     "login/src/oauth_session_storage.rs": {("file", "try_lock"): 1},
     "message-history/src/batch.rs": {("file", "try_lock_shared"): 1},
     "message-history/src/lib.rs": {("file", "try_lock_shared"): 1, ("history_file", "try_lock"): 1},
@@ -64,12 +65,13 @@ METHODS = ("try_lock", "lock", "lock_shared", "try_lock_shared")
 # Umbral mínimo de call sites para el modo dinámico (fail-closed ante fallos del regex).
 MIN_DYNAMIC_SITES = 10
 
-# Receiver: cadena punteada cuyo último identificador contiene "file" (heurística
-# que limita el escaneo a receivers tipo archivo; el compilador es el gate final
-# para receivers que no sean std::fs::File). Exige la llamada completa `()` en
-# una línea: un call site multi-línea no se escanea → verify_inventory aborta
-# ANTES de modificar el árbol (fail-closed, sin árbol a medio parchear).
-SITE_RE = re.compile(r"\b((?:[\w]+\.)*\w*file\w*)\.(try_lock|lock|lock_shared|try_lock_shared)\(")
+# Receiver: cadena punteada cuyo último identificador contiene "file" o "dir"
+# (heurística que limita el escaneo a receivers tipo archivo/directorio; el
+# compilador es el gate final para receivers que no sean std::fs::File). Exige
+# la llamada completa `()` en una línea: un call site multi-línea no se escanea
+# → verify_inventory aborta ANTES de modificar el árbol (fail-closed, sin árbol
+# a medio parchear).
+SITE_RE = re.compile(r"\b((?:[\w]+\.)*\w*(?:file|dir)\w*)\.(try_lock|lock|lock_shared|try_lock_shared)\(")
 
 # Métodos exclusivos de std::fs::File (bloqueo a nivel OS; Mutex/RwLock no los implementan).
 EXCLUSIVE_FILE_LOCK_RE = re.compile(r"\b((?:[\w]+\.)*\w+)\.(lock_shared|try_lock_shared)\(")
@@ -264,20 +266,22 @@ def workspace_version(src: Path) -> str:
 
 
 def scan_sites(src: Path):
-    """Todos los call sites (rel, receiver, method) fuera de comentarios."""
+    """Todos los call sites (rel, receiver, method) fuera de comentarios y shims."""
     sites = []
     for p in sorted(src.rglob("*.rs")):
         if "target" in p.parts:
             continue
+        in_shim = False
         for i, line in enumerate(read_lines(p), start=1):
-            if is_comment(line):
+            if "mod file_lock_shim" in line:
+                in_shim = True
+            if in_shim or is_comment(line):
                 continue
-            # Pre-filtro barato: SITE_RE exige receiver con "file" y método con
-            # "lock"; sin ambos substrings la línea no puede matchear (evita el
-            # regex sobre miles de líneas irrelevantes).
-            if "file" not in line or "lock" not in line:
+            # Pre-filtro barato: cualquier llamada a los métodos de interés contiene "lock".
+            if "lock" not in line:
                 continue
-            for m in SITE_RE.finditer(strip_line_comment(line)):
+            clean = strip_line_comment(line)
+            for m in SITE_RE.finditer(clean):
                 sites.append((str(p.relative_to(src)), m.group(1), m.group(2)))
     return sites
 
@@ -329,29 +333,31 @@ def proposed_inventory(scanned) -> str:
 
 
 def check_call_site_leaks(src: Path):
-    """Detecta llamadas a locks de archivo cuyos receivers no contengan 'file'.
+    """Detecta llamadas a locks de archivo cuyos receivers no son contemplados por SITE_RE.
 
     Fail-closed:
-      1. Cualquier llamada a lock_shared() o try_lock_shared() (exclusivos de File)
-         cuyo receiver no contenga 'file' es una fuga confirmada de SITE_RE.
+      1. Cualquier llamada a lock_shared() o try_lock_shared() cuyo receiver no contenga 'file' o 'dir'.
       2. Cualquier llamada a lock() o try_lock() en líneas con pistas explícitas de File
-         (File::, OpenOptions, etc.) cuyo receiver no contenga 'file' es una fuga potencial.
+         (File::, OpenOptions, etc.) cuyo receiver no contenga 'file' o 'dir'.
     """
     leaks = []
     for p in sorted(src.rglob("*.rs")):
         if "target" in p.parts:
             continue
         rel = str(p.relative_to(src))
+        in_shim = False
         for line_no, line in enumerate(read_lines(p), start=1):
-            if is_comment(line):
+            if "mod file_lock_shim" in line:
+                in_shim = True
+            if in_shim or is_comment(line):
                 continue
             clean = strip_line_comment(line)
-            if not clean:
+            if not clean or "lock" not in clean:
                 continue
             for m in EXCLUSIVE_FILE_LOCK_RE.finditer(clean):
                 recv = m.group(1)
                 method = m.group(2)
-                if "file" not in recv.lower():
+                if not re.search(r"(?:file|dir)", recv, re.IGNORECASE):
                     leaks.append(
                         f"{rel}:{line_no}: llamada a {recv}.{method}() elude SITE_RE (método exclusivo de File)"
                     )
@@ -359,7 +365,7 @@ def check_call_site_leaks(src: Path):
                 for m in ANY_LOCK_RE.finditer(clean):
                     recv = m.group(1)
                     method = m.group(2)
-                    if "file" not in recv.lower():
+                    if not re.search(r"(?:file|dir)", recv, re.IGNORECASE):
                         leaks.append(
                             f"{rel}:{line_no}: posible lock de archivo con receiver '{recv}' que elude SITE_RE ({method})"
                         )
@@ -417,7 +423,7 @@ def apply_replacements(src: Path, sites):
         for i, line in enumerate(lines):
             if is_comment(line):
                 continue
-            if "file" not in line or "lock" not in line:
+            if "lock" not in line:
                 continue
             prefix = strip_line_comment(line)
             if prefix == line:

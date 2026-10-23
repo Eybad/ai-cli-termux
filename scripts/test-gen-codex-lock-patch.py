@@ -306,25 +306,27 @@ class TestDynamicApply(unittest.TestCase):
             finally:
                 gen.MIN_DYNAMIC_SITES = old_min
 
-    def test_dynamic_leak_check_aborts_on_exclusive_method(self):
+    def test_directory_receiver_matched_and_patched(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "codex-rs"
             build_tree(root)
-            # Agregar llamada a lock_shared con receiver que no contiene "file"
+            # Agregar llamada a try_lock_shared con receiver 'directory' (caso file-system/local_logs.rs)
             beta_lib = root / "beta/src/lib.rs"
             beta_lib.write_text(
-                beta_lib.read_text() + "\npub fn leak() { let h: std::fs::File = todo!(); h.lock_shared().unwrap(); }\n"
+                beta_lib.read_text() + '\npub fn log() { let directory = std::fs::File::open("x")?; directory.try_lock_shared()?; Ok(()) }\n'
             )
             old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
             gen.MIN_DYNAMIC_SITES = 5
             try:
-                with self.assertRaises(SystemExit):
-                    gen.main([
-                        "--apply",
-                        "--dynamic",
-                        "--src", str(root),
-                        "--dist-version", "0.1.0+android1",
-                    ])
+                rc = gen.main([
+                    "--apply",
+                    "--dynamic",
+                    "--src", str(root),
+                    "--dist-version", "0.1.0+android1",
+                ])
+                self.assertEqual(rc, 0)
+                text = (root / "beta/src/lib.rs").read_text()
+                self.assertIn("crate::file_lock_shim::try_lock_shared(&directory)?;", text)
             finally:
                 gen.MIN_DYNAMIC_SITES = old_min
 
