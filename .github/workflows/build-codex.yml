@@ -476,6 +476,18 @@ jobs:
           # lock. Resincronizar solo los miembros del workspace (no toca deps
           # externas); --locked abajo valida que no falte nada.
           cargo update --workspace
+          # mxc-sdk (microsoft/mxc, dep de codex-mxc-sandbox): mod.rs gatea `mod run;`
+          # con windows|linux|macos, omitiendo android a pesar de que run.rs tiene
+          # fallback para otros OSes. Sin esto, dispatch.rs falla con E0433.
+          if grep -q 'name = "mxc-sdk"' Cargo.lock; then
+            MXC_MODS=$(find ~/.cargo/git/checkouts/ -path "*/mxc-sdk/src/core/mxc_engine/mod.rs")
+            [[ -n "$MXC_MODS" ]] || { echo "ERROR: mxc-sdk mod.rs no encontrado en ~/.cargo/git/checkouts/"; exit 1; }
+            for F in $MXC_MODS; do
+              sed -i 's|any(target_os = "windows", target_os = "linux", target_os = "macos")|any(target_os = "windows", target_os = "linux", target_os = "macos", target_os = "android")|g' "$F"
+              grep -q 'target_os = "android"' "$F" || { echo "ERROR: parche de mxc-sdk no aplicado en $F"; exit 1; }
+              echo "Parche aplicado a mxc-sdk: $F"
+            done
+          fi
           # --locked: falla si el Cargo.lock (ya regenerado) necesita cambios.
           # codex-code-mode-host: desde 0.147 el code tool (V8) corre en un
           # binario separado que codex busca como "codex-code-mode-host" junto
