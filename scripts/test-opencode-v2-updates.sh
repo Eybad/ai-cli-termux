@@ -25,6 +25,7 @@ EOF
 cat > "$fake_bin/opencode" <<'EOF'
 #!/bin/sh
 set -eu
+[ -z "${OPENCODE_CLI_CONFIG_CONTENT:-}" ] || exit 80
 
 case "${1:-}" in
   --version|-v)
@@ -40,6 +41,7 @@ case "${1:-}" in
     printf 'serve\n' >> "$SERVER_CALLS"
     printf '%s\n' "$$" > "$SERVER_PID_FILE"
     [ -n "${OPENCODE_PASSWORD:-}" ] || exit 91
+    [ -z "${OPENCODE_CLI_CONFIG_CONTENT:-}" ] || exit 100
     [ "$XDG_CONFIG_HOME" = "$EXPECTED_HOME/.local/share/ai-cli-termux/opencode-v2/config" ] || exit 92
     [ "$XDG_DATA_HOME" = "$EXPECTED_HOME/.local/share/ai-cli-termux/opencode-v2/data" ] || exit 93
     [ "$OPENCODE_DB" = "$XDG_DATA_HOME/opencode-v2.db" ] || exit 94
@@ -52,6 +54,7 @@ case "${1:-}" in
     printf '%s\n' "$OPENCODE_PASSWORD" > "$CLIENT_PASSWORD_FILE"
     printf '%s\n' "$@" > "$CLIENT_ARGS_FILE"
     [ -z "${OPENCODE_CONFIG_CONTENT:-}" ] || exit 95
+    [ -z "${OPENCODE_CLI_CONFIG_CONTENT:-}" ] || exit 101
     [ -z "${OPENCODE_SERVER:-}" ] || exit 96
     touch "$CLIENT_STARTED_FILE"
     case "$CLIENT_MODE" in
@@ -196,6 +199,7 @@ mkdir -p "$run_home/.local/share/ai-cli-termux/opencode-v2/" "$prefix/libexec/op
 printf 'version=2.2.5\n' > "$fake_bin/manifest.txt"
 
 HOME="$run_home" PREFIX="$prefix" TMPDIR="$prefix/tmp" \
+  OPENCODE_CLI_CONFIG_CONTENT='{"keybinds":{"app.exit":"none"}}' \
   sh "$runtime" "$fake_bin/loader" --library-path "$fake_lib" \
     "$fake_bin/opencode" --model 'small model' run 'prompt with spaces' \
     > "$run_root/runner.out" 2> "$run_root/runner.err" &

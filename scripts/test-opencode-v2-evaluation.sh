@@ -23,6 +23,7 @@ EOF
 cat > "$fake_bin/opencode" <<'EOF'
 #!/bin/sh
 set -eu
+[ -z "${OPENCODE_CLI_CONFIG_CONTENT:-}" ] || exit 79
 
 case "${1:-}" in
   --version|-v)

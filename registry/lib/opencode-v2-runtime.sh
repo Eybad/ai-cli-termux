@@ -197,7 +197,7 @@ opencode_v2_runtime_prepare_profile() {
   export OPENCODE_DISABLE_CLAUDE_CODE=1
   export TMPDIR="$opencode_v2_runtime_tmp_dir"
 
-  unset OPENCODE_CONFIG OPENCODE_CONFIG_DIR OPENCODE_CONFIG_CONTENT OPENCODE_TUI_CONFIG
+  unset OPENCODE_CONFIG OPENCODE_CONFIG_DIR OPENCODE_CONFIG_CONTENT OPENCODE_CLI_CONFIG_CONTENT OPENCODE_TUI_CONFIG
   unset OPENCODE_PERMISSION OPENCODE_SERVER OPENCODE_SERVER_PASSWORD OPENCODE_PASSWORD
   unset OPENCODE_CONFIG_PROJECT_DISABLE
 }
@@ -2033,6 +2033,7 @@ EOF
     cd "$opencode_v2_runtime_evaluate_project"
     env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
       PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+      OPENCODE_CLI_CONFIG_CONTENT='{"keybinds":{"app.exit":"none"}}' \
       TERM=dumb sh "$opencode_v2_runtime_evaluate_runtime" \
         "$opencode_v2_runtime_evaluate_loader" --library-path \
         "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary" debug paths
@@ -2054,6 +2055,7 @@ EOF
     cd "$opencode_v2_runtime_evaluate_project"
     env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
       PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+      OPENCODE_CLI_CONFIG_CONTENT='{"keybinds":{"app.exit":"none"}}' \
       TERM=dumb sh "$opencode_v2_runtime_evaluate_runtime" \
         "$opencode_v2_runtime_evaluate_loader" --library-path \
         "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary" debug config
@@ -2086,6 +2088,7 @@ EOF
     cd "$opencode_v2_runtime_evaluate_project"
     env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
       PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+      OPENCODE_CLI_CONFIG_CONTENT='{"keybinds":{"app.exit":"none"}}' \
       TERM=dumb sh "$opencode_v2_runtime_evaluate_runtime" \
         "$opencode_v2_runtime_evaluate_loader" --library-path \
         "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary" \
@@ -2106,6 +2109,7 @@ EOF
       cd "$opencode_v2_runtime_evaluate_project"
       env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
         PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+        OPENCODE_CLI_CONFIG_CONTENT='{"keybinds":{"app.exit":"none"}}' \
         TERM="${TERM:-xterm-256color}" sh "$opencode_v2_runtime_evaluate_runtime" \
           "$opencode_v2_runtime_evaluate_loader" --library-path \
           "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary"
