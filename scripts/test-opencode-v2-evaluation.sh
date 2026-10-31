@@ -29,8 +29,12 @@ case "${1:-}" in
     printf 'opencode v2.2.5\n'
     ;;
   debug)
-    [ "${2:-}" = paths ] || exit 81
-    printf '%s\n' "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$OPENCODE_DB"
+    case "${2:-}" in
+      paths)
+        printf '%s\n' "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$OPENCODE_DB"
+        ;;
+      *) exit 81 ;;
+    esac
     ;;
   serve)
     printf 'server listening on http://127.0.0.1:43129\n'
@@ -42,8 +46,23 @@ case "${1:-}" in
       printf 'TUI\n'
       exit 0
     fi
+    if [ "$#" -eq 2 ] && [ "$1" = debug ] && [ "$2" = config ]; then
+      [ "${OPENCODE_DISABLE_PROJECT_CONFIG:-}" = 1 ] || exit 85
+      [ -f "$PWD/opencode.json" ] && [ -f "$(dirname "$PWD")/opencode.json" ] || exit 86
+      [ -f "$PWD/.opencode/plugins/trap.ts" ] &&
+        [ ! -e "$PWD/.opencode/plugins/loaded" ] || exit 90
+      cat "$XDG_CONFIG_HOME/opencode/opencode.json"
+      exit 0
+    fi
+    if [ "$#" -eq 2 ] && [ "$1" = run ] && [ "$2" = upgrade ]; then
+      exit 0
+    fi
     [ "$#" -eq 4 ] && [ "$1" = session ] && [ "$2" = list ] &&
       [ "$3" = --format ] && [ "$4" = json ] || exit 82
+    [ "${OPENCODE_DISABLE_PROJECT_CONFIG:-}" = 1 ] || exit 87
+    [ -f "$PWD/opencode.json" ] && [ -f "$(dirname "$PWD")/opencode.json" ] || exit 88
+    [ -f "$PWD/.opencode/plugins/trap.ts" ] &&
+      [ ! -e "$PWD/.opencode/plugins/loaded" ] || exit 91
     printf '[]\n'
     ;;
   *)
@@ -138,10 +157,15 @@ grep -Fxq "sha256=$archive_sha256" "$test_root/evaluate.out" || {
   printf 'FAIL: no informó el digest verificado\n' >&2
   exit 1
 }
-grep -Fxq 'result=runner-profile-session-list-pass' "$test_root/evaluate.out" || {
+grep -Fxq 'result=runner-profile-config-plugin-session-list-pass' "$test_root/evaluate.out" || {
   printf 'FAIL: no ejecutó la ruta de sesión con el runner\n' >&2
   exit 1
 }
+if ! grep -Fxq 'tui=not-run-no-tty' "$test_root/evaluate.out" ||
+  ! grep -Fxq 'tui_exit=not-run-no-tty' "$test_root/evaluate.out"; then
+  printf 'FAIL: no informó que la TUI requiere un terminal interactivo\n' >&2
+  exit 1
+fi
 if ! grep -Fxq api "$FAKE_CURL_LOG" || ! grep -Fxq asset "$FAKE_CURL_LOG"; then
   printf 'FAIL: no consultó release y asset por los endpoints esperados\n' >&2
   exit 1
@@ -174,6 +198,49 @@ grep -Fxq TUI "$test_root/daily.out" || {
   exit 1
 }
 printf 'PASS: la invocación diaria sin argumentos llega a la TUI por el runner\n'
+
+assert_update_blocked() {
+  guard_home=$1
+  shift
+  mkdir -m 700 "$guard_home"
+  blocked_status=0
+  if env -i PATH="$PATH" HOME="$guard_home" PREFIX="$prefix" TMPDIR="$prefix/tmp" TERM=dumb \
+    sh "$repo_dir/registry/lib/opencode-v2-runtime.sh" \
+      "$prefix/glibc/lib/ld-linux-aarch64.so.1" --library-path "$prefix/glibc/lib" \
+      "$test_root/archive/opencode" "$@" > "$test_root/blocked.out" 2> "$test_root/blocked.err"; then
+    blocked_status=0
+  else
+    blocked_status=$?
+  fi
+  [ "$blocked_status" -eq 1 ] || {
+    printf 'FAIL: no bloqueó el actualizador con flags globales\n' >&2
+    exit 1
+  }
+  grep -q 'actualizador propio está deshabilitado' "$test_root/blocked.err" || {
+    printf 'FAIL: no explicó el bloqueo del actualizador\n' >&2
+    exit 1
+  }
+  [ ! -e "$guard_home/.local/share/ai-cli-termux" ] || {
+    printf 'FAIL: creó el perfil antes de bloquear el actualizador\n' >&2
+    exit 1
+  }
+}
+assert_update_blocked "$test_root/guard-print-logs" --print-logs upgrade
+assert_update_blocked "$test_root/guard-log-level" --log-level INFO update
+printf 'PASS: bloquea upgrade/update antes del perfil incluso tras flags globales\n'
+
+prompt_home="$test_root/prompt-home"
+mkdir -m 700 "$prompt_home"
+if env -i PATH="$PATH" HOME="$prompt_home" PREFIX="$prefix" TMPDIR="$prefix/tmp" TERM=dumb \
+  sh "$repo_dir/registry/lib/opencode-v2-runtime.sh" \
+    "$prefix/glibc/lib/ld-linux-aarch64.so.1" --library-path "$prefix/glibc/lib" \
+    "$test_root/archive/opencode" run upgrade > "$test_root/prompt.out" 2> "$test_root/prompt.err"; then
+  :
+else
+  cat "$test_root/prompt.err" >&2
+  exit 1
+fi
+printf 'PASS: permite mencionar upgrade en un prompt de run\n'
 
 curl_calls_before=$(wc -l < "$FAKE_CURL_LOG" | tr -d ' ')
 invalid_status=0

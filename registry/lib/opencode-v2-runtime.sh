@@ -295,6 +295,9 @@ opencode_v2_runtime_launch_client() {
     "${opencode_v2_runtime_reader_pid:-}" "${opencode_v2_runtime_reader_start:-}" \
     "$opencode_v2_runtime_client_pid" "$opencode_v2_runtime_client_start" || return 1
 
+  if [ -t 0 ] && [ -t 1 ]; then
+    trap '' INT
+  fi
   if wait "$opencode_v2_runtime_client_pid"; then
     opencode_v2_runtime_client_status=0
   else
@@ -325,7 +328,7 @@ opencode_v2_runtime_signal() {
     INT) opencode_v2_runtime_signal_status=130 ;;
     TERM) opencode_v2_runtime_signal_status=143 ;;
   esac
-  if [ -n "${opencode_v2_runtime_client_pid:-}" ] &&
+  if [ "$1" != INT ] && [ -n "${opencode_v2_runtime_client_pid:-}" ] &&
      opencode_v2_runtime_process_matches "$opencode_v2_runtime_client_pid" "$opencode_v2_runtime_client_start"; then
     kill -"$1" "$opencode_v2_runtime_client_pid" 2>/dev/null || true
   fi
@@ -1817,6 +1820,33 @@ opencode_v2_runtime_evaluate_cleanup() {
   exit "$opencode_v2_runtime_evaluate_status"
 }
 
+opencode_v2_runtime_guard_command() {
+  opencode_v2_runtime_skip_value=false
+  for opencode_v2_runtime_command_arg do
+    if [ "$opencode_v2_runtime_skip_value" = true ]; then
+      opencode_v2_runtime_skip_value=false
+      continue
+    fi
+    case "$opencode_v2_runtime_command_arg" in
+      --log-level|-m|--model|-s|--session|-f|--file|--format|--agent|--title|--directory|--prompt)
+        opencode_v2_runtime_skip_value=true
+        ;;
+      --log-level=*|--model=*|--session=*|--file=*|--format=*|--agent=*|--title=*|--directory=*|--prompt=*|--print-logs|--pure|--help|-h|--version|-v|--)
+        ;;
+      upgrade|update)
+        opencode_v2_runtime_error 'El actualizador propio está deshabilitado; las versiones aprobadas se administran desde aicli.'
+        return 1
+        ;;
+      serve|service)
+        opencode_v2_runtime_error 'El servidor persistente no está habilitado; el wrapper administra un servidor efímero.'
+        return 1
+        ;;
+      -* ) ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
 opencode_v2_runtime_evaluate() (
   set -eu
   [ "$#" -eq 2 ] && [ "$1" = --version ] || {
@@ -1885,6 +1915,29 @@ opencode_v2_runtime_evaluate() (
   opencode_v2_runtime_evaluate_project="$opencode_v2_runtime_evaluate_root/project"
   mkdir -m 700 "$opencode_v2_runtime_evaluate_bundle" \
     "$opencode_v2_runtime_evaluate_home" "$opencode_v2_runtime_evaluate_project"
+  opencode_v2_runtime_evaluate_config_dir="$opencode_v2_runtime_evaluate_home/.local/share/ai-cli-termux/opencode-v2/config/opencode"
+  mkdir -p "$opencode_v2_runtime_evaluate_config_dir"
+  chmod 700 "$opencode_v2_runtime_evaluate_config_dir"
+  cat > "$opencode_v2_runtime_evaluate_config_dir/opencode.json" <<'EOF'
+{"update":"disable","permissions":[{"action":"external_directory","resource":"*","effect":"ask"}]}
+EOF
+  chmod 600 "$opencode_v2_runtime_evaluate_config_dir/opencode.json"
+  printf '{ invalid project config\n' > "$opencode_v2_runtime_evaluate_project/opencode.json"
+  printf '{ invalid ancestor config\n' > "$opencode_v2_runtime_evaluate_root/opencode.json"
+  opencode_v2_runtime_evaluate_plugin_dir="$opencode_v2_runtime_evaluate_project/.opencode/plugins"
+  mkdir -p "$opencode_v2_runtime_evaluate_plugin_dir"
+  chmod 700 "$opencode_v2_runtime_evaluate_plugin_dir"
+  cat > "$opencode_v2_runtime_evaluate_plugin_dir/trap.ts" <<'EOF'
+import { writeFileSync } from "node:fs"
+
+writeFileSync(new URL("./loaded", import.meta.url), "loaded")
+
+export default {
+  id: "synthetic-project-plugin-trap",
+  setup: async () => {},
+}
+EOF
+  chmod 600 "$opencode_v2_runtime_evaluate_plugin_dir/trap.ts"
 
   opencode_v2_runtime_evaluate_asset=opencode-linux-arm64.tar.gz
   opencode_v2_runtime_evaluate_expected_url="https://github.com/anomalyco/opencode/releases/download/$opencode_v2_runtime_evaluate_tag/$opencode_v2_runtime_evaluate_asset"
@@ -2003,6 +2056,38 @@ opencode_v2_runtime_evaluate() (
       PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
       TERM=dumb sh "$opencode_v2_runtime_evaluate_runtime" \
         "$opencode_v2_runtime_evaluate_loader" --library-path \
+        "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary" debug config
+  ) > "$opencode_v2_runtime_evaluate_root/config.out" \
+      2> "$opencode_v2_runtime_evaluate_root/config.err"; then
+    opencode_v2_runtime_error 'El candidato no pudo resolver la configuración global sintética sin cargar el proyecto.'
+    return 1
+  fi
+  jq -e 'type == "object" or type == "array"' \
+    "$opencode_v2_runtime_evaluate_root/config.out" >/dev/null || {
+      opencode_v2_runtime_error 'debug config no devolvió JSON válido.'
+      return 1
+    }
+  jq -e '[.. | objects | select(.update? == "disable")] | length > 0' \
+    "$opencode_v2_runtime_evaluate_root/config.out" >/dev/null || {
+      opencode_v2_runtime_error 'La configuración efectiva no deshabilitó la actualización propia.'
+      return 1
+    }
+  jq -e '[.. | objects | select(.action? == "external_directory" and .resource? == "*" and .effect? == "ask")] | length > 0' \
+    "$opencode_v2_runtime_evaluate_root/config.out" >/dev/null || {
+      opencode_v2_runtime_error 'La configuración efectiva no exige ask para rutas externas.'
+      return 1
+    }
+  [ ! -e "$opencode_v2_runtime_evaluate_plugin_dir/loaded" ] || {
+    opencode_v2_runtime_error 'El candidato cargó un plugin local del proyecto sintético.'
+    return 1
+  }
+
+  if ! (
+    cd "$opencode_v2_runtime_evaluate_project"
+    env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
+      PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+      TERM=dumb sh "$opencode_v2_runtime_evaluate_runtime" \
+        "$opencode_v2_runtime_evaluate_loader" --library-path \
         "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary" \
         session list --format json
   ) > "$opencode_v2_runtime_evaluate_root/session-list.out" \
@@ -2010,9 +2095,46 @@ opencode_v2_runtime_evaluate() (
     opencode_v2_runtime_error 'La operación habitual session list falló bajo el runner aislado.'
     return 1
   fi
-  printf 'tag=%s\nasset=%s\nsha256=%s\nresult=runner-profile-session-list-pass\n' \
+  [ ! -e "$opencode_v2_runtime_evaluate_plugin_dir/loaded" ] || {
+    opencode_v2_runtime_error 'El candidato cargó un plugin local del proyecto sintético.'
+    return 1
+  }
+  opencode_v2_runtime_evaluate_tui=not-run-no-tty
+  opencode_v2_runtime_evaluate_tui_exit=not-run-no-tty
+  if [ -t 0 ] && [ -t 1 ]; then
+    if (
+      cd "$opencode_v2_runtime_evaluate_project"
+      env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
+        PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+        TERM="${TERM:-xterm-256color}" sh "$opencode_v2_runtime_evaluate_runtime" \
+          "$opencode_v2_runtime_evaluate_loader" --library-path \
+          "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary"
+    ); then
+      opencode_v2_runtime_evaluate_tui_exit=0
+    else
+      opencode_v2_runtime_evaluate_tui_exit=$?
+    fi
+    case "$opencode_v2_runtime_evaluate_tui_exit" in
+      0|130) ;;
+      *)
+        opencode_v2_runtime_error "La TUI cotidiana cerró con estado inesperado: $opencode_v2_runtime_evaluate_tui_exit."
+        return 1
+        ;;
+    esac
+    [ ! -e "$opencode_v2_runtime_evaluate_home/.local/share/ai-cli-termux/recovery/opencode-v2/lock" ] || {
+      opencode_v2_runtime_error 'La TUI dejó ocupado el perfil después de cerrar.'
+      return 1
+    }
+    [ ! -e "$opencode_v2_runtime_evaluate_plugin_dir/loaded" ] || {
+      opencode_v2_runtime_error 'La TUI cargó un plugin local del proyecto sintético.'
+      return 1
+    }
+    opencode_v2_runtime_evaluate_tui=pass
+  fi
+  printf 'tag=%s\nasset=%s\nsha256=%s\nresult=runner-profile-config-plugin-session-list-pass\ntui=%s\ntui_exit=%s\n' \
     "$opencode_v2_runtime_evaluate_tag" "$opencode_v2_runtime_evaluate_asset" \
-    "$opencode_v2_runtime_evaluate_sha256"
+    "$opencode_v2_runtime_evaluate_sha256" "$opencode_v2_runtime_evaluate_tui" \
+    "$opencode_v2_runtime_evaluate_tui_exit"
 )
 
 opencode_v2_runtime_run() {
@@ -2061,14 +2183,12 @@ opencode_v2_runtime_run() {
     return
   fi
 
+  opencode_v2_runtime_guard_command "$@" || return 1
+
   case "${1:-}" in
     --version|-v|help)
       opencode_v2_runtime_launch "$@"
       return
-      ;;
-    serve|service)
-      opencode_v2_runtime_error 'El servidor persistente no está habilitado; el wrapper administra un servidor efímero.'
-      return 1
       ;;
   esac
   for opencode_v2_runtime_arg do

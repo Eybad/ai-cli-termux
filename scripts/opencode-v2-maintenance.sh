@@ -12,6 +12,7 @@ usage() {
 script_dir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
 project_root=${script_dir%/scripts}
 . "$project_root/registry/lib/opencode-v2-runtime.sh"
+# shellcheck disable=SC2034
 opencode_v2_runtime_project_root=$project_root
 
 case "${1:-}" in
