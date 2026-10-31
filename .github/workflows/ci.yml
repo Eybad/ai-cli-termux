@@ -53,6 +53,7 @@ jobs:
           # consumidas por el instalador) es falso positivo; -S error solo
           # falla ante errores reales.
           shellcheck -s bash -S error registry/*.conf
+          shellcheck scripts/test-opencode-coexistence.sh
           # Lib de hooks: código real (lleva directivas shellcheck en cabecera).
           shopt -s nullglob
           lib_files=(registry/lib/*.sh)
@@ -111,6 +112,17 @@ jobs:
             al=$(unq "$(get ALIASES)")
             app=$(unq "$(get APP_NAME)")
             elf=$(unq "$(get ELF_NAME)")
+            version_major=$(unq "$(get VERSION_MAJOR)")
+            release_channel=$(unq "$(get RELEASE_CHANNEL)")
+
+            if [[ -n "$version_major" && ! "$version_major" =~ ^(0|[1-9][0-9]*)$ ]]; then
+              echo "::error file=$conf::VERSION_MAJOR inválido: '$version_major' (entero decimal canónico)"
+              fail=1
+            fi
+            case "$release_channel" in
+              ''|stable) ;;
+              *) echo "::error file=$conf::RELEASE_CHANNEL inválido: '$release_channel' (válido: stable)"; fail=1 ;;
+            esac
 
             # Mismo charset que _name_is_valid de install.sh (con rechazo de
             # "."/".." como token completo): evita que un valor raro llegue a
@@ -169,3 +181,9 @@ jobs:
             fi
           done
           exit $fail
+
+      - name: Tests de convivencia y resolución de releases
+        run: |
+          set -euo pipefail
+          sh -n scripts/test-opencode-coexistence.sh
+          sh scripts/test-opencode-coexistence.sh

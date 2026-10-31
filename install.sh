@@ -33,6 +33,8 @@ LOADER=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY_DIR="$SCRIPT_DIR/registry"
 HASH_FILE="$SCRIPT_DIR/sha256.txt"
+# shellcheck source=registry/lib/releases.sh
+source "$SCRIPT_DIR/registry/lib/releases.sh"
 
 # ── Colores ────────────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -156,6 +158,7 @@ fi
 # Variables con defaults seguros antes de cargar el .conf
 APP_NAME=""; DISPLAY_NAME=""; REPO=""
 RELEASE_SOURCE=""; ARCHIVE_TEMPLATE=""; MANIFEST_URL=""
+VERSION_MAJOR=""; RELEASE_CHANNEL=""
 # Overrides opcionales del manifest por arquitectura (uname -m): si hay valor
 # para la arquitectura actual, se usa en vez de MANIFEST_URL. Permite que un
 # tool publique manifests distintos por OS (ej: agy → android en aarch64,
@@ -176,6 +179,7 @@ ARCH_OVERRIDE_X86_64=""
 # Variables de entorno extra para el wrapper (ej: GODEBUG, SSL_CERT_FILE).
 # Array asociativo no es portable en bash 3; se usa un string con newlines.
 WRAPPER_ENV=""
+DOWNLOAD_URL=""
 # Binarios compañeros del bundle que el binario principal invoca por PATH
 # (ej: kiro-cli delega el TUI a kiro-cli-chat). Se patchean igual que ELF_NAME,
 # reciben su propio wrapper en $PREFIX/bin y quedan auditados en el manifest.
@@ -203,6 +207,11 @@ WRAPPER_DEFAULT_ARGS=""
 
 # shellcheck source=/dev/null
 source "$CONF"
+
+if ! release_policy_fields_valid "$VERSION_MAJOR" "$RELEASE_CHANNEL"; then
+  err "$CONF: VERSION_MAJOR debe ser un entero decimal canónico y RELEASE_CHANNEL debe ser vacío o stable."
+  exit 1
+fi
 
 # Validar campos obligatorios del .conf
 for _field in APP_NAME DISPLAY_NAME RELEASE_SOURCE CHECKSUM_ALGO CHECKSUM_SOURCE ELF_NAME; do
@@ -424,6 +433,34 @@ parse_version_tag() {
   fi
   printf '%s' "$out"
 }
+
+PARSED_REQUESTED_VERSION=""
+validate_requested_version() {
+  [[ -n "$REQUESTED_VERSION" ]] || return 0
+
+  PARSED_REQUESTED_VERSION=$(parse_version_tag "$REQUESTED_VERSION")
+  [[ -n "$PARSED_REQUESTED_VERSION" ]] || {
+    err "Versión inválida: '$REQUESTED_VERSION'"
+    err "Formato esperado: X.Y.Z (opcional: -prerelease y/o +build, ej: 0.146.0+android1)"
+    exit 2
+  }
+
+  if [[ -n "$VERSION_MAJOR" ]]; then
+    local requested_major
+    requested_major=$(release_version_major "$PARSED_REQUESTED_VERSION")
+    if [[ "$requested_major" != "$VERSION_MAJOR" ]]; then
+      err "$DISPLAY_NAME solo admite major $VERSION_MAJOR; la versión solicitada es $PARSED_REQUESTED_VERSION."
+      exit 2
+    fi
+  fi
+
+  if [[ "$RELEASE_CHANNEL" == stable ]] && ! release_version_is_stable "$PARSED_REQUESTED_VERSION"; then
+    err "$DISPLAY_NAME solo admite releases estables; la versión solicitada incluye un prerelease."
+    exit 2
+  fi
+}
+
+validate_requested_version
 
 lookup_hashfile() {
   local key="$1"   # ej: opencode/v1.18.9
@@ -699,25 +736,50 @@ github_release_json() {
 # completo del release elegido para que el digest del asset sea el mismo objeto.
 github_latest_release_with_asset() {
   local asset_name="$1"
-  local body code auth_header=()
+  local body code auth_header=() page=1 page_count selected=""
   local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer $token")
-  body=$(mktemp)
-  code=$(curl -sS --proto '=https' --tlsv1.2 -L \
-           --connect-timeout 10 --max-time 300 \
-           --retry 3 --retry-delay 2 --retry-all-errors \
-           -H 'Accept: application/vnd.github+json' \
-           "${auth_header[@]}" \
-           -o "$body" -w '%{http_code}' \
-           "https://api.github.com/repos/$REPO/releases?per_page=100" 2>/dev/null || echo 000)
-  case "$code" in
-    200) jq -c --arg a "$asset_name" \
-            '[.[] | select(([.assets[]?.name] | index($a)) != null)][0] // empty' "$body"
-         rm -f "$body" ;;
-    403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$body"; exit 1 ;;
-    000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$body"; exit 1 ;;
-    *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$body"; exit 1 ;;
-  esac
+
+  while (( page <= 10 )); do
+    body=$(mktemp)
+    code=$(curl -sS --proto '=https' --tlsv1.2 -L \
+             --connect-timeout 10 --max-time 300 \
+             --retry 3 --retry-delay 2 --retry-all-errors \
+             -H 'Accept: application/vnd.github+json' \
+             "${auth_header[@]}" \
+             -o "$body" -w '%{http_code}' \
+             "https://api.github.com/repos/$REPO/releases?per_page=100&page=$page" 2>/dev/null || echo 000)
+    case "$code" in
+      200) ;;
+      403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$body"; exit 1 ;;
+      000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$body"; exit 1 ;;
+      *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$body"; exit 1 ;;
+    esac
+
+    if ! selected=$(release_select_from_page "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" < "$body" 2>/dev/null); then
+      err "GitHub API devolvió una lista inválida o assets ambiguos para '$asset_name'."
+      rm -f "$body"
+      exit 1
+    fi
+    if [[ -n "$selected" ]]; then
+      printf '%s\n' "$selected"
+      rm -f "$body"
+      return 0
+    fi
+
+    if ! page_count=$(jq -er 'if type == "array" then length else error("release response is not an array") end' "$body" 2>/dev/null); then
+      err "GitHub API devolvió una lista de releases inválida."
+      rm -f "$body"
+      exit 1
+    fi
+    rm -f "$body"
+    [[ "$page_count" -gt 0 ]] || break
+    if [[ "$page" -eq 10 ]]; then
+      err "No se encontró un release elegible en las primeras diez páginas de GitHub API."
+      exit 1
+    fi
+    page=$((page + 1))
+  done
 }
 
 resolve_version() {
@@ -725,12 +787,7 @@ resolve_version() {
 
     github)
       if [[ -n "$REQUESTED_VERSION" ]]; then
-        VERSION=$(parse_version_tag "$REQUESTED_VERSION")
-        [[ -n "$VERSION" ]] || {
-          err "Versión inválida: '$REQUESTED_VERSION'"
-          err "Formato esperado: X.Y.Z (opcional: -prerelease y/o +build, ej: 0.146.0+android1)"
-          exit 2
-        }
+        VERSION="$PARSED_REQUESTED_VERSION"
       else
         # Última versión instalable = release más reciente con el asset esperado.
         # Fail-closed: si ningún release lo tiene, error claro (no instalar mal).
@@ -753,6 +810,22 @@ resolve_version() {
         }
       fi
       TAG="v$VERSION"
+      if [[ -n "$VERSION_MAJOR$RELEASE_CHANNEL" ]]; then
+        local asset_name expected_url
+        asset_name=$(expand_template "$ARCHIVE_TEMPLATE")
+        if [[ -z "$RELEASE_JSON" ]]; then
+          RELEASE_JSON=$(github_release_json "tags/$TAG")
+        fi
+        if ! release_validate_object "$RELEASE_JSON" "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" "$TAG"; then
+          err "El release $TAG no cumple la política de versión/canal o no contiene un asset único '$asset_name'."
+          exit 1
+        fi
+        expected_url="https://github.com/$REPO/releases/download/$TAG/$asset_name"
+        if ! DOWNLOAD_URL=$(printf '%s' "$RELEASE_JSON" | release_asset_url "$asset_name" "$expected_url" 2>/dev/null); then
+          err "La URL del asset '$asset_name' no coincide con el release $TAG."
+          exit 1
+        fi
+      fi
       ;;
 
     manifest_json)
@@ -819,12 +892,7 @@ resolve_version() {
 
     url_template)
       if [[ -n "$REQUESTED_VERSION" ]]; then
-        VERSION=$(parse_version_tag "$REQUESTED_VERSION")
-        [[ -n "$VERSION" ]] || {
-          err "Versión inválida: '$REQUESTED_VERSION'"
-          err "Formato esperado: X.Y.Z (opcional: -prerelease y/o +build, ej: 0.146.0+android1)"
-          exit 2
-        }
+        VERSION="$PARSED_REQUESTED_VERSION"
       else
         VERSION=$(latest_hashfile_version)
         if [[ -z "$VERSION" ]]; then
@@ -842,6 +910,17 @@ resolve_version() {
       exit 1
       ;;
   esac
+
+  local resolved_major
+  resolved_major=$(release_version_major "$VERSION")
+  if [[ -n "$VERSION_MAJOR" && "$resolved_major" != "$VERSION_MAJOR" ]]; then
+    err "La versión resuelta $VERSION no pertenece al major $VERSION_MAJOR de $DISPLAY_NAME."
+    exit 1
+  fi
+  if [[ "$RELEASE_CHANNEL" == stable ]] && ! release_version_is_stable "$VERSION"; then
+    err "La versión resuelta $VERSION no pertenece al canal estable de $DISPLAY_NAME."
+    exit 1
+  fi
 
   info "Versión objetivo: $VERSION ($DISPLAY_NAME)"
 }
@@ -978,7 +1057,7 @@ download() {
     github)
       local archive_name
       archive_name=$(expand_template "$ARCHIVE_TEMPLATE")
-      url="https://github.com/$REPO/releases/download/$TAG/$archive_name"
+      url="${DOWNLOAD_URL:-https://github.com/$REPO/releases/download/$TAG/$archive_name}"
       ;;
     manifest_json)
       # DOWNLOAD_URL_TEMPLATE (con {ARCH}) tiene prioridad: el path del
