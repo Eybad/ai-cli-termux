@@ -103,7 +103,7 @@ fi
 # Cargar configuración
 APP_NAME=""; DISPLAY_NAME=""; ELF_NAME=""; CHECKSUM_ALGO="sha256"
 CHECKSUM_SOURCE="hashfile"; NEEDS_PATCHELF=true; EXEC_DIRECT=false
-ALIASES=""; EXTRA_BINS=""
+ALIASES=""; EXTRA_BINS=""; WRAPPER_UNSET_ENV=""; WRAPPER_RUNNER=""
 # shellcheck source=/dev/null
 source "$CONF"
 
@@ -119,6 +119,8 @@ M_VERSION=""; M_TAG=""; M_CHECKSUM_PATCHED=""; M_CHECKSUM_TARBALL=""
 M_INTERP=""; M_RPATH=""; M_ATTEST=""; M_NEEDS_PATCHELF=""
 M_CHECKSUM_ALGO="$CHECKSUM_ALGO"
 M_CHECKSUM_SOURCE=""
+M_WRAPPER_RUNNER=""
+M_RUNNER_CHECKSUM_SHA256=""
 
 if [[ -f "$MANIFEST" ]]; then
   M_VERSION=$(manifest_get version "$MANIFEST")
@@ -131,6 +133,8 @@ if [[ -f "$MANIFEST" ]]; then
   M_NEEDS_PATCHELF=$(manifest_get needs_patchelf "$MANIFEST")
   M_CHECKSUM_ALGO=$(manifest_get checksum_algo "$MANIFEST")
   M_CHECKSUM_SOURCE=$(manifest_get checksum_source "$MANIFEST")
+  M_WRAPPER_RUNNER=$(manifest_get runner_name "$MANIFEST")
+  M_RUNNER_CHECKSUM_SHA256=$(manifest_get runner_checksum_sha256 "$MANIFEST")
   pass "Manifest presente (versión $M_VERSION, instalado $(manifest_get installed_at "$MANIFEST"))"
 
   missing_fields=()
@@ -145,6 +149,36 @@ if [[ -f "$MANIFEST" ]]; then
 else
   warn "No hay manifest en $MANIFEST"
   note "Instalación previa o manual. Reinstalá con 'bash install.sh $APP_NAME -r'."
+fi
+
+if [[ -n "$WRAPPER_RUNNER" && -n "$M_WRAPPER_RUNNER" && "$M_WRAPPER_RUNNER" != "$WRAPPER_RUNNER" ]]; then
+  fail "El manifest no registra el WRAPPER_RUNNER configurado ($WRAPPER_RUNNER)"
+fi
+if [[ -n "$M_WRAPPER_RUNNER" || -n "$WRAPPER_RUNNER" ]]; then
+  if [[ -z "$M_WRAPPER_RUNNER" ]]; then
+    fail "El manifest no registra el runner requerido por el registro"
+  elif [[ ! "$M_WRAPPER_RUNNER" =~ ^[a-zA-Z0-9._-]+$ || "$M_WRAPPER_RUNNER" == "." || "$M_WRAPPER_RUNNER" == ".." ]]; then
+    fail "Nombre de runner inválido en el manifest"
+  else
+    runner_file="$LIBEXEC_DIR/$M_WRAPPER_RUNNER"
+    if [[ ! -f "$runner_file" || ! -x "$runner_file" || -L "$runner_file" ]]; then
+      fail "Runner ausente, no ejecutable o fuera del bundle: $runner_file"
+    elif [[ ! "$M_RUNNER_CHECKSUM_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+      fail "Checksum SHA256 del runner ausente o inválido en el manifest"
+    elif ! command -v sha256sum >/dev/null 2>&1; then
+      fail "sha256sum no está disponible para verificar el runner"
+    else
+      runner_checksum_actual=$(sha256sum "$runner_file" | awk '{print $1}')
+      if [[ "$runner_checksum_actual" == "$M_RUNNER_CHECKSUM_SHA256" ]]; then
+        pass "Runner presente, ejecutable e íntegro: $M_WRAPPER_RUNNER"
+      else
+        fail "Checksum SHA256 incorrecto para el runner $M_WRAPPER_RUNNER"
+      fi
+      if [[ -x "$WRAPPER" ]] && ! grep -Fq "exec \"$runner_file\"" "$WRAPPER"; then
+        fail "El wrapper no invoca el runner registrado"
+      fi
+    fi
+  fi
 fi
 
 # ── 2. Binario presente y ejecutable ──────────────────────────────────────────
@@ -310,6 +344,17 @@ if [[ -x "$WRAPPER" ]]; then
   fi
 else
   fail "Wrapper no encontrado o no ejecutable: $WRAPPER"
+fi
+
+if [[ -n "$WRAPPER_UNSET_ENV" && -x "$WRAPPER" ]]; then
+  while IFS= read -r env_name; do
+    [[ -z "$env_name" || "$env_name" == \#* ]] && continue
+    if [[ ! "$env_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+      fail "WRAPPER_UNSET_ENV inválido en el registro"
+    elif ! grep -Fxq "unset $env_name" "$WRAPPER"; then
+      fail "El wrapper no limpia la variable configurada: $env_name"
+    fi
+  done <<< "$WRAPPER_UNSET_ENV"
 fi
 
 # ── 8.0. Args por defecto (WRAPPER_DEFAULT_ARGS del .conf) ──────────────────

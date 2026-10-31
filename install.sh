@@ -180,6 +180,8 @@ ARCH_OVERRIDE_X86_64=""
 # Array asociativo no es portable en bash 3; se usa un string con newlines.
 WRAPPER_ENV=""
 RUNTIME_SETUP="managed"
+WRAPPER_UNSET_ENV=""
+WRAPPER_RUNNER=""
 DOWNLOAD_URL=""
 # Binarios compañeros del bundle que el binario principal invoca por PATH
 # (ej: kiro-cli delega el TUI a kiro-cli-chat). Se patchean igual que ELF_NAME,
@@ -242,6 +244,19 @@ for _field in APP_NAME ELF_NAME; do
     exit 1
   }
 done
+if [[ -n "$WRAPPER_RUNNER" ]]; then
+  _name_is_valid "$WRAPPER_RUNNER" || {
+    err "$CONF: WRAPPER_RUNNER inválido: '$WRAPPER_RUNNER' (debe ser un basename seguro)."
+    exit 1
+  }
+fi
+while IFS= read -r _env_name; do
+  [[ -z "$_env_name" || "$_env_name" == \#* ]] && continue
+  [[ "$_env_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || {
+    err "$CONF: WRAPPER_UNSET_ENV inválido: '$_env_name' (debe contener identificadores de entorno)."
+    exit 1
+  }
+done <<< "$WRAPPER_UNSET_ENV"
 # DISPLAY_NAME admite espacios pero no comillas, $, backtick ni newline: viajan
 # al heredoc del wrapper sin quoting — comillas/$/backtick romperían sus
 # comillas (inyección), un newline rompe la línea del heredoc (syntax error al
@@ -1314,6 +1329,16 @@ run_pre_wrapper_hook() {
 _write_wrapper() {
   local wrapper_path="$1" bin_path="$2"
   local exec_target="${3:-$bin_path}"
+  local use_runner="${4:-true}"
+
+  local runner_path=""
+  if [[ "$use_runner" == true && -n "$WRAPPER_RUNNER" ]]; then
+    runner_path="$LIBEXEC_DIR/$WRAPPER_RUNNER"
+    if [[ ! -f "$runner_path" || ! -x "$runner_path" || -L "$runner_path" ]]; then
+      err "WRAPPER_RUNNER no existe como archivo ejecutable del bundle: $runner_path"
+      exit 1
+    fi
+  fi
 
   # Construir bloque de exports para variables de entorno del .conf
   local env_block=""
@@ -1328,6 +1353,12 @@ _write_wrapper() {
       fi
     done <<< "$WRAPPER_ENV"
   fi
+
+  local unset_block="" env_name
+  while IFS= read -r env_name; do
+    [[ -z "$env_name" || "$env_name" == \#* ]] && continue
+    unset_block+="unset $env_name"$'\n'
+  done <<< "$WRAPPER_UNSET_ENV"
 
   # Ejecución: el binario patcheado (o el entry point del bundle si el .conf
   # define ENTRY_POINT — create_wrapper pasa el target a ejecutar). En el modo
@@ -1354,6 +1385,13 @@ _write_wrapper() {
   local exec_cmd="exec \"\$EXEC_TARGET\"${default_args} \"\$@\""
   if [[ "$NEEDS_PATCHELF" == false && "$EXEC_DIRECT" != true ]]; then
     exec_cmd="exec \"$LOADER\" --library-path \"$RPATH\" \"\$EXEC_TARGET\"${default_args} \"\$@\""
+  fi
+  if [[ -n "$runner_path" ]]; then
+    if [[ "$NEEDS_PATCHELF" == false && "$EXEC_DIRECT" != true ]]; then
+      exec_cmd="exec \"$runner_path\" \"$LOADER\" --library-path \"$RPATH\" \"\$EXEC_TARGET\"${default_args} \"\$@\""
+    else
+      exec_cmd="exec \"$runner_path\" \"\$EXEC_TARGET\"${default_args} \"\$@\""
+    fi
   fi
 
   # Subcomandos denegados por configuración (WRAPPER_DENY_ARGS del .conf):
@@ -1411,6 +1449,7 @@ unset LD_PRELOAD
 unset LD_LIBRARY_PATH
 
 # Variables de entorno específicas de esta herramienta (definidas en el .conf)
+${unset_block}
 ${env_block}
 ${deny_block}
 ${exec_cmd}
@@ -1441,7 +1480,7 @@ create_wrapper() {
 
   local extra
   for extra in $EXTRA_BINS; do
-    _write_wrapper "$PREFIX/bin/$extra" "$LIBEXEC_DIR/$extra"
+    _write_wrapper "$PREFIX/bin/$extra" "$LIBEXEC_DIR/$extra" "$LIBEXEC_DIR/$extra" false
     info "Wrapper creado en $PREFIX/bin/$extra"
   done
 
@@ -1477,6 +1516,11 @@ write_manifest() {
     extra_line+="extra_checksum_${name}=${hash}"$'\n'
   done
 
+  local runner_checksum_sha256=""
+  if [[ -n "$WRAPPER_RUNNER" ]]; then
+    runner_checksum_sha256=$(sha256sum "$LIBEXEC_DIR/$WRAPPER_RUNNER" | awk '{print $1}')
+  fi
+
   cat > "$MANIFEST" <<EOF
 # Generado por install.sh. No editar a mano.
 # verify.sh compara el estado instalado contra estos valores.
@@ -1500,6 +1544,8 @@ interpreter=${LOADER}
 rpath=${RPATH}
 attestation=$ATTEST_STATUS
 extra_bins=$EXTRA_BINS
+runner_name=$WRAPPER_RUNNER
+runner_checksum_sha256=$runner_checksum_sha256
 ${extra_line}installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   chmod 644 "$MANIFEST"
