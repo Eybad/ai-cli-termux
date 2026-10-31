@@ -106,6 +106,53 @@ opencode_v2_runtime_create_private_dir() {
   chmod 700 "$1"
 }
 
+opencode_v2_runtime_seed_config() {
+  opencode_v2_runtime_default_config_dir="$opencode_v2_runtime_config_dir/opencode"
+  opencode_v2_runtime_default_config_file="$opencode_v2_runtime_default_config_dir/opencode.json"
+  opencode_v2_runtime_create_private_dir "$opencode_v2_runtime_default_config_dir" || return 1
+
+  if [ -e "$opencode_v2_runtime_default_config_file" ] ||
+     [ -L "$opencode_v2_runtime_default_config_file" ]; then
+    [ -f "$opencode_v2_runtime_default_config_file" ] &&
+      [ ! -L "$opencode_v2_runtime_default_config_file" ] || {
+        opencode_v2_runtime_error 'La configuración de OpenCode v2 no es un archivo regular.'
+        return 1
+      }
+    return 0
+  fi
+
+  opencode_v2_runtime_default_config_tmp=$(mktemp \
+    "$opencode_v2_runtime_default_config_dir/.opencode.json.XXXXXX") || return 1
+  if ! cat > "$opencode_v2_runtime_default_config_tmp" <<'EOF'
+{"update":"disable","permissions":[{"action":"external_directory","resource":"*","effect":"ask"}]}
+EOF
+  then
+    rm -f "$opencode_v2_runtime_default_config_tmp"
+    return 1
+  fi
+  chmod 600 "$opencode_v2_runtime_default_config_tmp" || {
+    rm -f "$opencode_v2_runtime_default_config_tmp"
+    return 1
+  }
+  if ! mv -n "$opencode_v2_runtime_default_config_tmp" \
+    "$opencode_v2_runtime_default_config_file"; then
+    rm -f "$opencode_v2_runtime_default_config_tmp"
+    opencode_v2_runtime_error 'No se pudo crear la configuración segura de OpenCode v2.'
+    return 1
+  fi
+  if [ -e "$opencode_v2_runtime_default_config_tmp" ] ||
+     [ -L "$opencode_v2_runtime_default_config_tmp" ]; then
+    rm -f "$opencode_v2_runtime_default_config_tmp"
+    if [ -f "$opencode_v2_runtime_default_config_file" ] &&
+       [ ! -L "$opencode_v2_runtime_default_config_file" ]; then
+      return 0
+    fi
+    opencode_v2_runtime_error 'No se pudo crear la configuración segura de OpenCode v2.'
+    return 1
+  fi
+  return 0
+}
+
 opencode_v2_runtime_acquire_run_lock() {
   umask 077
   opencode_v2_runtime_create_private_dir "$opencode_v2_runtime_recovery" || return 1
@@ -196,6 +243,8 @@ opencode_v2_runtime_prepare_profile() {
   export OPENCODE_DISABLE_EXTERNAL_SKILLS=1
   export OPENCODE_DISABLE_CLAUDE_CODE=1
   export TMPDIR="$opencode_v2_runtime_tmp_dir"
+
+  opencode_v2_runtime_seed_config || return 1
 
   unset OPENCODE_CONFIG OPENCODE_CONFIG_DIR OPENCODE_CONFIG_CONTENT OPENCODE_CLI_CONFIG_CONTENT OPENCODE_TUI_CONFIG
   unset OPENCODE_PERMISSION OPENCODE_SERVER OPENCODE_SERVER_PASSWORD OPENCODE_PASSWORD

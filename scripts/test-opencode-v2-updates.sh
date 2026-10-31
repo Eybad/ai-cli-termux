@@ -45,6 +45,9 @@ case "${1:-}" in
     [ "$XDG_CONFIG_HOME" = "$EXPECTED_HOME/.local/share/ai-cli-termux/opencode-v2/config" ] || exit 92
     [ "$XDG_DATA_HOME" = "$EXPECTED_HOME/.local/share/ai-cli-termux/opencode-v2/data" ] || exit 93
     [ "$OPENCODE_DB" = "$XDG_DATA_HOME/opencode-v2.db" ] || exit 94
+    [ -f "$XDG_CONFIG_HOME/opencode/opencode.json" ] || exit 102
+    grep -Fq '"update":"disable"' "$XDG_CONFIG_HOME/opencode/opencode.json" || exit 103
+    grep -Fq '"effect":"ask"' "$XDG_CONFIG_HOME/opencode/opencode.json" || exit 104
     printf 'server listening on http://127.0.0.1:43129\n'
     exec sleep 120
     ;;
@@ -135,6 +138,26 @@ cmp -s "$debug_root/expected-paths" "$debug_root/paths.out" || {
   exit 1
 }
 printf 'PASS: --version no crea perfil y debug paths usa el perfil aislado sin servidor\n'
+
+existing_config_root="$test_root/existing-config"
+existing_config_home="$existing_config_root/home"
+existing_config_dir="$existing_config_home/.local/share/ai-cli-termux/opencode-v2/config/opencode"
+mkdir -p "$existing_config_dir"
+printf '{"model":"synthetic"}\n' > "$existing_config_dir/opencode.json"
+cp "$existing_config_dir/opencode.json" "$existing_config_root/expected.json"
+if HOME="$existing_config_home" PREFIX="$prefix" TMPDIR="$prefix/tmp" \
+  sh "$runtime" "$fake_bin/loader" --library-path "$fake_lib" \
+    "$fake_bin/opencode" debug paths > "$existing_config_root/paths.out"; then
+  :
+else
+  printf 'FAIL: no aceptó una configuración v2 existente\n' >&2
+  exit 1
+fi
+cmp -s "$existing_config_root/expected.json" "$existing_config_dir/opencode.json" || {
+  printf 'FAIL: reemplazó la configuración v2 existente\n' >&2
+  exit 1
+}
+printf 'PASS: conserva la configuración v2 existente\n'
 
 symlink_root="$test_root/symlink"
 symlink_home="$symlink_root/home"
