@@ -365,6 +365,7 @@ if [ -d /data/data/com.termux ]; then
   transaction_tmp="$transaction_root/tmp"
   transaction_recovery="$transaction_home/.local/share/ai-cli-termux/recovery/fake"
   transaction_phases="$transaction_root/phases"
+  transaction_curl_timeouts="$transaction_root/curl-timeouts"
   mkdir -p "$transaction_repo/registry/lib" "$transaction_bin" "$transaction_home" \
     "$transaction_prefix/tmp" "$transaction_tmp"
   cp "$repo_dir/install.sh" "$transaction_repo/install.sh"
@@ -373,13 +374,16 @@ if [ -d /data/data/com.termux ]; then
 #!/bin/sh
 set -eu
 output_file=
+max_time=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) output_file=$2; shift 2 ;;
+    --max-time) max_time=$2; shift 2 ;;
     *) shift ;;
   esac
 done
-[ -n "$output_file" ] || exit 97
+[ -n "$output_file" ] && [ -n "$max_time" ] || exit 97
+printf '%s\n' "$max_time" >> "$CURL_TIMEOUT_LOG"
 printf 'synthetic installer archive\n' > "$output_file"
 EOF
   cat > "$transaction_bin/tar" <<'EOF'
@@ -485,6 +489,7 @@ EOF
   export MOCK_TX_PKG_LOG="$transaction_root/pkg.log"
   export MOCK_TX_PHASES="$transaction_phases"
   export MOCK_TX_RECOVERY="$transaction_recovery"
+  export CURL_TIMEOUT_LOG="$transaction_curl_timeouts"
 
   run_transaction_install() {
     txn_hook_mode="$1"
@@ -508,18 +513,28 @@ EOF
     printf 'FAIL: el flujo legado sin hook transaccional dejó de instalar\n' >&2
     exit 1
   }
+  grep -Fxq 300 "$transaction_curl_timeouts" || {
+    printf 'FAIL: el timeout por defecto de descarga dejó de ser 300 s\n' >&2
+    exit 1
+  }
   [ ! -e "$transaction_phases" ] || { printf 'FAIL: ejecutó hooks sin declararlos\n' >&2; exit 1; }
   [ "$("$transaction_prefix/bin/fake" --version)" = 1.0.0 ] || {
     printf 'FAIL: el flujo legado no conservó el wrapper funcional\n' >&2
     exit 1
   }
 
+  printf 'DOWNLOAD_MAX_TIME=600\n' >> "$transaction_repo/registry/fake.conf"
   run_transaction_install 1 1.1.0 '' -r -v 1.1.0
   [ "$txn_status" -eq 0 ] || {
     cat "$transaction_root/stderr" >&2
     printf 'FAIL: el flujo transaccional no completó prepare/validate/commit\n' >&2
     exit 1
   }
+  if [ "$(wc -l < "$transaction_curl_timeouts")" -ne 2 ] ||
+     ! grep -Fxq 600 "$transaction_curl_timeouts"; then
+    printf 'FAIL: el timeout configurado no llegó al comando curl\n' >&2
+    exit 1
+  fi
   printf 'prepare\nvalidate\ncommit\n' > "$transaction_root/expected-phases"
   cmp -s "$transaction_root/expected-phases" "$transaction_phases" || {
     printf 'FAIL: el instalador no respetó el orden de fases\n' >&2
@@ -563,7 +578,23 @@ EOF
     printf 'FAIL: commit fallido no restauró el wrapper anterior\n' >&2
     exit 1
   }
+  timeout_count=$(wc -l < "$transaction_curl_timeouts")
+  printf 'DOWNLOAD_MAX_TIME=0\n' >> "$transaction_repo/registry/fake.conf"
+  run_transaction_install 1 1.2.0 '' -r -v 1.2.0
+  [ "$txn_status" -eq 1 ] || {
+    printf 'FAIL: aceptó un timeout de descarga inválido\n' >&2
+    exit 1
+  }
+  [ "$(wc -l < "$transaction_curl_timeouts")" -eq "$timeout_count" ] || {
+    printf 'FAIL: un timeout inválido alcanzó la descarga\n' >&2
+    exit 1
+  }
+  [ "$("$transaction_prefix/bin/fake" --version)" = 1.1.0 ] || {
+    printf 'FAIL: un timeout inválido alteró la instalación\n' >&2
+    exit 1
+  }
   [ ! -s "$MOCK_TX_PKG_LOG" ] || { printf 'FAIL: la transacción invocó pkg\n' >&2; exit 1; }
+  printf 'PASS: el instalador aplica timeouts configurables y rechaza valores inválidos\n'
   printf 'PASS: hooks transaccionales: flujo legado, orden, validate/commit fallidos y rollback\n'
 else
   printf 'SKIP: integración real de install.sh requiere ejecutarse dentro de Termux\n'

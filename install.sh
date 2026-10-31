@@ -160,6 +160,7 @@ APP_NAME=""; DISPLAY_NAME=""; REPO=""
 RELEASE_SOURCE=""; ARCHIVE_TEMPLATE=""; MANIFEST_URL=""
 VERSION_MAJOR=""; RELEASE_CHANNEL=""
 RELEASE_POLICY_FILE=""
+DOWNLOAD_MAX_TIME=300
 # Overrides opcionales del manifest por arquitectura (uname -m): si hay valor
 # para la arquitectura actual, se usa en vez de MANIFEST_URL. Permite que un
 # tool publique manifests distintos por OS (ej: agy → android en aarch64,
@@ -237,6 +238,10 @@ if [[ -n "$RELEASE_POLICY_FILE" ]]; then
     err "$CONF: catálogo ausente o no regular: $RELEASE_POLICY_FILE"
     exit 1
   fi
+fi
+if [[ ! "$DOWNLOAD_MAX_TIME" =~ ^[1-9][0-9]{0,4}$ ]]; then
+  err "$CONF: DOWNLOAD_MAX_TIME debe ser un entero entre 1 y 99999 segundos."
+  exit 1
 fi
 
 if ! release_policy_fields_valid "$VERSION_MAJOR" "$RELEASE_CHANNEL"; then
@@ -1298,7 +1303,7 @@ download() {
   TMP_FILE=$(mktemp "$tmp_dir/$APP_NAME-install-XXXXXX.tar.gz")
 
   info "Descargando $DISPLAY_NAME $VERSION..."
-  if ! curl -fL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 --retry-all-errors -o "$TMP_FILE" "$url"; then
+  if ! curl -fL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time "$DOWNLOAD_MAX_TIME" --retry 3 --retry-delay 2 --retry-all-errors -o "$TMP_FILE" "$url"; then
     err "Falló la descarga desde $(printf '%s' "$url" | tr -d '[:cntrl:]')"
     exit 1
   fi

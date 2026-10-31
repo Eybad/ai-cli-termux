@@ -33,6 +33,8 @@ fail() {
   fail 'la política no limita la release a stable major 2'
 [[ "$RELEASE_POLICY_FILE" == registry/releases/opencode-v2.json ]] ||
   fail 'el instalador no usa el catálogo v2'
+[[ "$DOWNLOAD_MAX_TIME" == 600 ]] ||
+  fail 'el tiempo de descarga no alcanza para el asset de v2'
 [[ "$RUNTIME_SETUP" == existing && "$NEEDS_PATCHELF" == false &&
   "$EXEC_DIRECT" == false ]] || fail 'v2 intentaría provisionar o ejecutar otro runtime'
 [[ "$WRAPPER_RUNNER" == opencode-v2-runtime.sh ]] ||
