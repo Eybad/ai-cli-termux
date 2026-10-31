@@ -328,3 +328,216 @@ if kill -0 "$(cat "$SERVER_PID_FILE")" 2>/dev/null || kill -0 "$(cat "$CLIENT_PI
   exit 1
 fi
 printf 'PASS: TERM cierra y espera cliente, servidor y lector privados\n'
+
+if [ -d /data/data/com.termux ]; then
+  transaction_root="$test_root/installer-transaction"
+  transaction_repo="$transaction_root/repo"
+  transaction_bin="$transaction_root/bin"
+  transaction_home="$transaction_root/home"
+  transaction_prefix="$transaction_root/prefix"
+  transaction_tmp="$transaction_root/tmp"
+  transaction_recovery="$transaction_home/.local/share/ai-cli-termux/recovery/fake"
+  transaction_phases="$transaction_root/phases"
+  mkdir -p "$transaction_repo/registry/lib" "$transaction_bin" "$transaction_home" \
+    "$transaction_prefix/tmp" "$transaction_tmp"
+  cp "$repo_dir/install.sh" "$transaction_repo/install.sh"
+  cp "$repo_dir/registry/lib/releases.sh" "$transaction_repo/registry/lib/releases.sh"
+  cat > "$transaction_bin/curl" <<'EOF'
+#!/bin/sh
+set -eu
+output_file=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output_file=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$output_file" ] || exit 97
+printf 'synthetic installer archive\n' > "$output_file"
+EOF
+  cat > "$transaction_bin/tar" <<'EOF'
+#!/bin/sh
+set -eu
+extract_dir=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -C) extract_dir=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$extract_dir" ] || exit 98
+mkdir -p "$extract_dir"
+cat > "$extract_dir/fake" <<BINARY
+#!/bin/sh
+printf '%s\n' '$MOCK_BINARY_VERSION'
+BINARY
+chmod 755 "$extract_dir/fake"
+EOF
+  cat > "$transaction_bin/file" <<'EOF'
+#!/bin/sh
+set -eu
+case "$(uname -m)" in
+  aarch64) elf_arch='ARM aarch64' ;;
+  x86_64) elf_arch='x86-64' ;;
+  *) exit 99 ;;
+esac
+case "$1" in
+  *.tar.gz) printf 'gzip compressed data\n' ;;
+  *) printf 'ELF 64-bit LSB pie executable, %s\n' "$elf_arch" ;;
+esac
+EOF
+  cat > "$transaction_bin/pkg" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MOCK_TX_PKG_LOG"
+exit 99
+EOF
+  chmod 755 "$transaction_bin/curl" "$transaction_bin/tar" \
+    "$transaction_bin/file" "$transaction_bin/pkg"
+
+  cat > "$transaction_repo/registry/fake.conf" <<'EOF'
+APP_NAME="fake"
+DISPLAY_NAME="Synthetic CLI"
+RELEASE_SOURCE="url_template"
+DOWNLOAD_URL_TEMPLATE="https://fixture.invalid/fake-{VERSION}-{ARCH}.tar.gz"
+CHECKSUM_ALGO="sha256"
+CHECKSUM_SOURCE="hashfile"
+ELF_NAME="fake"
+NEEDS_PATCHELF=false
+EXEC_DIRECT=true
+RUNTIME_SETUP="existing"
+VERSION_MAJOR="1"
+RELEASE_CHANNEL="stable"
+
+if [[ "${MOCK_TX_HOOK:-0}" == 1 ]]; then
+  install_transaction_hook() {
+    local phase="$1"
+    printf '%s\n' "$phase" >> "$MOCK_TX_PHASES"
+    case "$phase" in
+      prepare)
+        BACKUP_DIR="$MOCK_TX_RECOVERY/current/bundle"
+        mkdir -p "$(dirname "$BACKUP_DIR")"
+        ;;
+      validate)
+        [[ -f "$MANIFEST" && "$INSTALL_DONE" == false ]] || return 1
+        [[ "$MOCK_TX_FAIL_PHASE" != validate ]] || return 1
+        ;;
+      commit)
+        [[ "$MOCK_TX_FAIL_PHASE" != commit ]] || return 1
+        if [[ -d "$BACKUP_DIR" ]]; then
+          if [[ -d "$MOCK_TX_RECOVERY/previous" ]]; then
+            mv "$MOCK_TX_RECOVERY/previous" "$MOCK_TX_RECOVERY/previous.old"
+          fi
+          mv "$BACKUP_DIR" "$MOCK_TX_RECOVERY/previous"
+          rm -rf "$MOCK_TX_RECOVERY/previous.old"
+        fi
+        ;;
+      rollback)
+        if [[ -d "$BACKUP_DIR" ]]; then
+          rm -rf "$LIBEXEC_DIR"
+          mv "$BACKUP_DIR" "$LIBEXEC_DIR"
+          if [[ -f "$LIBEXEC_DIR/.wrapper" ]]; then
+            mv "$LIBEXEC_DIR/.wrapper" "$WRAPPER"
+          else
+            rm -f "$WRAPPER"
+          fi
+        elif [[ "$FRESH_INSTALL" == true ]]; then
+          rm -rf "$LIBEXEC_DIR"
+          rm -f "$WRAPPER"
+        fi
+        ;;
+      *) return 2 ;;
+    esac
+  }
+fi
+EOF
+  printf 'synthetic installer archive\n' > "$transaction_root/archive"
+  transaction_hash=$(sha256sum "$transaction_root/archive" | awk '{print $1}')
+  printf 'fake/v1.0.0 %s\nfake/v1.1.0 %s\nfake/v1.2.0 %s\n' \
+    "$transaction_hash" "$transaction_hash" "$transaction_hash" \
+    > "$transaction_repo/sha256.txt"
+  export MOCK_TX_PKG_LOG="$transaction_root/pkg.log"
+  export MOCK_TX_PHASES="$transaction_phases"
+  export MOCK_TX_RECOVERY="$transaction_recovery"
+
+  run_transaction_install() {
+    txn_hook_mode="$1"
+    txn_binary_version="$2"
+    txn_fail_phase="$3"
+    shift 3
+    if MOCK_TX_HOOK="$txn_hook_mode" MOCK_BINARY_VERSION="$txn_binary_version" \
+      MOCK_TX_FAIL_PHASE="$txn_fail_phase" PREFIX="$transaction_prefix" \
+      HOME="$transaction_home" TMPDIR="$transaction_tmp" \
+      PATH="$transaction_bin:$PATH" bash "$transaction_repo/install.sh" fake "$@" \
+      > "$transaction_root/stdout" 2> "$transaction_root/stderr"; then
+      txn_status=0
+    else
+      txn_status=$?
+    fi
+  }
+
+  run_transaction_install 0 1.0.0 '' -v 1.0.0
+  [ "$txn_status" -eq 0 ] || {
+    cat "$transaction_root/stderr" >&2
+    printf 'FAIL: el flujo legado sin hook transaccional dejó de instalar\n' >&2
+    exit 1
+  }
+  [ ! -e "$transaction_phases" ] || { printf 'FAIL: ejecutó hooks sin declararlos\n' >&2; exit 1; }
+  [ "$("$transaction_prefix/bin/fake" --version)" = 1.0.0 ] || {
+    printf 'FAIL: el flujo legado no conservó el wrapper funcional\n' >&2
+    exit 1
+  }
+
+  run_transaction_install 1 1.1.0 '' -r -v 1.1.0
+  [ "$txn_status" -eq 0 ] || {
+    cat "$transaction_root/stderr" >&2
+    printf 'FAIL: el flujo transaccional no completó prepare/validate/commit\n' >&2
+    exit 1
+  }
+  printf 'prepare\nvalidate\ncommit\n' > "$transaction_root/expected-phases"
+  cmp -s "$transaction_root/expected-phases" "$transaction_phases" || {
+    printf 'FAIL: el instalador no respetó el orden de fases\n' >&2
+    exit 1
+  }
+  grep -Fxq 'version=1.0.0' "$transaction_recovery/previous/manifest.txt" || {
+    printf 'FAIL: commit no conservó el bundle anterior\n' >&2
+    exit 1
+  }
+  [ "$("$transaction_prefix/bin/fake" --version)" = 1.1.0 ] || {
+    printf 'FAIL: el wrapper nuevo no quedó funcional después del commit\n' >&2
+    exit 1
+  }
+
+  : > "$transaction_phases"
+  run_transaction_install 1 1.2.0 validate -r -v 1.2.0
+  [ "$txn_status" -eq 1 ] || { printf 'FAIL: no propagó el fallo de validate\n' >&2; exit 1; }
+  printf 'prepare\nvalidate\nrollback\n' > "$transaction_root/expected-phases"
+  cmp -s "$transaction_root/expected-phases" "$transaction_phases" || {
+    printf 'FAIL: no ejecutó rollback después de fallar validate\n' >&2
+    exit 1
+  }
+  [ "$("$transaction_prefix/bin/fake" --version)" = 1.1.0 ] || {
+    printf 'FAIL: validate fallido no restauró el wrapper anterior\n' >&2
+    exit 1
+  }
+  grep -Fxq 'version=1.1.0' "$transaction_prefix/libexec/fake/manifest.txt" || {
+    printf 'FAIL: validate fallido dejó un manifest mezclado\n' >&2
+    exit 1
+  }
+
+  : > "$transaction_phases"
+  run_transaction_install 1 1.2.0 commit -r -v 1.2.0
+  [ "$txn_status" -eq 1 ] || { printf 'FAIL: no propagó el fallo de commit\n' >&2; exit 1; }
+  printf 'prepare\nvalidate\ncommit\nrollback\n' > "$transaction_root/expected-phases"
+  cmp -s "$transaction_root/expected-phases" "$transaction_phases" || {
+    printf 'FAIL: no ejecutó rollback después de fallar commit\n' >&2
+    exit 1
+  }
+  [ "$("$transaction_prefix/bin/fake" --version)" = 1.1.0 ] || {
+    printf 'FAIL: commit fallido no restauró el wrapper anterior\n' >&2
+    exit 1
+  }
+  [ ! -s "$MOCK_TX_PKG_LOG" ] || { printf 'FAIL: la transacción invocó pkg\n' >&2; exit 1; }
+  printf 'PASS: hooks transaccionales: flujo legado, orden, validate/commit fallidos y rollback\n'
+else
+  printf 'SKIP: integración real de install.sh requiere ejecutarse dentro de Termux\n'
+fi

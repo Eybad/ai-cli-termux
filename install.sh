@@ -212,6 +212,11 @@ WRAPPER_DEFAULT_ARGS=""
 # shellcheck source=/dev/null
 source "$CONF"
 
+INSTALL_TRANSACTION_ENABLED=false
+if declare -f install_transaction_hook >/dev/null 2>&1; then
+  INSTALL_TRANSACTION_ENABLED=true
+fi
+
 case "$RUNTIME_SETUP" in
   managed|existing) ;;
   *)
@@ -381,6 +386,7 @@ EXTRACT_DIR=""
 BACKUP_DIR=""
 FRESH_INSTALL=false
 INSTALL_DONE=false
+INSTALL_TRANSACTION_STARTED=false
 VERSION=""; TAG=""; TARBALL_CHECKSUM=""; BIN_CHECKSUM_ORIG=""; BIN_CHECKSUM_PATCHED=""
 # Checksums post-patchelf de los binarios compañeros, como "nombre=hash ".
 EXTRA_PATCHED=""
@@ -394,7 +400,14 @@ cleanup() {
   [[ -n "$TMP_FILE" && -f "$TMP_FILE" ]]   && rm -f "$TMP_FILE"
   [[ -n "$EXTRACT_DIR" && -d "$EXTRACT_DIR" ]] && rm -rf "$EXTRACT_DIR"
 
-  if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
+  if [[ "$INSTALL_TRANSACTION_STARTED" == true ]]; then
+    if [[ $rc -ne 0 && "$INSTALL_DONE" != true ]]; then
+      warn "Instalación transaccional fallida ($DISPLAY_NAME): restaurando el conjunto anterior..."
+      if ! install_transaction_hook rollback; then
+        err "La recuperación transaccional de $DISPLAY_NAME falló; se conserva el journal y los respaldos."
+      fi
+    fi
+  elif [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
     if [[ $rc -ne 0 && "$INSTALL_DONE" != true ]]; then
       warn "Instalación fallida ($DISPLAY_NAME): restaurando versión anterior..."
       # Delta de esta corrida: los shims/aliases NUEVOS que la versión previa
@@ -1374,8 +1387,15 @@ extract_install() {
 
   # Respaldar instalación previa para rollback
   if [[ -d "$LIBEXEC_DIR" ]]; then
-    BACKUP_DIR="$(dirname "$LIBEXEC_DIR")/.$APP_NAME.backup.$$"
-    rm -rf "$BACKUP_DIR"
+    if [[ "$INSTALL_TRANSACTION_ENABLED" == true ]]; then
+      if [[ -L "$LIBEXEC_DIR" || -z "$BACKUP_DIR" || -e "$BACKUP_DIR" || -L "$BACKUP_DIR" ]]; then
+        err 'El hook transaccional no reservó un destino seguro para el bundle anterior.'
+        exit 1
+      fi
+    else
+      BACKUP_DIR="$(dirname "$LIBEXEC_DIR")/.$APP_NAME.backup.$$"
+      rm -rf "$BACKUP_DIR"
+    fi
     mv "$LIBEXEC_DIR" "$BACKUP_DIR"
     # Copia del wrapper actual dentro del backup: con ENTRY_POINT el wrapper
     # apunta a un archivo del bundle (ej: launcher del .conf actual), así que
@@ -1727,7 +1747,7 @@ verify_install() {
   version_core=$(normalize_version "$VERSION")
   [[ -n "$got" && "$got" != "$version_core" ]] && \
     warn "Versión reportada ($got) ≠ esperada ($VERSION)."
-  INSTALL_DONE=true
+  [[ "$INSTALL_TRANSACTION_ENABLED" == true ]] || INSTALL_DONE=true
   info "$DISPLAY_NAME ${got:-$VERSION} funcionando correctamente."
 }
 
@@ -1755,6 +1775,13 @@ run_post_install_hook() {
     info "Ejecutando post_install_hook..."
     post_install_hook
   fi
+}
+
+run_install_transaction_hook() {
+  local phase="$1"
+  [[ "$INSTALL_TRANSACTION_ENABLED" == true ]] || return 0
+  info "Ejecutando install_transaction_hook ($phase)..."
+  install_transaction_hook "$phase"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1793,17 +1820,30 @@ main() {
   download
   verify_tarball
   verify_attestation
+  if [[ "$INSTALL_TRANSACTION_ENABLED" == true ]]; then
+    INSTALL_TRANSACTION_STARTED=true
+    run_install_transaction_hook prepare || exit 1
+  fi
   extract_install
   patch_interpreter
   ensure_nsswitch
   run_pre_wrapper_hook
   create_wrapper
-  # El manifest se escribe DESPUÉS de verificar la instalación.
-  # Si se escribiera antes, una instalación fallida dejaría un manifest válido
-  # y la próxima corrida la tomaría por buena.
-  verify_install
-  write_manifest
-  run_post_install_hook
+  if [[ "$INSTALL_TRANSACTION_ENABLED" == true ]]; then
+    write_manifest
+    verify_install
+    run_post_install_hook
+    run_install_transaction_hook validate
+    run_install_transaction_hook commit
+    INSTALL_DONE=true
+  else
+    # El manifest se escribe DESPUÉS de verificar la instalación.
+    # Si se escribiera antes, una instalación fallida dejaría un manifest válido
+    # y la próxima corrida la tomaría por buena.
+    verify_install
+    write_manifest
+    run_post_install_hook
+  fi
   show_summary
 }
 
