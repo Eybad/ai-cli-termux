@@ -357,6 +357,51 @@ grep -Fxq 'candidate database 2.2.7' \
 }
 printf 'PASS: rollback offline reanuda después de mover el perfil desplazado\n'
 
+initial_snapshot_root="$test_root/initial-snapshot"
+mkdir -p "$initial_snapshot_root"
+setup_transaction "$initial_snapshot_root" 2.2.6 v2.2.6 2 2.2.7 v2.2.7 3
+legacy_previous="$HOME/.local/share/ai-cli-termux/recovery/opencode-v2/previous"
+mkdir -p "$legacy_previous/profile"
+opencode_v2_runtime_tx_phase=committing
+opencode_v2_runtime_tx_restore_from_previous=false
+opencode_v2_runtime_tx_had_bundle=0
+opencode_v2_runtime_tx_had_wrapper=0
+opencode_v2_runtime_tx_had_profile=0
+opencode_v2_runtime_tx_old_version=''
+opencode_v2_runtime_tx_old_tag=''
+opencode_v2_runtime_tx_old_sequence=''
+opencode_v2_runtime_tx_old_contract=''
+opencode_v2_runtime_tx_old_source_commit=''
+opencode_v2_runtime_tx_old_digest=''
+opencode_v2_runtime_tx_old_bundle_digest=''
+opencode_v2_runtime_tx_old_wrapper_digest=''
+opencode_v2_runtime_tx_profile_digest=$(opencode_v2_runtime_transaction_tree_digest \
+  "$legacy_previous/profile")
+opencode_v2_runtime_tx_candidate_version=2.2.5
+opencode_v2_runtime_tx_candidate_tag=v2.2.5
+opencode_v2_runtime_tx_candidate_sequence=1
+opencode_v2_runtime_tx_candidate_contract=termux-glibc-1
+opencode_v2_runtime_tx_candidate_source_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+opencode_v2_runtime_tx_candidate_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+opencode_v2_runtime_tx_candidate_bundle_digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+opencode_v2_runtime_tx_candidate_wrapper_digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+opencode_v2_runtime_transaction_write_journal committing
+mv "$opencode_v2_runtime_journal" "$legacy_previous/transaction.txt"
+opencode_v2_runtime_transaction_prepare
+create_candidate 2.2.7 v2.2.7 3
+VERIFY_RESULT=0 opencode_v2_runtime_transaction_validate
+opencode_v2_runtime_transaction_commit
+grep -Fxq 'version=2.2.6' \
+  "$HOME/.local/share/ai-cli-termux/recovery/opencode-v2/previous/bundle/manifest.txt" || {
+  printf 'FAIL: el snapshot inicial impidió guardar la v2 previa\n' >&2
+  exit 1
+}
+[ ! -e "$HOME/.local/share/ai-cli-termux/recovery/opencode-v2/previous.old" ] || {
+  printf 'FAIL: conservó una generación de recuperación extra\n' >&2
+  exit 1
+}
+printf 'PASS: una reinstalación rota conserva la última v2 confirmada\n'
+
 corrupt_previous_root="$test_root/corrupt-previous"
 mkdir -p "$corrupt_previous_root"
 setup_transaction "$corrupt_previous_root" 2.2.6 v2.2.6 2 2.2.7 v2.2.7 3

@@ -581,36 +581,55 @@ opencode_v2_runtime_transaction_validate_previous() {
   opencode_v2_runtime_previous="$opencode_v2_runtime_recovery/previous"
   [ -d "$opencode_v2_runtime_previous" ] && [ ! -L "$opencode_v2_runtime_previous" ] || return 1
   opencode_v2_runtime_transaction_load_journal "$opencode_v2_runtime_previous/transaction.txt" || return 1
-  [ "$opencode_v2_runtime_tx_phase" = committing ] &&
-    [ "$opencode_v2_runtime_tx_had_bundle" = 1 ] &&
-    [ "$opencode_v2_runtime_tx_had_wrapper" = 1 ] || return 1
+  [ "$opencode_v2_runtime_tx_phase" = committing ] || return 1
   opencode_v2_runtime_previous_bundle="$opencode_v2_runtime_previous/bundle"
   opencode_v2_runtime_previous_profile="$opencode_v2_runtime_previous/profile"
-  opencode_v2_runtime_transaction_verify_bundle "$opencode_v2_runtime_previous_bundle" || return 1
-  [ "$(opencode_v2_runtime_transaction_value \
-    "$opencode_v2_runtime_previous_bundle/manifest.txt" version)" = "$opencode_v2_runtime_tx_old_version" ] &&
-    [ "$(opencode_v2_runtime_transaction_value \
-      "$opencode_v2_runtime_previous_bundle/manifest.txt" tag)" = "$opencode_v2_runtime_tx_old_tag" ] &&
-    [ "$(opencode_v2_runtime_transaction_value \
-      "$opencode_v2_runtime_previous_bundle/manifest.txt" release_sequence)" = "$opencode_v2_runtime_tx_old_sequence" ] &&
-    [ "$(opencode_v2_runtime_transaction_value \
-      "$opencode_v2_runtime_previous_bundle/manifest.txt" release_contract)" = "$opencode_v2_runtime_tx_old_contract" ] &&
-    [ "$(opencode_v2_runtime_transaction_value \
-      "$opencode_v2_runtime_previous_bundle/manifest.txt" release_source_commit)" = "$opencode_v2_runtime_tx_old_source_commit" ] &&
-    [ "$(opencode_v2_runtime_transaction_value \
-      "$opencode_v2_runtime_previous_bundle/manifest.txt" tarball_checksum)" = "$opencode_v2_runtime_tx_old_digest" ] || return 1
-  opencode_v2_runtime_previous_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
-    "$opencode_v2_runtime_previous_bundle") || return 1
-  [ "$opencode_v2_runtime_previous_bundle_digest" = "$opencode_v2_runtime_tx_old_bundle_digest" ] || return 1
-  [ -f "$opencode_v2_runtime_previous_bundle/.wrapper" ] &&
-    [ -x "$opencode_v2_runtime_previous_bundle/.wrapper" ] &&
-    [ ! -L "$opencode_v2_runtime_previous_bundle/.wrapper" ] || return 1
-  opencode_v2_runtime_transaction_verify_wrapper \
-    "$opencode_v2_runtime_previous_bundle/.wrapper" "$opencode_v2_runtime_previous_bundle" \
-    "$opencode_v2_runtime_tx_libexec" || return 1
-  opencode_v2_runtime_previous_wrapper_digest=$(sha256sum \
-    "$opencode_v2_runtime_previous_bundle/.wrapper" | awk '{ print $1 }') || return 1
-  [ "$opencode_v2_runtime_previous_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ] || return 1
+  [ -d "$opencode_v2_runtime_previous_profile" ] &&
+    [ ! -L "$opencode_v2_runtime_previous_profile" ] || return 1
+  opencode_v2_runtime_previous_unknown=$(find "$opencode_v2_runtime_previous" -mindepth 1 -maxdepth 1 \
+    ! -name bundle ! -name profile ! -name transaction.txt -print -quit) || return 1
+  [ -z "$opencode_v2_runtime_previous_unknown" ] || return 1
+
+  case "$opencode_v2_runtime_tx_had_bundle:$opencode_v2_runtime_tx_had_wrapper" in
+    0:0)
+      [ ! -e "$opencode_v2_runtime_previous_bundle" ] &&
+        [ ! -L "$opencode_v2_runtime_previous_bundle" ] || return 1
+      if [ "$opencode_v2_runtime_tx_had_profile" = 0 ]; then
+        opencode_v2_runtime_previous_profile_entry=$(find "$opencode_v2_runtime_previous_profile" \
+          -mindepth 1 -print -quit) || return 1
+        [ -z "$opencode_v2_runtime_previous_profile_entry" ] || return 1
+      fi
+      ;;
+    1:1)
+      opencode_v2_runtime_transaction_verify_bundle "$opencode_v2_runtime_previous_bundle" || return 1
+      [ "$(opencode_v2_runtime_transaction_value \
+        "$opencode_v2_runtime_previous_bundle/manifest.txt" version)" = "$opencode_v2_runtime_tx_old_version" ] &&
+        [ "$(opencode_v2_runtime_transaction_value \
+          "$opencode_v2_runtime_previous_bundle/manifest.txt" tag)" = "$opencode_v2_runtime_tx_old_tag" ] &&
+        [ "$(opencode_v2_runtime_transaction_value \
+          "$opencode_v2_runtime_previous_bundle/manifest.txt" release_sequence)" = "$opencode_v2_runtime_tx_old_sequence" ] &&
+        [ "$(opencode_v2_runtime_transaction_value \
+          "$opencode_v2_runtime_previous_bundle/manifest.txt" release_contract)" = "$opencode_v2_runtime_tx_old_contract" ] &&
+        [ "$(opencode_v2_runtime_transaction_value \
+          "$opencode_v2_runtime_previous_bundle/manifest.txt" release_source_commit)" = "$opencode_v2_runtime_tx_old_source_commit" ] &&
+        [ "$(opencode_v2_runtime_transaction_value \
+          "$opencode_v2_runtime_previous_bundle/manifest.txt" tarball_checksum)" = "$opencode_v2_runtime_tx_old_digest" ] || return 1
+      opencode_v2_runtime_previous_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+        "$opencode_v2_runtime_previous_bundle") || return 1
+      [ "$opencode_v2_runtime_previous_bundle_digest" = "$opencode_v2_runtime_tx_old_bundle_digest" ] || return 1
+      [ -f "$opencode_v2_runtime_previous_bundle/.wrapper" ] &&
+        [ -x "$opencode_v2_runtime_previous_bundle/.wrapper" ] &&
+        [ ! -L "$opencode_v2_runtime_previous_bundle/.wrapper" ] || return 1
+      opencode_v2_runtime_transaction_verify_wrapper \
+        "$opencode_v2_runtime_previous_bundle/.wrapper" "$opencode_v2_runtime_previous_bundle" \
+        "$opencode_v2_runtime_tx_libexec" || return 1
+      opencode_v2_runtime_previous_wrapper_digest=$(sha256sum \
+        "$opencode_v2_runtime_previous_bundle/.wrapper" | awk '{ print $1 }') || return 1
+      [ "$opencode_v2_runtime_previous_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+
   opencode_v2_runtime_previous_profile_digest=$(opencode_v2_runtime_transaction_tree_digest \
     "$opencode_v2_runtime_previous_profile") || return 1
   [ "$opencode_v2_runtime_previous_profile_digest" = "$opencode_v2_runtime_tx_profile_digest" ]
