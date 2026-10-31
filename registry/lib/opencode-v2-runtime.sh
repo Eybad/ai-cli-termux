@@ -314,27 +314,55 @@ opencode_v2_runtime_release_run_lock() {
   fi
 }
 
+opencode_v2_runtime_start_client_process() {
+  opencode_v2_runtime_client_password="$1"
+  shift
+
+  if [ "$opencode_v2_runtime_client_stdin_saved" = true ]; then
+    if [ -n "$opencode_v2_runtime_client_password" ]; then
+      OPENCODE_PASSWORD="$opencode_v2_runtime_client_password" "$@" 0<&3 3<&- &
+    else
+      "$@" 0<&3 3<&- &
+    fi
+  elif [ -n "$opencode_v2_runtime_client_password" ]; then
+    OPENCODE_PASSWORD="$opencode_v2_runtime_client_password" "$@" &
+  else
+    "$@" &
+  fi
+  opencode_v2_runtime_client_pid=$!
+}
+
 opencode_v2_runtime_launch_client() {
   opencode_v2_runtime_connect_server="$1"
   shift
+  opencode_v2_runtime_client_stdin_saved=false
+  if ( : <&0 ) 2>/dev/null; then
+    exec 3<&0
+    opencode_v2_runtime_client_stdin_saved=true
+  fi
 
   if [ "$opencode_v2_runtime_connect_server" = true ]; then
     if [ -n "$opencode_v2_runtime_loader" ]; then
-      OPENCODE_PASSWORD="$opencode_v2_runtime_password" "$opencode_v2_runtime_loader" \
-        --library-path "$opencode_v2_runtime_library_path" "$opencode_v2_runtime_binary" \
-        --server "http://127.0.0.1:$opencode_v2_runtime_port" "$@" &
+      opencode_v2_runtime_start_client_process "$opencode_v2_runtime_password" \
+        "$opencode_v2_runtime_loader" --library-path "$opencode_v2_runtime_library_path" \
+        "$opencode_v2_runtime_binary" --server \
+        "http://127.0.0.1:$opencode_v2_runtime_port" "$@"
     else
-      OPENCODE_PASSWORD="$opencode_v2_runtime_password" "$opencode_v2_runtime_binary" \
-        --server "http://127.0.0.1:$opencode_v2_runtime_port" "$@" &
+      opencode_v2_runtime_start_client_process "$opencode_v2_runtime_password" \
+        "$opencode_v2_runtime_binary" --server \
+        "http://127.0.0.1:$opencode_v2_runtime_port" "$@"
     fi
   elif [ -n "$opencode_v2_runtime_loader" ]; then
-    "$opencode_v2_runtime_loader" --library-path "$opencode_v2_runtime_library_path" \
-      "$opencode_v2_runtime_binary" "$@" &
+    opencode_v2_runtime_start_client_process '' "$opencode_v2_runtime_loader" \
+      --library-path "$opencode_v2_runtime_library_path" \
+      "$opencode_v2_runtime_binary" "$@"
   else
-    "$opencode_v2_runtime_binary" "$@" &
+    opencode_v2_runtime_start_client_process '' "$opencode_v2_runtime_binary" "$@"
   fi
 
-  opencode_v2_runtime_client_pid=$!
+  if [ "$opencode_v2_runtime_client_stdin_saved" = true ]; then
+    exec 3<&-
+  fi
   opencode_v2_runtime_client_start=$(opencode_v2_runtime_proc_start_time "$opencode_v2_runtime_client_pid")
   case "$opencode_v2_runtime_client_start" in
     ''|*[!0-9]*) opencode_v2_runtime_error 'No se pudo verificar la identidad del cliente privado.'; return 1 ;;

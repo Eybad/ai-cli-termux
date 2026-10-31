@@ -34,6 +34,11 @@ case "${1:-}" in
     ;;
   debug)
     [ "$2" = paths ] || exit 89
+    if [ "${CLIENT_MODE:-}" = stdin ]; then
+      IFS= read -r client_input || exit 105
+      [ "$client_input" = "$EXPECTED_CLIENT_INPUT" ] || exit 106
+      printf '%s\n' "$client_input" > "$CLIENT_INPUT_FILE"
+    fi
     printf '%s\n' "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$OPENCODE_DB"
     exit 0
     ;;
@@ -138,6 +143,29 @@ cmp -s "$debug_root/expected-paths" "$debug_root/paths.out" || {
   exit 1
 }
 printf 'PASS: --version no crea perfil y debug paths usa el perfil aislado sin servidor\n'
+
+stdin_root="$test_root/stdin"
+stdin_home="$stdin_root/home"
+stdin_file="$stdin_root/input"
+mkdir -p "$stdin_home"
+printf 'terminal-input-fixture\n' > "$stdin_file"
+export CLIENT_MODE=stdin
+export EXPECTED_CLIENT_INPUT=terminal-input-fixture
+export CLIENT_INPUT_FILE="$stdin_root/client-input"
+stdin_status=0
+if HOME="$stdin_home" PREFIX="$prefix" \
+  sh "$runtime" "$fake_bin/loader" --library-path "$fake_lib" \
+  "$fake_bin/opencode" debug paths < "$stdin_file" > "$stdin_root/paths.out"; then
+  stdin_status=0
+else
+  stdin_status=$?
+fi
+[ "$stdin_status" -eq 0 ] && [ "$(cat "$CLIENT_INPUT_FILE")" = "$EXPECTED_CLIENT_INPUT" ] || {
+  printf 'FAIL: el runner no pasó stdin al cliente\n' >&2
+  exit 1
+}
+printf 'PASS: el runner conserva stdin del llamador para el cliente\n'
+unset CLIENT_MODE EXPECTED_CLIENT_INPUT CLIENT_INPUT_FILE
 
 existing_config_root="$test_root/existing-config"
 existing_config_home="$existing_config_root/home"
