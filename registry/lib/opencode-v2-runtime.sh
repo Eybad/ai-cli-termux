@@ -1808,6 +1808,213 @@ opencode_v2_runtime_status() {
   fi
 }
 
+opencode_v2_runtime_evaluate_cleanup() {
+  opencode_v2_runtime_evaluate_status="$1"
+  trap - 0 HUP INT TERM
+  if ! rm -rf "${opencode_v2_runtime_evaluate_root:?}"; then
+    opencode_v2_runtime_evaluate_status=1
+  fi
+  exit "$opencode_v2_runtime_evaluate_status"
+}
+
+opencode_v2_runtime_evaluate() (
+  set -eu
+  [ "$#" -eq 2 ] && [ "$1" = --version ] || {
+    opencode_v2_runtime_error 'Uso: evaluate --version <v2.x.y>'
+    return 2
+  }
+  opencode_v2_runtime_evaluate_version=${2#v}
+  opencode_v2_runtime_evaluate_tag="v$opencode_v2_runtime_evaluate_version"
+
+  case "$opencode_v2_runtime_evaluate_version" in
+    *[!0-9A-Za-z.+-]*|'')
+      opencode_v2_runtime_error 'La versión debe ser un tag estable v2.x.y.'
+      return 2
+      ;;
+  esac
+  # shellcheck disable=SC1091
+  . "${opencode_v2_runtime_project_root:?}/registry/lib/releases.sh"
+  if [ "$(release_version_major "$opencode_v2_runtime_evaluate_tag")" != 2 ] ||
+    ! release_version_is_stable "$opencode_v2_runtime_evaluate_tag"; then
+    opencode_v2_runtime_error 'La evaluación requiere una versión estable de major 2.'
+    return 2
+  fi
+  case "$opencode_v2_runtime_project_root" in
+    /*) ;;
+    *) opencode_v2_runtime_error 'La raíz del proyecto debe ser absoluta.'; return 1 ;;
+  esac
+
+  for opencode_v2_runtime_evaluate_command in curl jq sha256sum tar env; do
+    command -v "$opencode_v2_runtime_evaluate_command" >/dev/null 2>&1 || {
+      opencode_v2_runtime_error "Falta el comando requerido: $opencode_v2_runtime_evaluate_command."
+      return 1
+    }
+  done
+
+  opencode_v2_runtime_evaluate_prefix=${PREFIX:-/data/data/com.termux/files/usr}
+  case "$opencode_v2_runtime_evaluate_prefix" in
+    /*) ;;
+    *) opencode_v2_runtime_error 'PREFIX debe ser una ruta absoluta.'; return 1 ;;
+  esac
+  opencode_v2_runtime_evaluate_loader="$opencode_v2_runtime_evaluate_prefix/glibc/lib/ld-linux-aarch64.so.1"
+  opencode_v2_runtime_evaluate_library_path="$opencode_v2_runtime_evaluate_prefix/glibc/lib"
+  [ -x "$opencode_v2_runtime_evaluate_loader" ] &&
+    [ -d "$opencode_v2_runtime_evaluate_library_path" ] || {
+      opencode_v2_runtime_error 'No está disponible el loader glibc arm64 existente; no se instalarán dependencias.'
+      return 1
+    }
+
+  opencode_v2_runtime_evaluate_tmp_base=${TMPDIR:-$opencode_v2_runtime_evaluate_prefix/tmp}
+  [ -d "$opencode_v2_runtime_evaluate_tmp_base" ] &&
+    [ -w "$opencode_v2_runtime_evaluate_tmp_base" ] || {
+      opencode_v2_runtime_error 'TMPDIR o PREFIX/tmp no existe o no permite escritura.'
+      return 1
+    }
+  umask 077
+  opencode_v2_runtime_evaluate_root=$(mktemp -d \
+    "$opencode_v2_runtime_evaluate_tmp_base/opencode-v2-evaluate.XXXXXX") || return 1
+  trap 'opencode_v2_runtime_evaluate_cleanup $?' 0
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  chmod 700 "$opencode_v2_runtime_evaluate_root"
+  opencode_v2_runtime_evaluate_api="$opencode_v2_runtime_evaluate_root/release.json"
+  opencode_v2_runtime_evaluate_archive="$opencode_v2_runtime_evaluate_root/release.tar.gz"
+  opencode_v2_runtime_evaluate_bundle="$opencode_v2_runtime_evaluate_root/bundle"
+  opencode_v2_runtime_evaluate_home="$opencode_v2_runtime_evaluate_root/home"
+  opencode_v2_runtime_evaluate_project="$opencode_v2_runtime_evaluate_root/project"
+  mkdir -m 700 "$opencode_v2_runtime_evaluate_bundle" \
+    "$opencode_v2_runtime_evaluate_home" "$opencode_v2_runtime_evaluate_project"
+
+  opencode_v2_runtime_evaluate_asset=opencode-linux-arm64.tar.gz
+  opencode_v2_runtime_evaluate_expected_url="https://github.com/anomalyco/opencode/releases/download/$opencode_v2_runtime_evaluate_tag/$opencode_v2_runtime_evaluate_asset"
+  opencode_v2_runtime_evaluate_api_url="https://api.github.com/repos/anomalyco/opencode/releases/tags/$opencode_v2_runtime_evaluate_tag"
+  if ! curl --location --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error \
+    --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 --retry-all-errors \
+    -H 'Accept: application/vnd.github+json' -o "$opencode_v2_runtime_evaluate_api" \
+    "$opencode_v2_runtime_evaluate_api_url"; then
+    opencode_v2_runtime_error 'No se pudo consultar el release exacto en GitHub API.'
+    return 1
+  fi
+  if ! release_validate_object "$(cat "$opencode_v2_runtime_evaluate_api")" \
+    "$opencode_v2_runtime_evaluate_asset" 2 stable "$opencode_v2_runtime_evaluate_tag"; then
+    opencode_v2_runtime_error 'El release no es estable, no coincide con el tag o no contiene un asset único.'
+    return 1
+  fi
+  if ! opencode_v2_runtime_evaluate_download_url=$(printf '%s' \
+    "$(cat "$opencode_v2_runtime_evaluate_api")" | release_asset_url \
+      "$opencode_v2_runtime_evaluate_asset" "$opencode_v2_runtime_evaluate_expected_url" 2>/dev/null); then
+    opencode_v2_runtime_error 'La URL publicada del asset no coincide con el tag y repositorio esperados.'
+    return 1
+  fi
+  if ! opencode_v2_runtime_evaluate_api_digest=$(printf '%s' \
+    "$(cat "$opencode_v2_runtime_evaluate_api")" | release_asset_digest \
+      "$opencode_v2_runtime_evaluate_asset" 2>/dev/null); then
+    opencode_v2_runtime_error 'El asset no publica un digest SHA256 verificable.'
+    return 1
+  fi
+  case "$opencode_v2_runtime_evaluate_api_digest" in
+    sha256:????????????????????????????????????????????????????????????????) ;;
+    *) opencode_v2_runtime_error 'El digest publicado para el asset no es SHA256 válido.'; return 1 ;;
+  esac
+  opencode_v2_runtime_evaluate_sha256=${opencode_v2_runtime_evaluate_api_digest#sha256:}
+  printf '%s\n' "$opencode_v2_runtime_evaluate_sha256" | grep -Eq '^[A-Fa-f0-9]{64}$' || {
+    opencode_v2_runtime_error 'El digest publicado para el asset no es SHA256 válido.'
+    return 1
+  }
+  opencode_v2_runtime_evaluate_sha256=$(printf '%s' "$opencode_v2_runtime_evaluate_sha256" | tr 'A-F' 'a-f')
+
+  if ! curl --location --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error \
+    --connect-timeout 10 --max-time 600 --retry 3 --retry-delay 2 --retry-all-errors \
+    -o "$opencode_v2_runtime_evaluate_archive" "$opencode_v2_runtime_evaluate_download_url"; then
+    opencode_v2_runtime_error 'No se pudo descargar el asset oficial del candidato.'
+    return 1
+  fi
+  opencode_v2_runtime_evaluate_actual_sha256=$(sha256sum "$opencode_v2_runtime_evaluate_archive" |
+    awk 'NR == 1 { print $1 }') || return 1
+  [ "$opencode_v2_runtime_evaluate_actual_sha256" = "$opencode_v2_runtime_evaluate_sha256" ] || {
+    opencode_v2_runtime_error "El SHA256 descargado no coincide con el digest del release (API: $opencode_v2_runtime_evaluate_sha256; archivo: $opencode_v2_runtime_evaluate_actual_sha256)."
+    return 1
+  }
+  opencode_v2_runtime_evaluate_archive_entries=$(tar -tzf "$opencode_v2_runtime_evaluate_archive") || {
+    opencode_v2_runtime_error 'El asset no es un tar.gz legible.'
+    return 1
+  }
+  [ "$opencode_v2_runtime_evaluate_archive_entries" = opencode ] || {
+    opencode_v2_runtime_error 'El asset debe contener únicamente el archivo opencode en su raíz.'
+    return 1
+  }
+  tar -xzf "$opencode_v2_runtime_evaluate_archive" -C "$opencode_v2_runtime_evaluate_bundle" || return 1
+  opencode_v2_runtime_evaluate_binary="$opencode_v2_runtime_evaluate_bundle/opencode"
+  [ -f "$opencode_v2_runtime_evaluate_binary" ] &&
+    [ ! -L "$opencode_v2_runtime_evaluate_binary" ] &&
+    [ -x "$opencode_v2_runtime_evaluate_binary" ] || {
+      opencode_v2_runtime_error 'El asset extraído no contiene un ELF opencode regular y ejecutable.'
+      return 1
+    }
+
+  printf 'version=%s\n' "$opencode_v2_runtime_evaluate_tag" > \
+    "$opencode_v2_runtime_evaluate_bundle/manifest.txt"
+  chmod 600 "$opencode_v2_runtime_evaluate_bundle/manifest.txt"
+  opencode_v2_runtime_evaluate_runtime="$opencode_v2_runtime_project_root/registry/lib/opencode-v2-runtime.sh"
+  (
+    cd "$opencode_v2_runtime_evaluate_project"
+    env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
+      PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+      TERM=dumb sh "$opencode_v2_runtime_evaluate_runtime" \
+        "$opencode_v2_runtime_evaluate_loader" --library-path \
+        "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary" --version
+  ) > "$opencode_v2_runtime_evaluate_root/version.out" 2> "$opencode_v2_runtime_evaluate_root/version.err" || {
+    opencode_v2_runtime_error 'El candidato no respondió a --version bajo el loader existente.'
+    return 1
+  }
+  opencode_v2_runtime_evaluate_actual_version=$(grep -Eo '[0-9]+[.][0-9]+[.][0-9]+' \
+    "$opencode_v2_runtime_evaluate_root/version.out" | head -1)
+  opencode_v2_runtime_evaluate_expected_version=${opencode_v2_runtime_evaluate_version%%+*}
+  [ "$opencode_v2_runtime_evaluate_actual_version" = "$opencode_v2_runtime_evaluate_expected_version" ] || {
+    opencode_v2_runtime_error 'La versión informada por el candidato no coincide con el tag evaluado.'
+    return 1
+  }
+
+  if ! (
+    cd "$opencode_v2_runtime_evaluate_project"
+    env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
+      PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+      TERM=dumb sh "$opencode_v2_runtime_evaluate_runtime" \
+        "$opencode_v2_runtime_evaluate_loader" --library-path \
+        "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary" debug paths
+  ) > "$opencode_v2_runtime_evaluate_root/paths.out" 2> "$opencode_v2_runtime_evaluate_root/paths.err"; then
+    opencode_v2_runtime_error 'El candidato no confirmó sus rutas bajo el perfil sintético.'
+    return 1
+  fi
+  for opencode_v2_runtime_evaluate_path in \
+    "$opencode_v2_runtime_evaluate_home/.local/share/ai-cli-termux/opencode-v2/config" \
+    "$opencode_v2_runtime_evaluate_home/.local/share/ai-cli-termux/opencode-v2/data" \
+    "$opencode_v2_runtime_evaluate_home/.local/share/ai-cli-termux/opencode-v2/data/opencode-v2.db"; do
+    grep -Fq "$opencode_v2_runtime_evaluate_path" "$opencode_v2_runtime_evaluate_root/paths.out" || {
+      opencode_v2_runtime_error 'El candidato no respetó las rutas declaradas del perfil sintético.'
+      return 1
+    }
+  done
+
+  if ! (
+    cd "$opencode_v2_runtime_evaluate_project"
+    env -i PATH="$PATH" HOME="$opencode_v2_runtime_evaluate_home" \
+      PREFIX="$opencode_v2_runtime_evaluate_prefix" TMPDIR="$opencode_v2_runtime_evaluate_root" \
+      TERM=dumb sh "$opencode_v2_runtime_evaluate_runtime" \
+        "$opencode_v2_runtime_evaluate_loader" --library-path \
+        "$opencode_v2_runtime_evaluate_library_path" "$opencode_v2_runtime_evaluate_binary" \
+        session list --format json
+  ) > "$opencode_v2_runtime_evaluate_root/session-list.out" \
+      2> "$opencode_v2_runtime_evaluate_root/session-list.err"; then
+    opencode_v2_runtime_error 'La operación habitual session list falló bajo el runner aislado.'
+    return 1
+  fi
+  printf 'tag=%s\nasset=%s\nsha256=%s\nresult=runner-profile-session-list-pass\n' \
+    "$opencode_v2_runtime_evaluate_tag" "$opencode_v2_runtime_evaluate_asset" \
+    "$opencode_v2_runtime_evaluate_sha256"
+)
+
 opencode_v2_runtime_run() {
   [ "$#" -gt 0 ] || {
     opencode_v2_runtime_error 'Falta el binario para ejecutar.'
@@ -1967,8 +2174,8 @@ opencode_v2_runtime() {
       opencode_v2_runtime_transaction "$1"
       ;;
     evaluate)
-      opencode_v2_runtime_error "La operación '$1' todavía no está disponible."
-      return 2
+      shift
+      opencode_v2_runtime_evaluate "$@"
       ;;
     *)
       opencode_v2_runtime_run "$@"
