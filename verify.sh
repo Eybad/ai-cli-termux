@@ -20,6 +20,8 @@ GLIBC_LIB="$GLIBC_PREFIX/lib"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY_DIR="$SCRIPT_DIR/registry"
 HASH_FILE="$SCRIPT_DIR/sha256.txt"
+# shellcheck source=registry/lib/releases.sh
+source "$SCRIPT_DIR/registry/lib/releases.sh"
 
 if [[ -t 1 ]]; then
   GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; ORANGE=$'\033[38;5;214m'
@@ -39,10 +41,12 @@ note() { printf '%s      %s%s\n' "$MUTED" "$1" "$NC"; }
 # Resolver loader según arquitectura
 case "$(uname -m)" in
   aarch64)
+    ARCH="arm64"
     LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1"
     EXPECTED_ELF_ARCH="ARM aarch64"
     ;;
   x86_64)
+    ARCH="amd64"
     LOADER="$GLIBC_LIB/ld-linux-x86-64.so.2"
     EXPECTED_ELF_ARCH="x86-64"
     ;;
@@ -104,6 +108,7 @@ fi
 APP_NAME=""; DISPLAY_NAME=""; ELF_NAME=""; CHECKSUM_ALGO="sha256"
 CHECKSUM_SOURCE="hashfile"; NEEDS_PATCHELF=true; EXEC_DIRECT=false
 ALIASES=""; EXTRA_BINS=""; WRAPPER_UNSET_ENV=""; WRAPPER_RUNNER=""
+VERSION_MAJOR=""; RELEASE_CHANNEL=""; RELEASE_POLICY_FILE=""
 # shellcheck source=/dev/null
 source "$CONF"
 
@@ -121,6 +126,9 @@ M_CHECKSUM_ALGO="$CHECKSUM_ALGO"
 M_CHECKSUM_SOURCE=""
 M_WRAPPER_RUNNER=""
 M_RUNNER_CHECKSUM_SHA256=""
+M_RELEASE_SEQUENCE=""
+M_RELEASE_CONTRACT=""
+M_RELEASE_SOURCE_COMMIT=""
 
 if [[ -f "$MANIFEST" ]]; then
   M_VERSION=$(manifest_get version "$MANIFEST")
@@ -135,6 +143,9 @@ if [[ -f "$MANIFEST" ]]; then
   M_CHECKSUM_SOURCE=$(manifest_get checksum_source "$MANIFEST")
   M_WRAPPER_RUNNER=$(manifest_get runner_name "$MANIFEST")
   M_RUNNER_CHECKSUM_SHA256=$(manifest_get runner_checksum_sha256 "$MANIFEST")
+  M_RELEASE_SEQUENCE=$(manifest_get release_sequence "$MANIFEST")
+  M_RELEASE_CONTRACT=$(manifest_get release_contract "$MANIFEST")
+  M_RELEASE_SOURCE_COMMIT=$(manifest_get release_source_commit "$MANIFEST")
   pass "Manifest presente (versión $M_VERSION, instalado $(manifest_get installed_at "$MANIFEST"))"
 
   missing_fields=()
@@ -149,6 +160,32 @@ if [[ -f "$MANIFEST" ]]; then
 else
   warn "No hay manifest en $MANIFEST"
   note "Instalación previa o manual. Reinstalá con 'bash install.sh $APP_NAME -r'."
+fi
+
+if [[ -n "$RELEASE_POLICY_FILE" ]]; then
+  catalog_file="$SCRIPT_DIR/$RELEASE_POLICY_FILE"
+  if [[ ! "$RELEASE_POLICY_FILE" =~ ^[a-zA-Z0-9._/-]+$ || "$RELEASE_POLICY_FILE" == /* || "$RELEASE_POLICY_FILE" =~ (^|/)[.][.]?(/|$) || ! -f "$catalog_file" || -L "$catalog_file" ]]; then
+    fail "Ruta de catálogo inválida o ausente en el registro"
+  elif [[ -z "$VERSION_MAJOR" || "$RELEASE_CHANNEL" != stable ]]; then
+    fail "La política de catálogo requiere major y canal estable"
+  elif ! command -v jq >/dev/null 2>&1; then
+    fail "jq no está disponible para verificar el catálogo"
+  elif ! release_catalog_validate "$catalog_file" "$APP_NAME" "$VERSION_MAJOR" "$SCRIPT_DIR"; then
+    fail "Catálogo de releases inválido: $RELEASE_POLICY_FILE"
+  elif ! catalog_entry=$(release_catalog_entry_by_tag "$catalog_file" "$M_TAG" 2>/dev/null); then
+    fail "El tag del manifest no está aprobado en el catálogo: ${M_TAG:-vacío}"
+  else
+    catalog_sequence=$(printf '%s' "$catalog_entry" | jq -r '.sequence // empty')
+    catalog_contract=$(printf '%s' "$catalog_entry" | jq -r '.contract // empty')
+    catalog_source_commit=$(printf '%s' "$catalog_entry" | jq -r '.source_commit // empty')
+    catalog_asset=$(release_catalog_asset "$catalog_file" "$M_TAG" "$ARCH" 2>/dev/null || true)
+    catalog_sha256=$(printf '%s' "$catalog_asset" | jq -r '.sha256 // empty')
+    if [[ "$M_RELEASE_SEQUENCE" != "$catalog_sequence" || "$M_RELEASE_CONTRACT" != "$catalog_contract" || "$M_RELEASE_SOURCE_COMMIT" != "$catalog_source_commit" || "$M_CHECKSUM_TARBALL" != "$catalog_sha256" ]]; then
+      fail "El manifest no coincide con la secuencia, contrato y digest del catálogo"
+    else
+      pass "Manifest y catálogo coherentes ($M_TAG, secuencia $M_RELEASE_SEQUENCE)"
+    fi
+  fi
 fi
 
 if [[ -n "$WRAPPER_RUNNER" && -n "$M_WRAPPER_RUNNER" && "$M_WRAPPER_RUNNER" != "$WRAPPER_RUNNER" ]]; then

@@ -159,6 +159,7 @@ fi
 APP_NAME=""; DISPLAY_NAME=""; REPO=""
 RELEASE_SOURCE=""; ARCHIVE_TEMPLATE=""; MANIFEST_URL=""
 VERSION_MAJOR=""; RELEASE_CHANNEL=""
+RELEASE_POLICY_FILE=""
 # Overrides opcionales del manifest por arquitectura (uname -m): si hay valor
 # para la arquitectura actual, se usa en vez de MANIFEST_URL. Permite que un
 # tool publique manifests distintos por OS (ej: agy → android en aarch64,
@@ -217,6 +218,21 @@ case "$RUNTIME_SETUP" in
     err "$CONF: RUNTIME_SETUP inválido: '$RUNTIME_SETUP' (valores permitidos: managed, existing)."
     exit 1 ;;
 esac
+
+if [[ -n "$RELEASE_POLICY_FILE" ]]; then
+  if [[ ! "$RELEASE_POLICY_FILE" =~ ^[a-zA-Z0-9._/-]+$ || "$RELEASE_POLICY_FILE" == /* || "$RELEASE_POLICY_FILE" =~ (^|/)[.][.]?(/|$) ]]; then
+    err "$CONF: RELEASE_POLICY_FILE debe ser una ruta relativa dentro del repositorio."
+    exit 1
+  fi
+  if [[ -z "$VERSION_MAJOR" || "$RELEASE_CHANNEL" != stable || "$RELEASE_SOURCE" != github || "$CHECKSUM_SOURCE" != release_digest || "$CHECKSUM_ALGO" != sha256 ]]; then
+    err "$CONF: el catálogo requiere major/canal estable, RELEASE_SOURCE=github y SHA256 release_digest."
+    exit 1
+  fi
+  if [[ ! -f "$SCRIPT_DIR/$RELEASE_POLICY_FILE" || -L "$SCRIPT_DIR/$RELEASE_POLICY_FILE" ]]; then
+    err "$CONF: catálogo ausente o no regular: $RELEASE_POLICY_FILE"
+    exit 1
+  fi
+fi
 
 if ! release_policy_fields_valid "$VERSION_MAJOR" "$RELEASE_CHANNEL"; then
   err "$CONF: VERSION_MAJOR debe ser un entero decimal canónico y RELEASE_CHANNEL debe ser vacío o stable."
@@ -371,6 +387,7 @@ EXTRA_PATCHED=""
 ATTEST_STATUS="omitida"
 # JSON del release de GitHub ya descargado (evita una segunda llamada a la API).
 RELEASE_JSON=""
+CATALOG_SEQUENCE=""; CATALOG_CONTRACT=""; CATALOG_SOURCE_COMMIT=""; CATALOG_SHA256=""
 
 cleanup() {
   local rc=$?
@@ -719,6 +736,18 @@ preflight() {
   if [[ "$RUNTIME_SETUP" == existing ]] && ! check_existing_runtime; then
     exit 1
   fi
+
+  if [[ -n "$RELEASE_POLICY_FILE" ]]; then
+    local catalog_file="$SCRIPT_DIR/$RELEASE_POLICY_FILE"
+    if ! release_catalog_validate "$catalog_file" "$APP_NAME" "$VERSION_MAJOR" "$SCRIPT_DIR"; then
+      err "Catálogo de releases inválido para $APP_NAME: $RELEASE_POLICY_FILE"
+      exit 1
+    fi
+    if ! release_catalog_preferred_tag "$catalog_file" "$ARCH" >/dev/null 2>&1; then
+      err "El catálogo de $APP_NAME no tiene releases aprobadas para la arquitectura $ARCH."
+      exit 1
+    fi
+  fi
 }
 
 check_existing_runtime() {
@@ -835,8 +864,73 @@ github_latest_release_with_asset() {
   done
 }
 
+resolve_catalog_version() {
+  local catalog_file="$SCRIPT_DIR/$RELEASE_POLICY_FILE"
+  local catalog_entry asset_entry asset_name expected_asset expected_url api_digest api_sha256
+
+  if [[ -n "$REQUESTED_VERSION" ]]; then
+    if ! catalog_entry=$(release_catalog_entry_by_version "$catalog_file" "$PARSED_REQUESTED_VERSION" 2>/dev/null); then
+      err "La versión $PARSED_REQUESTED_VERSION no está aprobada en el catálogo local de $APP_NAME."
+      exit 1
+    fi
+  else
+    if ! TAG=$(release_catalog_preferred_tag "$catalog_file" "$ARCH" 2>/dev/null); then
+      err "El catálogo de $APP_NAME no tiene una versión preferida para $ARCH."
+      exit 1
+    fi
+    if ! catalog_entry=$(release_catalog_entry_by_tag "$catalog_file" "$TAG" 2>/dev/null); then
+      err "La versión preferida $TAG no existe en el catálogo de $APP_NAME."
+      exit 1
+    fi
+  fi
+
+  TAG=$(printf '%s' "$catalog_entry" | jq -er '.tag')
+  VERSION=$(parse_version_tag "$TAG")
+  CATALOG_SEQUENCE=$(printf '%s' "$catalog_entry" | jq -er '.sequence')
+  CATALOG_CONTRACT=$(printf '%s' "$catalog_entry" | jq -er '.contract')
+  CATALOG_SOURCE_COMMIT=$(printf '%s' "$catalog_entry" | jq -er '.source_commit')
+  if ! asset_entry=$(release_catalog_asset "$catalog_file" "$TAG" "$ARCH" 2>/dev/null); then
+    err "El release $TAG no tiene un asset catalogado para $ARCH."
+    exit 1
+  fi
+  asset_name=$(printf '%s' "$asset_entry" | jq -er '.name')
+  CATALOG_SHA256=$(printf '%s' "$asset_entry" | jq -er '.sha256')
+  expected_asset=$(expand_template "$ARCHIVE_TEMPLATE")
+  if [[ "$asset_name" != "$expected_asset" ]]; then
+    err "El asset catalogado '$asset_name' no coincide con el asset configurado '$expected_asset'."
+    exit 1
+  fi
+
+  RELEASE_JSON=$(github_release_json "tags/$TAG")
+  if ! release_validate_object "$RELEASE_JSON" "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" "$TAG"; then
+    err "El release remoto $TAG no cumple la política local o no contiene un asset único '$asset_name'."
+    exit 1
+  fi
+  expected_url="https://github.com/$REPO/releases/download/$TAG/$asset_name"
+  if ! DOWNLOAD_URL=$(printf '%s' "$RELEASE_JSON" | release_asset_url "$asset_name" "$expected_url" 2>/dev/null); then
+    err "La URL del asset '$asset_name' no coincide con el release catalogado $TAG."
+    exit 1
+  fi
+  if ! api_digest=$(printf '%s' "$RELEASE_JSON" | release_asset_digest "$asset_name" 2>/dev/null); then
+    err "El release $TAG no publica un digest único para '$asset_name'."
+    exit 1
+  fi
+  if [[ ! "$api_digest" =~ ^sha256:[a-fA-F0-9]{64}$ ]]; then
+    err "El digest API del asset '$asset_name' no es SHA256 válido."
+    exit 1
+  fi
+  api_sha256=$(printf '%s' "${api_digest#sha256:}" | tr 'A-F' 'a-f')
+  if [[ "$api_sha256" != "$CATALOG_SHA256" ]]; then
+    err "El digest API del asset $TAG no coincide con el catálogo local."
+    exit 1
+  fi
+}
+
 resolve_version() {
-  case "$RELEASE_SOURCE" in
+  if [[ -n "$RELEASE_POLICY_FILE" ]]; then
+    resolve_catalog_version
+  else
+    case "$RELEASE_SOURCE" in
 
     github)
       if [[ -n "$REQUESTED_VERSION" ]]; then
@@ -962,7 +1056,8 @@ resolve_version() {
       err "RELEASE_SOURCE desconocido en $CONF: '$RELEASE_SOURCE'"
       exit 1
       ;;
-  esac
+    esac
+  fi
 
   local resolved_major
   resolved_major=$(release_version_major "$VERSION")
@@ -980,7 +1075,24 @@ resolve_version() {
 
 # ── Paso 3: Resolver checksum esperado ────────────────────────────────────────
 resolve_expected_checksum() {
-  if [[ -n "$PINNED_CHECKSUM" ]]; then
+  if [[ -n "$RELEASE_POLICY_FILE" ]]; then
+    EXPECTED_CHECKSUM="$CATALOG_SHA256"
+    if [[ -n "$PINNED_CHECKSUM" ]]; then
+      local command_pin
+      command_pin=$(printf '%s' "$PINNED_CHECKSUM" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+      if [[ "$command_pin" != "$EXPECTED_CHECKSUM" ]]; then
+        err "--sha256 no coincide con el digest aprobado para $TAG en el catálogo."
+        exit 1
+      fi
+    fi
+    local hashfile_pin
+    hashfile_pin=$(lookup_hashfile "$APP_NAME/$TAG" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+    if [[ -n "$hashfile_pin" && "$hashfile_pin" != "$EXPECTED_CHECKSUM" ]]; then
+      err "El pin de sha256.txt no coincide con el digest aprobado para $TAG en el catálogo."
+      exit 1
+    fi
+    info "Digest SHA256 aprobado por el catálogo y confirmado por la API."
+  elif [[ -n "$PINNED_CHECKSUM" ]]; then
     EXPECTED_CHECKSUM=$(printf '%s' "$PINNED_CHECKSUM" | tr 'A-F' 'a-f' | tr -d '[:space:]')
     warn "Usando checksum pasado con --sha256 (verificalo vos mismo)."
   else
@@ -1047,7 +1159,49 @@ resolve_expected_checksum() {
 }
 
 # ── Paso 4: Verificar versión instalada ────────────────────────────────────────
+validate_catalog_transition() {
+  [[ -n "$RELEASE_POLICY_FILE" && -f "$MANIFEST" ]] || return 0
+
+  local catalog_file="$SCRIPT_DIR/$RELEASE_POLICY_FILE"
+  local installed_tag installed_entry installed_sequence manifest_sequence
+  local manifest_contract manifest_source_commit manifest_digest installed_asset catalog_digest
+  installed_tag=$(manifest_get tag)
+  if [[ -z "$installed_tag" ]] || ! installed_entry=$(release_catalog_entry_by_tag "$catalog_file" "$installed_tag" 2>/dev/null); then
+    err "La instalación existente de $APP_NAME no tiene un tag respaldado por el catálogo actual."
+    exit 1
+  fi
+  installed_sequence=$(printf '%s' "$installed_entry" | jq -er '.sequence')
+  manifest_sequence=$(manifest_get release_sequence)
+  manifest_contract=$(manifest_get release_contract)
+  manifest_source_commit=$(manifest_get release_source_commit)
+  manifest_digest=$(manifest_get tarball_checksum)
+  installed_asset=$(release_catalog_asset "$catalog_file" "$installed_tag" "$ARCH")
+  catalog_digest=$(printf '%s' "$installed_asset" | jq -er '.sha256')
+  if [[ "$manifest_sequence" != "$installed_sequence" || \
+        "$manifest_contract" != "$(printf '%s' "$installed_entry" | jq -er '.contract')" || \
+        "$manifest_source_commit" != "$(printf '%s' "$installed_entry" | jq -er '.source_commit')" || \
+        "$manifest_digest" != "$catalog_digest" ]]; then
+    err "El manifest de $installed_tag no coincide con el catálogo de releases."
+    exit 1
+  fi
+  if [[ ${#CATALOG_SEQUENCE} -lt ${#installed_sequence} ]] || \
+     { [[ ${#CATALOG_SEQUENCE} -eq ${#installed_sequence} ]] && [[ "$CATALOG_SEQUENCE" < "$installed_sequence" ]]; }; then
+    err "La versión aprobada $TAG es anterior a la instalada $installed_tag; usá rollback para volver atrás."
+    exit 1
+  fi
+  if [[ "$CATALOG_SEQUENCE" == "$installed_sequence" && "$TAG" != "$installed_tag" ]]; then
+    err "No se permite reemplazar $installed_tag por otro tag con la misma secuencia; usá rollback."
+    exit 1
+  fi
+}
+
 check_current() {
+  validate_catalog_transition
+  if [[ -n "$RELEASE_POLICY_FILE" && ! -f "$MANIFEST" && ( -e "$WRAPPER" || -e "$LIBEXEC_DIR" ) ]]; then
+    err "Hay archivos existentes de $APP_NAME sin un manifest de catálogo; no se sobrescriben."
+    exit 1
+  fi
+
   [[ "$REINSTALL" == true ]] && return 0
 
   # Con manifest, la fuente de verdad es el tag: identifica el release exacto
@@ -1531,6 +1685,9 @@ elf_name=$ELF_NAME
 version=$VERSION
 tag=$TAG
 release_source=$RELEASE_SOURCE
+release_sequence=$CATALOG_SEQUENCE
+release_contract=$CATALOG_CONTRACT
+release_source_commit=$CATALOG_SOURCE_COMMIT
 checksum_algo=$CHECKSUM_ALGO
 checksum_source=$CHECKSUM_SOURCE
 tarball_checksum=$TARBALL_CHECKSUM

@@ -76,6 +76,9 @@ printf 'PASS: runner recibe argv exacto y entorno saneado\n'
 APP_NAME=opencode
 VERSION=2.2.5
 TAG=v2.2.5
+CATALOG_SEQUENCE=2
+CATALOG_CONTRACT=termux-glibc-1
+CATALOG_SOURCE_COMMIT=cccccccccccccccccccccccccccccccccccccccc
 TARBALL_CHECKSUM=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 BIN_CHECKSUM_ORIG=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 BIN_CHECKSUM_PATCHED="$BIN_CHECKSUM_ORIG"
@@ -86,7 +89,11 @@ runner_checksum=$(sha256sum "$runner_file" | awk '{print $1}')
 grep -Fxq "runner_name=$WRAPPER_RUNNER" "$MANIFEST" || fail 'el manifest no registró el runner'
 grep -Fxq "runner_checksum_sha256=$runner_checksum" "$MANIFEST" ||
   fail 'el manifest no registró el SHA256 del runner'
-printf 'PASS: manifest registra el runner y su SHA256\n'
+grep -Fxq 'release_sequence=2' "$MANIFEST" || fail 'el manifest no registró la secuencia del catálogo'
+grep -Fxq 'release_contract=termux-glibc-1' "$MANIFEST" || fail 'el manifest no registró el contrato del catálogo'
+grep -Fxq 'release_source_commit=cccccccccccccccccccccccccccccccccccccccc' "$MANIFEST" ||
+  fail 'el manifest no registró el source commit del catálogo'
+printf 'PASS: manifest registra el runner y los metadatos del catálogo\n'
 
 verify_repo="$test_root/verify-repo"
 verify_prefix="$test_root/verify-prefix"
@@ -94,16 +101,21 @@ verify_libexec="$verify_prefix/libexec/opencode"
 verify_runner="$verify_libexec/runner.sh"
 verify_binary="$verify_libexec/opencode"
 verify_wrapper="$verify_prefix/bin/opencode"
+verify_catalog="$verify_repo/registry/releases/test.json"
 case "$(uname -m)" in
   aarch64) verify_loader="$verify_prefix/glibc/lib/ld-linux-aarch64.so.1" ;;
   x86_64) verify_loader="$verify_prefix/glibc/lib/ld-linux-x86-64.so.2" ;;
   *) fail 'arquitectura no soportada por verify.sh' ;;
 esac
-mkdir -p "$verify_repo/registry" "$verify_libexec" "$verify_prefix/bin" \
+mkdir -p "$verify_repo/registry/lib" "$verify_repo/registry/releases" \
+  "$verify_repo/docs/compatibility/opencode-v2" "$verify_libexec" "$verify_prefix/bin" \
   "$(dirname "$verify_loader")" "$verify_prefix/glibc/etc"
 cp "$repo_dir/verify.sh" "$verify_repo/verify.sh"
+cp "$repo_dir/registry/lib/releases.sh" "$verify_repo/registry/lib/releases.sh"
 cp "$repo_dir/registry/opencode.conf" "$verify_repo/registry/opencode.conf"
-printf '\nWRAPPER_RUNNER="runner.sh"\nWRAPPER_UNSET_ENV="TEST_WRAPPER_SECRET"\n' \
+cp "$repo_dir/docs/compatibility/opencode-v2/v2.2.5-arm64.md" \
+  "$verify_repo/docs/compatibility/opencode-v2/v2.2.5-arm64.md"
+printf '\nVERSION_MAJOR="2"\nRELEASE_CHANNEL="stable"\nRELEASE_POLICY_FILE="registry/releases/test.json"\nWRAPPER_RUNNER="runner.sh"\nWRAPPER_UNSET_ENV="TEST_WRAPPER_SECRET"\n' \
   >> "$verify_repo/registry/opencode.conf"
 cp "$BASH" "$verify_binary"
 chmod 700 "$verify_binary"
@@ -126,6 +138,24 @@ printf 'hosts: files dns\n' > "$verify_prefix/glibc/etc/nsswitch.conf"
 printf 'nameserver 127.0.0.1\n' > "$verify_prefix/glibc/etc/resolv.conf"
 verify_binary_checksum=$(sha256sum "$verify_binary" | awk '{print $1}')
 verify_runner_checksum=$(sha256sum "$verify_runner" | awk '{print $1}')
+cat > "$verify_catalog" <<EOF
+{
+  "schema": 1,
+  "app": "opencode",
+  "preferred": {"arm64": "v2.2.5"},
+  "releases": [{
+    "sequence": 2,
+    "tag": "v2.2.5",
+    "source_commit": "cccccccccccccccccccccccccccccccccccccccc",
+    "contract": "termux-glibc-1",
+    "assets": {"arm64": {
+      "name": "opencode-linux-arm64.tar.gz",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "evidence": "docs/compatibility/opencode-v2/v2.2.5-arm64.md"
+    }}
+  }]
+}
+EOF
 cat > "$verify_libexec/manifest.txt" <<EOF
 manifest_version=2
 app=opencode
@@ -136,10 +166,13 @@ tag=v2.2.5
 release_source=github
 checksum_algo=sha256
 checksum_source=release_digest
-tarball_checksum=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+tarball_checksum=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 binary_checksum_patched=$verify_binary_checksum
 needs_patchelf=false
 exec_direct=false
+release_sequence=2
+release_contract=termux-glibc-1
+release_source_commit=cccccccccccccccccccccccccccccccccccccccc
 entry_point=
 aliases=
 interpreter=$verify_loader
@@ -156,6 +189,8 @@ if ! PREFIX="$verify_prefix" "$verify_repo/verify.sh" opencode > "$test_root/ver
 fi
 grep -Fq 'Runner presente, ejecutable e íntegro: runner.sh' "$test_root/verify.out" ||
   fail 'verify.sh no informó integridad del runner'
+grep -Fq 'Manifest y catálogo coherentes (v2.2.5, secuencia 2)' "$test_root/verify.out" ||
+  fail 'verify.sh no validó la identidad del release catalogado'
 if grep -Fq 'WRAPPER_RUNNER' "$test_root/verify.out"; then
   fail 'verify.sh reportó un problema con WRAPPER_RUNNER'
 fi
