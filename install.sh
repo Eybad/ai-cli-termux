@@ -179,6 +179,7 @@ ARCH_OVERRIDE_X86_64=""
 # Variables de entorno extra para el wrapper (ej: GODEBUG, SSL_CERT_FILE).
 # Array asociativo no es portable en bash 3; se usa un string con newlines.
 WRAPPER_ENV=""
+RUNTIME_SETUP="managed"
 DOWNLOAD_URL=""
 # Binarios compañeros del bundle que el binario principal invoca por PATH
 # (ej: kiro-cli delega el TUI a kiro-cli-chat). Se patchean igual que ELF_NAME,
@@ -207,6 +208,13 @@ WRAPPER_DEFAULT_ARGS=""
 
 # shellcheck source=/dev/null
 source "$CONF"
+
+case "$RUNTIME_SETUP" in
+  managed|existing) ;;
+  *)
+    err "$CONF: RUNTIME_SETUP inválido: '$RUNTIME_SETUP' (valores permitidos: managed, existing)."
+    exit 1 ;;
+esac
 
 if ! release_policy_fields_valid "$VERSION_MAJOR" "$RELEASE_CHANNEL"; then
   err "$CONF: VERSION_MAJOR debe ser un entero decimal canónico y RELEASE_CHANNEL debe ser vacío o stable."
@@ -676,15 +684,45 @@ preflight() {
   for c in curl tar awk jq; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
+  if [[ "$RUNTIME_SETUP" == existing ]]; then
+    command -v file >/dev/null 2>&1 || missing+=(file)
+  fi
   command -v sha256sum >/dev/null 2>&1 || missing+=(sha256sum)
   if [[ "$CHECKSUM_ALGO" == "sha512" ]]; then
     command -v sha512sum >/dev/null 2>&1 || missing+=(sha512sum)
   fi
   if [[ ${#missing[@]} -gt 0 ]]; then
-    err "Faltan herramientas: ${missing[*]}"
-    err "Instalá con: pkg install curl tar coreutils gawk jq"
+    if [[ "$RUNTIME_SETUP" == existing ]]; then
+      err "RUNTIME_SETUP=existing requiere herramientas ya instaladas: ${missing[*]}"
+    else
+      err "Faltan herramientas: ${missing[*]}"
+      err "Instalá con: pkg install curl tar coreutils gawk jq"
+    fi
     exit 1
   fi
+
+  if [[ "$RUNTIME_SETUP" == existing ]] && ! check_existing_runtime; then
+    exit 1
+  fi
+}
+
+check_existing_runtime() {
+  if [[ "$EXEC_DIRECT" != true ]]; then
+    if [[ ! -f "$LOADER" || ! -x "$LOADER" ]]; then
+      err "RUNTIME_SETUP=existing requiere un loader glibc ejecutable: $LOADER"
+      return 1
+    fi
+    if [[ ! -d "$RPATH" ]]; then
+      err "RUNTIME_SETUP=existing requiere el directorio de bibliotecas glibc: $RPATH"
+      return 1
+    fi
+    local nsswitch="$GLIBC_PREFIX/etc/nsswitch.conf"
+    if [[ ! -f "$nsswitch" ]] || ! awk '$1 == "hosts:" { for (i = 2; i <= NF; i++) if ($i == "dns") found = 1 } END { exit !found }' "$nsswitch"; then
+      err "RUNTIME_SETUP=existing requiere DNS glibc configurado en $nsswitch."
+      return 1
+    fi
+  fi
+  return 0
 }
 
 uninstall() {
@@ -1033,6 +1071,10 @@ check_current() {
 
 # ── Paso 5: Dependencias ──────────────────────────────────────────────────────
 install_deps() {
+  if [[ "$RUNTIME_SETUP" == existing ]]; then
+    info "Usando runtime glibc existente; no se modifican paquetes ni archivos del overlay."
+    return 0
+  fi
   info "Instalando dependencias (glibc-repo, glibc-runner, patchelf, file, jq, curl)..."
   pkg update -y >/dev/null 2>&1 || warn "pkg update falló; continuando con índices actuales."
   local deps=(glibc-repo glibc-runner file jq curl)
@@ -1249,6 +1291,7 @@ patch_interpreter() {
 
 # ── Paso 11: nsswitch.conf (DNS de glibc) ─────────────────────────────────────
 ensure_nsswitch() {
+  [[ "$RUNTIME_SETUP" == existing ]] && return 0
   local ns="$GLIBC_PREFIX/etc/nsswitch.conf"
   [[ -f "$ns" ]] && return 0
   mkdir -p "$(dirname "$ns")"
@@ -1561,4 +1604,6 @@ main() {
   show_summary
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main
+fi
