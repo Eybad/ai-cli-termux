@@ -17,14 +17,54 @@ opencode_v2_runtime_init_paths() {
   opencode_v2_runtime_journal="$opencode_v2_runtime_recovery/journal"
 }
 
+opencode_v2_runtime_validate_path_ancestors() {
+  opencode_v2_runtime_path="$1"
+  case "$opencode_v2_runtime_path" in
+    /|/*/) opencode_v2_runtime_error 'La ruta privada debe ser absoluta y no puede ser la raíz.'; return 1 ;;
+    /*) ;;
+    *) opencode_v2_runtime_error 'La ruta privada debe ser absoluta.'; return 1 ;;
+  esac
+  opencode_v2_runtime_path_rest=${opencode_v2_runtime_path#/}
+  opencode_v2_runtime_path_current=''
+  while [ -n "$opencode_v2_runtime_path_rest" ]; do
+    case "$opencode_v2_runtime_path_rest" in
+      */*)
+        opencode_v2_runtime_path_component=${opencode_v2_runtime_path_rest%%/*}
+        opencode_v2_runtime_path_rest=${opencode_v2_runtime_path_rest#*/}
+        ;;
+      *)
+        opencode_v2_runtime_path_component=$opencode_v2_runtime_path_rest
+        opencode_v2_runtime_path_rest=''
+        ;;
+    esac
+    case "$opencode_v2_runtime_path_component" in
+      ''|.) continue ;;
+      ..) opencode_v2_runtime_error "La ruta privada no puede contener el componente '..'."; return 1 ;;
+    esac
+    opencode_v2_runtime_path_current="$opencode_v2_runtime_path_current/$opencode_v2_runtime_path_component"
+    if [ -L "$opencode_v2_runtime_path_current" ]; then
+      opencode_v2_runtime_error "La ruta privada atraviesa un symlink: $opencode_v2_runtime_path_current"
+      return 1
+    fi
+  done
+  return 0
+}
+
 opencode_v2_runtime_proc_start_time() {
   awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$1/stat" 2>/dev/null
+}
+
+opencode_v2_runtime_proc_state() {
+  awk '{ sub(/^.*\) /, ""); print $1 }' "/proc/$1/stat" 2>/dev/null
 }
 
 opencode_v2_runtime_process_matches() {
   [ -n "$1" ] && [ -n "$2" ] || return 1
   kill -0 "$1" 2>/dev/null || return 1
-  [ "$(opencode_v2_runtime_proc_start_time "$1")" = "$2" ]
+  [ "$(opencode_v2_runtime_proc_start_time "$1")" = "$2" ] || return 1
+  case "$(opencode_v2_runtime_proc_state "$1")" in
+    Z|X|'') return 1 ;;
+  esac
 }
 
 opencode_v2_runtime_owner_value() {
@@ -61,10 +101,7 @@ EOF
 }
 
 opencode_v2_runtime_create_private_dir() {
-  if [ -L "$1" ]; then
-    opencode_v2_runtime_error "La ruta privada es un symlink: $1"
-    return 1
-  fi
+  opencode_v2_runtime_validate_path_ancestors "$1" || return 1
   mkdir -p "$1" || return 1
   chmod 700 "$1"
 }
@@ -77,6 +114,15 @@ opencode_v2_runtime_acquire_run_lock() {
     opencode_v2_runtime_error 'El journal o el lock de recuperación es un symlink.'
     return 1
   fi
+  for opencode_v2_runtime_incomplete_path in \
+    "$opencode_v2_runtime_recovery/current" \
+    "$opencode_v2_runtime_recovery/previous.old" \
+    "$opencode_v2_runtime_recovery/manual"; do
+    if [ -e "$opencode_v2_runtime_incomplete_path" ] || [ -L "$opencode_v2_runtime_incomplete_path" ]; then
+      opencode_v2_runtime_error 'Hay un snapshot de recuperación sin cierre; consultá status y ejecutá rollback.'
+      return 1
+    fi
+  done
   if [ -e "$opencode_v2_runtime_journal" ]; then
     opencode_v2_runtime_error 'Hay una transacción pendiente; consultá status y ejecutá rollback antes de volver a abrir OpenCode v2.'
     return 1
@@ -213,6 +259,7 @@ opencode_v2_runtime_release_run_lock() {
      [ "$(opencode_v2_runtime_owner_value "$opencode_v2_runtime_owner_file" pid)" = "$$" ] &&
      [ "$(opencode_v2_runtime_owner_value "$opencode_v2_runtime_owner_file" start_time)" = "$opencode_v2_runtime_owner_start" ]; then
     rm -f "$opencode_v2_runtime_owner_file"
+    rmdir "$opencode_v2_runtime_lock/recover" 2>/dev/null || true
     rmdir "$opencode_v2_runtime_lock" 2>/dev/null || true
     sync || true
   fi
@@ -314,6 +361,1451 @@ opencode_v2_runtime_check_health() {
   done
   opencode_v2_runtime_error 'El servidor efímero no confirmó su versión por la API local.'
   return 1
+}
+
+opencode_v2_runtime_transaction_value() {
+  awk -F= -v key="$2" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$1"
+}
+
+opencode_v2_runtime_transaction_key_file_valid() {
+  awk -F= -v expected="$2" '
+    NF != 2 || $1 !~ /^[a-z_]+$/ || seen[$1]++ { exit 1 }
+    { count++ }
+    END { if (count != expected) exit 1 }
+  ' "$1"
+}
+
+opencode_v2_runtime_transaction_tree_digest() {
+  opencode_v2_runtime_digest_root="$1"
+  [ -d "$opencode_v2_runtime_digest_root" ] || return 1
+  if (cd "$opencode_v2_runtime_digest_root" && find . -type l -print -quit) | grep -q .; then
+    return 1
+  fi
+  (
+    cd "$opencode_v2_runtime_digest_root" || exit 1
+    find . -type f -exec sha256sum {} + 2>/dev/null |
+      LC_ALL=C sort | sha256sum | awk '{ print $1 }'
+  )
+}
+
+opencode_v2_runtime_transaction_profile_digest() {
+  opencode_v2_runtime_profile_digest_root="$1"
+  [ -d "$opencode_v2_runtime_profile_digest_root" ] &&
+    [ ! -L "$opencode_v2_runtime_profile_digest_root" ] || return 1
+  if (cd "$opencode_v2_runtime_profile_digest_root" && find . -type l -print -quit) | grep -q .; then
+    return 1
+  fi
+  (
+    cd "$opencode_v2_runtime_profile_digest_root" || exit 1
+    for opencode_v2_runtime_profile_directory in config data state; do
+      if [ -e "$opencode_v2_runtime_profile_directory" ]; then
+        [ -d "$opencode_v2_runtime_profile_directory" ] &&
+          find "./$opencode_v2_runtime_profile_directory" -type f -exec sha256sum {} + || exit 1
+      fi
+    done | LC_ALL=C sort | sha256sum | awk '{ print $1 }'
+  )
+}
+
+opencode_v2_runtime_transaction_active_profile_digest() {
+  if [ -e "$opencode_v2_runtime_profile" ] || [ -L "$opencode_v2_runtime_profile" ]; then
+    opencode_v2_runtime_transaction_profile_digest "$opencode_v2_runtime_profile"
+  else
+    printf '' | sha256sum | awk '{ print $1 }'
+  fi
+}
+
+opencode_v2_runtime_transaction_bundle_digest() {
+  opencode_v2_runtime_bundle_root="$1"
+  [ -d "$opencode_v2_runtime_bundle_root" ] && [ ! -L "$opencode_v2_runtime_bundle_root" ] || return 1
+  if (cd "$opencode_v2_runtime_bundle_root" && find . -type l -print -quit) | grep -q .; then
+    return 1
+  fi
+  (
+    cd "$opencode_v2_runtime_bundle_root" || exit 1
+    find . -type f ! -path './.wrapper' -exec sha256sum {} + 2>/dev/null |
+      LC_ALL=C sort | sha256sum | awk '{ print $1 }'
+  )
+}
+
+opencode_v2_runtime_transaction_verify_bundle() {
+  opencode_v2_runtime_verify_bundle_root="$1"
+  opencode_v2_runtime_verify_manifest="$opencode_v2_runtime_verify_bundle_root/manifest.txt"
+  [ -d "$opencode_v2_runtime_verify_bundle_root" ] &&
+    [ ! -L "$opencode_v2_runtime_verify_bundle_root" ] &&
+    [ -f "$opencode_v2_runtime_verify_manifest" ] && [ ! -L "$opencode_v2_runtime_verify_manifest" ] || return 1
+  [ "$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_verify_manifest" app)" = opencode-v2 ] || return 1
+  opencode_v2_runtime_verify_elf=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_verify_manifest" elf_name)
+  case "$opencode_v2_runtime_verify_elf" in
+    ''|*[!A-Za-z0-9._-]*|.|..) return 1 ;;
+  esac
+  opencode_v2_runtime_verify_binary="$opencode_v2_runtime_verify_bundle_root/$opencode_v2_runtime_verify_elf"
+  [ -f "$opencode_v2_runtime_verify_binary" ] && [ -x "$opencode_v2_runtime_verify_binary" ] &&
+    [ ! -L "$opencode_v2_runtime_verify_binary" ] || return 1
+  opencode_v2_runtime_verify_expected=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_verify_manifest" binary_checksum_patched)
+  [ -n "$opencode_v2_runtime_verify_expected" ] ||
+    opencode_v2_runtime_verify_expected=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_verify_manifest" binary_checksum_original)
+  printf '%s\n' "$opencode_v2_runtime_verify_expected" | grep -Eq '^[a-f0-9]{64}$' || return 1
+  opencode_v2_runtime_verify_actual=$(sha256sum "$opencode_v2_runtime_verify_binary" | awk '{ print $1 }') || return 1
+  [ "$opencode_v2_runtime_verify_actual" = "$opencode_v2_runtime_verify_expected" ] || return 1
+
+  opencode_v2_runtime_verify_runner=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_verify_manifest" runner_name)
+  [ "$opencode_v2_runtime_verify_runner" = opencode-v2-runtime.sh ] || return 1
+  opencode_v2_runtime_verify_runner_file="$opencode_v2_runtime_verify_bundle_root/$opencode_v2_runtime_verify_runner"
+  [ -f "$opencode_v2_runtime_verify_runner_file" ] &&
+    [ -x "$opencode_v2_runtime_verify_runner_file" ] &&
+    [ ! -L "$opencode_v2_runtime_verify_runner_file" ] || return 1
+  opencode_v2_runtime_verify_runner_expected=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_verify_manifest" runner_checksum_sha256)
+  printf '%s\n' "$opencode_v2_runtime_verify_runner_expected" | grep -Eq '^[a-f0-9]{64}$' || return 1
+  opencode_v2_runtime_verify_runner_actual=$(sha256sum "$opencode_v2_runtime_verify_runner_file" |
+    awk '{ print $1 }') || return 1
+  [ "$opencode_v2_runtime_verify_runner_actual" = "$opencode_v2_runtime_verify_runner_expected" ]
+}
+
+opencode_v2_runtime_transaction_verify_wrapper() {
+  opencode_v2_runtime_verify_wrapper_file="$1"
+  opencode_v2_runtime_verify_wrapper_bundle="$2"
+  opencode_v2_runtime_verify_wrapper_libexec="$3"
+  [ -f "$opencode_v2_runtime_verify_wrapper_file" ] &&
+    [ -x "$opencode_v2_runtime_verify_wrapper_file" ] &&
+    [ ! -L "$opencode_v2_runtime_verify_wrapper_file" ] || return 1
+  [ "$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_verify_wrapper_bundle/manifest.txt" app)" = opencode-v2 ] || return 1
+  opencode_v2_runtime_verify_wrapper_elf=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_verify_wrapper_bundle/manifest.txt" elf_name)
+  opencode_v2_runtime_verify_wrapper_runner=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_verify_wrapper_bundle/manifest.txt" runner_name)
+  case "$opencode_v2_runtime_verify_wrapper_elf" in
+    ''|*[!A-Za-z0-9._-]*|.|..) return 1 ;;
+  esac
+  [ "$opencode_v2_runtime_verify_wrapper_runner" = opencode-v2-runtime.sh ] || return 1
+  opencode_v2_runtime_verify_wrapper_target="$opencode_v2_runtime_verify_wrapper_libexec/$opencode_v2_runtime_verify_wrapper_elf"
+  opencode_v2_runtime_verify_wrapper_bin_line="BIN=\"$opencode_v2_runtime_verify_wrapper_target\""
+  opencode_v2_runtime_verify_wrapper_target_line="EXEC_TARGET=\"$opencode_v2_runtime_verify_wrapper_target\""
+  opencode_v2_runtime_verify_wrapper_exec_prefix="exec \"$opencode_v2_runtime_verify_wrapper_libexec/$opencode_v2_runtime_verify_wrapper_runner\" "
+  awk -v expected_bin="$opencode_v2_runtime_verify_wrapper_bin_line" \
+    -v expected_target="$opencode_v2_runtime_verify_wrapper_target_line" \
+    -v expected_exec_prefix="$opencode_v2_runtime_verify_wrapper_exec_prefix" '
+      $0 == expected_bin { bin_count++ }
+      $0 == expected_target { target_count++ }
+      index($0, expected_exec_prefix) == 1 && index($0, "\"$EXEC_TARGET\"") > 0 { runner_count++ }
+      END { exit !(bin_count == 1 && target_count == 1 && runner_count == 1) }
+    ' "$opencode_v2_runtime_verify_wrapper_file"
+}
+
+opencode_v2_runtime_transaction_validate_previous() {
+  opencode_v2_runtime_previous="$opencode_v2_runtime_recovery/previous"
+  [ -d "$opencode_v2_runtime_previous" ] && [ ! -L "$opencode_v2_runtime_previous" ] || return 1
+  opencode_v2_runtime_transaction_load_journal "$opencode_v2_runtime_previous/transaction.txt" || return 1
+  [ "$opencode_v2_runtime_tx_phase" = committing ] &&
+    [ "$opencode_v2_runtime_tx_had_bundle" = 1 ] &&
+    [ "$opencode_v2_runtime_tx_had_wrapper" = 1 ] || return 1
+  opencode_v2_runtime_previous_bundle="$opencode_v2_runtime_previous/bundle"
+  opencode_v2_runtime_previous_profile="$opencode_v2_runtime_previous/profile"
+  opencode_v2_runtime_transaction_verify_bundle "$opencode_v2_runtime_previous_bundle" || return 1
+  [ "$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_previous_bundle/manifest.txt" version)" = "$opencode_v2_runtime_tx_old_version" ] &&
+    [ "$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_previous_bundle/manifest.txt" tag)" = "$opencode_v2_runtime_tx_old_tag" ] &&
+    [ "$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_previous_bundle/manifest.txt" release_sequence)" = "$opencode_v2_runtime_tx_old_sequence" ] &&
+    [ "$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_previous_bundle/manifest.txt" release_contract)" = "$opencode_v2_runtime_tx_old_contract" ] &&
+    [ "$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_previous_bundle/manifest.txt" release_source_commit)" = "$opencode_v2_runtime_tx_old_source_commit" ] &&
+    [ "$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_previous_bundle/manifest.txt" tarball_checksum)" = "$opencode_v2_runtime_tx_old_digest" ] || return 1
+  opencode_v2_runtime_previous_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+    "$opencode_v2_runtime_previous_bundle") || return 1
+  [ "$opencode_v2_runtime_previous_bundle_digest" = "$opencode_v2_runtime_tx_old_bundle_digest" ] || return 1
+  [ -f "$opencode_v2_runtime_previous_bundle/.wrapper" ] &&
+    [ -x "$opencode_v2_runtime_previous_bundle/.wrapper" ] &&
+    [ ! -L "$opencode_v2_runtime_previous_bundle/.wrapper" ] || return 1
+  opencode_v2_runtime_transaction_verify_wrapper \
+    "$opencode_v2_runtime_previous_bundle/.wrapper" "$opencode_v2_runtime_previous_bundle" \
+    "$opencode_v2_runtime_tx_libexec" || return 1
+  opencode_v2_runtime_previous_wrapper_digest=$(sha256sum \
+    "$opencode_v2_runtime_previous_bundle/.wrapper" | awk '{ print $1 }') || return 1
+  [ "$opencode_v2_runtime_previous_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ] || return 1
+  opencode_v2_runtime_previous_profile_digest=$(opencode_v2_runtime_transaction_tree_digest \
+    "$opencode_v2_runtime_previous_profile") || return 1
+  [ "$opencode_v2_runtime_previous_profile_digest" = "$opencode_v2_runtime_tx_profile_digest" ]
+}
+
+opencode_v2_runtime_transaction_write_journal() {
+  opencode_v2_runtime_journal_tmp=$(mktemp "$opencode_v2_runtime_recovery/.journal.XXXXXX") || return 1
+  chmod 600 "$opencode_v2_runtime_journal_tmp" || {
+    rm -f "$opencode_v2_runtime_journal_tmp"
+    return 1
+  }
+  if ! cat > "$opencode_v2_runtime_journal_tmp" <<EOF
+schema=1
+phase=$1
+restore_from_previous=$opencode_v2_runtime_tx_restore_from_previous
+had_bundle=$opencode_v2_runtime_tx_had_bundle
+had_wrapper=$opencode_v2_runtime_tx_had_wrapper
+had_profile=$opencode_v2_runtime_tx_had_profile
+old_version=$opencode_v2_runtime_tx_old_version
+old_tag=$opencode_v2_runtime_tx_old_tag
+old_sequence=$opencode_v2_runtime_tx_old_sequence
+old_contract=$opencode_v2_runtime_tx_old_contract
+old_source_commit=$opencode_v2_runtime_tx_old_source_commit
+old_digest=$opencode_v2_runtime_tx_old_digest
+old_bundle_digest=$opencode_v2_runtime_tx_old_bundle_digest
+old_wrapper_digest=$opencode_v2_runtime_tx_old_wrapper_digest
+profile_digest=$opencode_v2_runtime_tx_profile_digest
+candidate_version=$opencode_v2_runtime_tx_candidate_version
+candidate_tag=$opencode_v2_runtime_tx_candidate_tag
+candidate_sequence=$opencode_v2_runtime_tx_candidate_sequence
+candidate_contract=$opencode_v2_runtime_tx_candidate_contract
+candidate_source_commit=$opencode_v2_runtime_tx_candidate_source_commit
+candidate_digest=$opencode_v2_runtime_tx_candidate_digest
+candidate_bundle_digest=$opencode_v2_runtime_tx_candidate_bundle_digest
+candidate_wrapper_digest=$opencode_v2_runtime_tx_candidate_wrapper_digest
+EOF
+  then
+    rm -f "$opencode_v2_runtime_journal_tmp"
+    return 1
+  fi
+  mv -f "$opencode_v2_runtime_journal_tmp" "$opencode_v2_runtime_journal" || {
+    rm -f "$opencode_v2_runtime_journal_tmp"
+    return 1
+  }
+  sync
+}
+
+opencode_v2_runtime_transaction_load_journal() {
+  opencode_v2_runtime_journal_source=${1:-$opencode_v2_runtime_journal}
+  [ -f "$opencode_v2_runtime_journal_source" ] && [ ! -L "$opencode_v2_runtime_journal_source" ] || return 1
+  opencode_v2_runtime_transaction_key_file_valid "$opencode_v2_runtime_journal_source" 23 || return 1
+  opencode_v2_runtime_tx_schema=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" schema)
+  opencode_v2_runtime_tx_phase=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" phase)
+  opencode_v2_runtime_tx_restore_from_previous=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal_source" restore_from_previous)
+  opencode_v2_runtime_tx_had_bundle=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" had_bundle)
+  opencode_v2_runtime_tx_had_wrapper=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" had_wrapper)
+  opencode_v2_runtime_tx_had_profile=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" had_profile)
+  opencode_v2_runtime_tx_old_version=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" old_version)
+  opencode_v2_runtime_tx_old_tag=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" old_tag)
+  opencode_v2_runtime_tx_old_sequence=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" old_sequence)
+  opencode_v2_runtime_tx_old_contract=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" old_contract)
+  opencode_v2_runtime_tx_old_source_commit=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" old_source_commit)
+  opencode_v2_runtime_tx_old_digest=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" old_digest)
+  opencode_v2_runtime_tx_old_bundle_digest=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" old_bundle_digest)
+  opencode_v2_runtime_tx_old_wrapper_digest=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" old_wrapper_digest)
+  opencode_v2_runtime_tx_profile_digest=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" profile_digest)
+  opencode_v2_runtime_tx_candidate_version=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" candidate_version)
+  opencode_v2_runtime_tx_candidate_tag=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" candidate_tag)
+  opencode_v2_runtime_tx_candidate_sequence=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" candidate_sequence)
+  opencode_v2_runtime_tx_candidate_contract=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" candidate_contract)
+  opencode_v2_runtime_tx_candidate_source_commit=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" candidate_source_commit)
+  opencode_v2_runtime_tx_candidate_digest=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" candidate_digest)
+  opencode_v2_runtime_tx_candidate_bundle_digest=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" candidate_bundle_digest)
+  opencode_v2_runtime_tx_candidate_wrapper_digest=$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal_source" candidate_wrapper_digest)
+  [ "$opencode_v2_runtime_tx_schema" = 1 ] || return 1
+  case "$opencode_v2_runtime_tx_phase" in
+    prepared|validated|committing|promoted|rolled-back) ;;
+    *) return 1 ;;
+  esac
+  case "$opencode_v2_runtime_tx_restore_from_previous" in
+    true|false) ;;
+    *) return 1 ;;
+  esac
+  case "$opencode_v2_runtime_tx_had_bundle:$opencode_v2_runtime_tx_had_wrapper:$opencode_v2_runtime_tx_had_profile" in
+    0:0:0|0:0:1|1:1:0|1:1:1) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$opencode_v2_runtime_tx_candidate_tag" |
+    grep -Eq '^v?2\.[0-9]+\.[0-9]+([+]android[0-9]+)?$' || return 1
+  printf '%s\n' "$opencode_v2_runtime_tx_candidate_version" |
+    grep -Eq '^2\.[0-9]+\.[0-9]+([+]android[0-9]+)?$' || return 1
+  [ "${opencode_v2_runtime_tx_candidate_tag#v}" = "$opencode_v2_runtime_tx_candidate_version" ] || return 1
+  printf '%s\n' "$opencode_v2_runtime_tx_candidate_digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+  printf '%s\n' "$opencode_v2_runtime_tx_candidate_sequence" | grep -Eq '^[1-9][0-9]*$' || return 1
+  [ "$opencode_v2_runtime_tx_candidate_contract" = termux-glibc-1 ] || return 1
+  printf '%s\n' "$opencode_v2_runtime_tx_candidate_source_commit" | grep -Eq '^[a-f0-9]{40}$' || return 1
+  printf '%s\n' "$opencode_v2_runtime_tx_profile_digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+  if [ "$opencode_v2_runtime_tx_had_bundle" = 1 ]; then
+    printf '%s\n' "$opencode_v2_runtime_tx_old_tag" |
+      grep -Eq '^v?2\.[0-9]+\.[0-9]+([+]android[0-9]+)?$' || return 1
+    printf '%s\n' "$opencode_v2_runtime_tx_old_version" |
+      grep -Eq '^2\.[0-9]+\.[0-9]+([+]android[0-9]+)?$' || return 1
+    [ "${opencode_v2_runtime_tx_old_tag#v}" = "$opencode_v2_runtime_tx_old_version" ] || return 1
+    printf '%s\n' "$opencode_v2_runtime_tx_old_sequence" | grep -Eq '^[1-9][0-9]*$' || return 1
+    [ "$opencode_v2_runtime_tx_old_contract" = termux-glibc-1 ] || return 1
+    printf '%s\n' "$opencode_v2_runtime_tx_old_source_commit" | grep -Eq '^[a-f0-9]{40}$' || return 1
+    printf '%s\n' "$opencode_v2_runtime_tx_old_digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+    printf '%s\n' "$opencode_v2_runtime_tx_old_bundle_digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+    printf '%s\n' "$opencode_v2_runtime_tx_old_wrapper_digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+  else
+    [ "$opencode_v2_runtime_tx_old_version$opencode_v2_runtime_tx_old_tag$opencode_v2_runtime_tx_old_sequence" = '' ] || return 1
+    [ "$opencode_v2_runtime_tx_old_contract$opencode_v2_runtime_tx_old_source_commit$opencode_v2_runtime_tx_old_digest" = '' ] || return 1
+    [ "$opencode_v2_runtime_tx_old_bundle_digest$opencode_v2_runtime_tx_old_wrapper_digest" = '' ] || return 1
+  fi
+  case "$opencode_v2_runtime_tx_phase" in
+    validated|committing|promoted|rolled-back)
+      printf '%s\n' "$opencode_v2_runtime_tx_candidate_bundle_digest" \
+        "$opencode_v2_runtime_tx_candidate_wrapper_digest" | grep -Eqv '^[a-f0-9]{64}$' && return 1
+      ;;
+  esac
+  return 0
+}
+
+opencode_v2_runtime_transaction_context() {
+  opencode_v2_runtime_init_paths || return 1
+  opencode_v2_runtime_tx_prefix=${PREFIX:-}
+  case "$opencode_v2_runtime_tx_prefix" in
+    /*) ;;
+    *) opencode_v2_runtime_error 'PREFIX debe ser una ruta absoluta para la transacción.'; return 1 ;;
+  esac
+  opencode_v2_runtime_tx_libexec="$opencode_v2_runtime_tx_prefix/libexec/opencode-v2"
+  opencode_v2_runtime_tx_wrapper="$opencode_v2_runtime_tx_prefix/bin/opencode-v2"
+  opencode_v2_runtime_tx_manifest="$opencode_v2_runtime_tx_libexec/manifest.txt"
+  opencode_v2_runtime_tx_snapshot="$opencode_v2_runtime_recovery/current"
+  opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_tx_snapshot/profile"
+  opencode_v2_runtime_tx_bundle_backup="$opencode_v2_runtime_tx_snapshot/bundle"
+  opencode_v2_runtime_validate_path_ancestors "$opencode_v2_runtime_profile" || return 1
+  opencode_v2_runtime_validate_path_ancestors "$opencode_v2_runtime_recovery" || return 1
+  opencode_v2_runtime_validate_path_ancestors "$opencode_v2_runtime_tx_libexec" || return 1
+  opencode_v2_runtime_validate_path_ancestors "$opencode_v2_runtime_tx_wrapper" || return 1
+
+  [ "${APP_NAME:-}" = opencode-v2 ] &&
+    [ "${LIBEXEC_DIR:-}" = "$opencode_v2_runtime_tx_libexec" ] &&
+    [ "${WRAPPER:-}" = "$opencode_v2_runtime_tx_wrapper" ] &&
+    [ "${MANIFEST:-}" = "$opencode_v2_runtime_tx_manifest" ] || {
+      opencode_v2_runtime_error 'El contexto del instalador no corresponde a opencode-v2.'
+      return 1
+    }
+  printf '%s\n' "${VERSION:-}" | grep -Eq '^2\.[0-9]+\.[0-9]+([+]android[0-9]+)?$' || return 1
+  printf '%s\n' "${TAG:-}" | grep -Eq '^v?2\.[0-9]+\.[0-9]+([+]android[0-9]+)?$' || return 1
+  printf '%s\n' "${TARBALL_CHECKSUM:-}" | grep -Eq '^[a-f0-9]{64}$' || return 1
+  printf '%s\n' "${CATALOG_SEQUENCE:-}" | grep -Eq '^[1-9][0-9]*$' || return 1
+  [ "${CATALOG_CONTRACT:-}" = termux-glibc-1 ] || return 1
+  printf '%s\n' "${CATALOG_SOURCE_COMMIT:-}" | grep -Eq '^[a-f0-9]{40}$' || return 1
+}
+
+opencode_v2_runtime_transaction_recovery_context() {
+  opencode_v2_runtime_init_paths || return 1
+  opencode_v2_runtime_tx_prefix=${PREFIX:-}
+  case "$opencode_v2_runtime_tx_prefix" in
+    /*) ;;
+    *) opencode_v2_runtime_error 'PREFIX debe ser una ruta absoluta para recuperar v2.'; return 1 ;;
+  esac
+  opencode_v2_runtime_tx_libexec="$opencode_v2_runtime_tx_prefix/libexec/opencode-v2"
+  opencode_v2_runtime_tx_wrapper="$opencode_v2_runtime_tx_prefix/bin/opencode-v2"
+  opencode_v2_runtime_tx_manifest="$opencode_v2_runtime_tx_libexec/manifest.txt"
+  opencode_v2_runtime_tx_snapshot="$opencode_v2_runtime_recovery/current"
+  opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_tx_snapshot/profile"
+  opencode_v2_runtime_tx_bundle_backup="$opencode_v2_runtime_tx_snapshot/bundle"
+  opencode_v2_runtime_validate_path_ancestors "$opencode_v2_runtime_recovery" || return 1
+  opencode_v2_runtime_validate_path_ancestors "$opencode_v2_runtime_tx_libexec" || return 1
+  opencode_v2_runtime_validate_path_ancestors "$opencode_v2_runtime_tx_wrapper" || return 1
+}
+
+opencode_v2_runtime_transaction_profile_snapshot() {
+  opencode_v2_runtime_tx_had_profile=0
+  if [ -e "$opencode_v2_runtime_profile" ] || [ -L "$opencode_v2_runtime_profile" ]; then
+    [ -d "$opencode_v2_runtime_profile" ] && [ ! -L "$opencode_v2_runtime_profile" ] || return 1
+    opencode_v2_runtime_tx_had_profile=1
+    if find "$opencode_v2_runtime_profile" -type l -print -quit | grep -q .; then
+      opencode_v2_runtime_error 'El perfil contiene symlinks; la transacción no lo modificará.'
+      return 1
+    fi
+    opencode_v2_runtime_profile_unknown=$(find "$opencode_v2_runtime_profile" -mindepth 1 -maxdepth 1 \
+      ! -name config ! -name data ! -name cache ! -name state ! -name log ! -name tmp -print -quit)
+    [ -z "$opencode_v2_runtime_profile_unknown" ] || {
+      opencode_v2_runtime_error 'El perfil contiene una ruta no reconocida; la transacción no lo modificará.'
+      return 1
+    }
+  fi
+
+  mkdir -p "$opencode_v2_runtime_tx_profile_snapshot" || return 1
+  for opencode_v2_runtime_directory in config data state; do
+    if [ -e "$opencode_v2_runtime_profile/$opencode_v2_runtime_directory" ] ||
+       [ -L "$opencode_v2_runtime_profile/$opencode_v2_runtime_directory" ]; then
+      [ -d "$opencode_v2_runtime_profile/$opencode_v2_runtime_directory" ] &&
+        [ ! -L "$opencode_v2_runtime_profile/$opencode_v2_runtime_directory" ] || return 1
+      cp -a "$opencode_v2_runtime_profile/$opencode_v2_runtime_directory" \
+        "$opencode_v2_runtime_tx_profile_snapshot/" || return 1
+    fi
+  done
+  opencode_v2_runtime_tx_profile_digest=$(opencode_v2_runtime_transaction_tree_digest \
+    "$opencode_v2_runtime_tx_profile_snapshot") || return 1
+}
+
+opencode_v2_runtime_transaction_check_space() {
+  [ -n "${TMP_FILE:-}" ] && [ -f "$TMP_FILE" ] && [ ! -L "$TMP_FILE" ] || return 1
+  command -v gzip >/dev/null 2>&1 && command -v df >/dev/null 2>&1 &&
+    command -v du >/dev/null 2>&1 || return 1
+  opencode_v2_runtime_archive_bytes=$(gzip -l "$TMP_FILE" 2>/dev/null |
+    awk 'NR == 2 { print $2 }')
+  printf '%s\n' "$opencode_v2_runtime_archive_bytes" | grep -Eq '^[0-9]+$' || return 1
+  opencode_v2_runtime_candidate_kb=$(((opencode_v2_runtime_archive_bytes + 1023) / 1024))
+
+  opencode_v2_runtime_profile_kb=0
+  for opencode_v2_runtime_directory in config data state; do
+    opencode_v2_runtime_profile_path="$opencode_v2_runtime_profile/$opencode_v2_runtime_directory"
+    if [ -d "$opencode_v2_runtime_profile_path" ]; then
+      opencode_v2_runtime_directory_kb=$(du -sk "$opencode_v2_runtime_profile_path" |
+        awk 'NR == 1 { print $1 }')
+      printf '%s\n' "$opencode_v2_runtime_directory_kb" | grep -Eq '^[0-9]+$' || return 1
+      opencode_v2_runtime_profile_kb=$((opencode_v2_runtime_profile_kb + opencode_v2_runtime_directory_kb))
+    fi
+  done
+  opencode_v2_runtime_bundle_kb=0
+  if [ -d "$opencode_v2_runtime_tx_libexec" ]; then
+    opencode_v2_runtime_bundle_kb=$(du -sk "$opencode_v2_runtime_tx_libexec" | awk 'NR == 1 { print $1 }')
+    printf '%s\n' "$opencode_v2_runtime_bundle_kb" | grep -Eq '^[0-9]+$' || return 1
+  fi
+
+  opencode_v2_runtime_recovery_device=$(df -Pk "$opencode_v2_runtime_recovery" |
+    awk 'NR == 2 { print $1 }')
+  opencode_v2_runtime_prefix_device=$(df -Pk "$opencode_v2_runtime_tx_prefix" |
+    awk 'NR == 2 { print $1 }')
+  opencode_v2_runtime_tmp_dir=${TMPDIR:-$opencode_v2_runtime_tx_prefix/tmp}
+  [ -d "$opencode_v2_runtime_tmp_dir" ] || return 1
+  opencode_v2_runtime_tmp_device=$(df -Pk "$opencode_v2_runtime_tmp_dir" |
+    awk 'NR == 2 { print $1 }')
+  [ -n "$opencode_v2_runtime_recovery_device" ] &&
+    [ -n "$opencode_v2_runtime_prefix_device" ] &&
+    [ -n "$opencode_v2_runtime_tmp_device" ] || return 1
+
+  opencode_v2_runtime_recovery_need=$opencode_v2_runtime_profile_kb
+  if [ "$opencode_v2_runtime_recovery_device" != "$opencode_v2_runtime_prefix_device" ]; then
+    opencode_v2_runtime_recovery_need=$((opencode_v2_runtime_recovery_need + opencode_v2_runtime_bundle_kb))
+  fi
+  opencode_v2_runtime_prefix_need=$opencode_v2_runtime_candidate_kb
+  opencode_v2_runtime_tmp_need=$opencode_v2_runtime_candidate_kb
+  if [ "$opencode_v2_runtime_prefix_device" = "$opencode_v2_runtime_tmp_device" ]; then
+    opencode_v2_runtime_prefix_need=$((opencode_v2_runtime_candidate_kb * 2))
+    opencode_v2_runtime_tmp_need=0
+  fi
+  if [ "$opencode_v2_runtime_recovery_device" = "$opencode_v2_runtime_prefix_device" ]; then
+    opencode_v2_runtime_recovery_need=$((opencode_v2_runtime_recovery_need + opencode_v2_runtime_prefix_need))
+  fi
+  if [ "$opencode_v2_runtime_recovery_device" = "$opencode_v2_runtime_tmp_device" ] &&
+     [ "$opencode_v2_runtime_prefix_device" != "$opencode_v2_runtime_tmp_device" ]; then
+    opencode_v2_runtime_recovery_need=$((opencode_v2_runtime_recovery_need + opencode_v2_runtime_tmp_need))
+  fi
+
+  opencode_v2_runtime_recovery_available=$(df -Pk "$opencode_v2_runtime_recovery" |
+    awk 'NR == 2 { print $4 }')
+  opencode_v2_runtime_prefix_available=$(df -Pk "$opencode_v2_runtime_tx_prefix" |
+    awk 'NR == 2 { print $4 }')
+  opencode_v2_runtime_tmp_available=$(df -Pk "$opencode_v2_runtime_tmp_dir" |
+    awk 'NR == 2 { print $4 }')
+  printf '%s\n' "$opencode_v2_runtime_recovery_available" "$opencode_v2_runtime_prefix_available" \
+    "$opencode_v2_runtime_tmp_available" | grep -Eqv '^[0-9]+$' && return 1
+  [ "$opencode_v2_runtime_recovery_available" -ge "$((opencode_v2_runtime_recovery_need + 1024))" ] || return 1
+  if [ "$opencode_v2_runtime_prefix_device" != "$opencode_v2_runtime_recovery_device" ]; then
+    [ "$opencode_v2_runtime_prefix_available" -ge "$((opencode_v2_runtime_prefix_need + 1024))" ] || return 1
+  fi
+  if [ "$opencode_v2_runtime_tmp_device" != "$opencode_v2_runtime_recovery_device" ] &&
+     [ "$opencode_v2_runtime_tmp_device" != "$opencode_v2_runtime_prefix_device" ]; then
+    [ "$opencode_v2_runtime_tmp_available" -ge "$((opencode_v2_runtime_tmp_need + 1024))" ] || return 1
+  fi
+}
+
+opencode_v2_runtime_transaction_prepare_cleanup() {
+  [ ! -L "$opencode_v2_runtime_tx_snapshot" ] && [ -d "$opencode_v2_runtime_tx_snapshot" ] &&
+    rm -rf "$opencode_v2_runtime_tx_snapshot"
+  opencode_v2_runtime_release_run_lock
+}
+
+opencode_v2_runtime_transaction_prepare() {
+  opencode_v2_runtime_transaction_context || return 1
+  [ ! -e "$opencode_v2_runtime_journal" ] && [ ! -L "$opencode_v2_runtime_journal" ] || {
+    opencode_v2_runtime_error 'Hay una transacción previa sin recuperar; no se iniciará otra.'
+    return 1
+  }
+  opencode_v2_runtime_acquire_run_lock || return 1
+  if [ -e "$opencode_v2_runtime_recovery/previous.old" ] ||
+     [ -L "$opencode_v2_runtime_recovery/previous.old" ]; then
+    opencode_v2_runtime_error 'Hay un respaldo anterior sin rotación completada; revisá status antes de continuar.'
+    opencode_v2_runtime_release_run_lock
+    return 1
+  fi
+  if [ -e "$opencode_v2_runtime_tx_snapshot" ] || [ -L "$opencode_v2_runtime_tx_snapshot" ]; then
+    opencode_v2_runtime_error 'Hay un snapshot incompleto; revisá status antes de continuar.'
+    opencode_v2_runtime_release_run_lock
+    return 1
+  fi
+  opencode_v2_runtime_write_owner transaction "$$" "$opencode_v2_runtime_owner_start" \
+    '' '' '' '' '' '' || {
+      opencode_v2_runtime_release_run_lock
+      return 1
+    }
+
+  opencode_v2_runtime_transaction_check_space || {
+    opencode_v2_runtime_error 'No hay espacio verificable para el candidato y el respaldo transaccional.'
+    opencode_v2_runtime_release_run_lock
+    return 1
+  }
+  if [ -e "$opencode_v2_runtime_recovery/previous" ] ||
+     [ -L "$opencode_v2_runtime_recovery/previous" ]; then
+    opencode_v2_runtime_transaction_validate_previous || {
+      opencode_v2_runtime_error 'El respaldo anterior no coincide con su journal; se conserva para recuperación.'
+      opencode_v2_runtime_release_run_lock
+      return 1
+    }
+  fi
+
+  opencode_v2_runtime_tx_had_bundle=0
+  opencode_v2_runtime_tx_had_wrapper=0
+  opencode_v2_runtime_tx_old_version=''
+  opencode_v2_runtime_tx_restore_from_previous=false
+  opencode_v2_runtime_tx_old_tag=''
+  opencode_v2_runtime_tx_old_sequence=''
+  opencode_v2_runtime_tx_old_contract=''
+  opencode_v2_runtime_tx_old_source_commit=''
+  opencode_v2_runtime_tx_old_digest=''
+  opencode_v2_runtime_tx_old_bundle_digest=''
+  opencode_v2_runtime_tx_old_wrapper_digest=''
+  opencode_v2_runtime_tx_profile_digest=''
+  opencode_v2_runtime_tx_candidate_version="$VERSION"
+  opencode_v2_runtime_tx_candidate_tag="$TAG"
+  opencode_v2_runtime_tx_candidate_sequence="$CATALOG_SEQUENCE"
+  opencode_v2_runtime_tx_candidate_contract="$CATALOG_CONTRACT"
+  opencode_v2_runtime_tx_candidate_source_commit="$CATALOG_SOURCE_COMMIT"
+  opencode_v2_runtime_tx_candidate_digest="$TARBALL_CHECKSUM"
+  opencode_v2_runtime_tx_candidate_bundle_digest=''
+  opencode_v2_runtime_tx_candidate_wrapper_digest=''
+
+  if [ -e "$opencode_v2_runtime_tx_libexec" ] || [ -L "$opencode_v2_runtime_tx_libexec" ]; then
+    [ -d "$opencode_v2_runtime_tx_libexec" ] && [ ! -L "$opencode_v2_runtime_tx_libexec" ] &&
+      [ -f "$opencode_v2_runtime_tx_manifest" ] && [ ! -L "$opencode_v2_runtime_tx_manifest" ] || {
+        opencode_v2_runtime_error 'El bundle anterior no tiene un manifest regular; se conserva intacto.'
+        opencode_v2_runtime_tx_had_bundle=0
+        opencode_v2_runtime_transaction_prepare_cleanup
+        return 1
+      }
+    opencode_v2_runtime_tx_old_app=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_tx_manifest" app)
+    opencode_v2_runtime_tx_old_version=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_tx_manifest" version)
+    opencode_v2_runtime_tx_old_tag=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_tx_manifest" tag)
+    opencode_v2_runtime_tx_old_sequence=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_tx_manifest" release_sequence)
+    opencode_v2_runtime_tx_old_contract=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_tx_manifest" release_contract)
+    opencode_v2_runtime_tx_old_source_commit=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_tx_manifest" release_source_commit)
+    opencode_v2_runtime_tx_old_digest=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_tx_manifest" tarball_checksum)
+    [ "$opencode_v2_runtime_tx_old_app" = opencode-v2 ] &&
+      [ -f "$opencode_v2_runtime_tx_wrapper" ] && [ -x "$opencode_v2_runtime_tx_wrapper" ] &&
+      [ ! -L "$opencode_v2_runtime_tx_wrapper" ] || {
+        opencode_v2_runtime_error 'El bundle o wrapper anterior no pertenece a una instalación verificable de v2.'
+        opencode_v2_runtime_tx_had_bundle=0
+        opencode_v2_runtime_transaction_prepare_cleanup
+        return 1
+      }
+    opencode_v2_runtime_transaction_verify_bundle "$opencode_v2_runtime_tx_libexec" || {
+      opencode_v2_runtime_error 'El bundle anterior no coincide con sus hashes del manifest.'
+      opencode_v2_runtime_tx_had_bundle=0
+      opencode_v2_runtime_transaction_prepare_cleanup
+      return 1
+    }
+    opencode_v2_runtime_transaction_verify_wrapper "$opencode_v2_runtime_tx_wrapper" \
+      "$opencode_v2_runtime_tx_libexec" "$opencode_v2_runtime_tx_libexec" || {
+        opencode_v2_runtime_error 'El wrapper anterior no apunta al bundle y runner registrados.'
+        opencode_v2_runtime_tx_had_bundle=0
+        opencode_v2_runtime_transaction_prepare_cleanup
+        return 1
+      }
+    printf '%s\n' "$opencode_v2_runtime_tx_old_tag" |
+      grep -Eq '^v?2\.[0-9]+\.[0-9]+([+]android[0-9]+)?$' || {
+        opencode_v2_runtime_transaction_prepare_cleanup
+        return 1
+      }
+    printf '%s\n' "$opencode_v2_runtime_tx_old_sequence" | grep -Eq '^[1-9][0-9]*$' || {
+      opencode_v2_runtime_transaction_prepare_cleanup
+      return 1
+    }
+    [ "$opencode_v2_runtime_tx_old_contract" = termux-glibc-1 ] || {
+      opencode_v2_runtime_transaction_prepare_cleanup
+      return 1
+    }
+    printf '%s\n' "$opencode_v2_runtime_tx_old_source_commit" | grep -Eq '^[a-f0-9]{40}$' || {
+      opencode_v2_runtime_transaction_prepare_cleanup
+      return 1
+    }
+    printf '%s\n' "$opencode_v2_runtime_tx_old_digest" | grep -Eq '^[a-f0-9]{64}$' || {
+      opencode_v2_runtime_transaction_prepare_cleanup
+      return 1
+    }
+    opencode_v2_runtime_tx_old_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+      "$opencode_v2_runtime_tx_libexec") || {
+        opencode_v2_runtime_transaction_prepare_cleanup
+        return 1
+      }
+    opencode_v2_runtime_tx_old_wrapper_digest=$(sha256sum "$opencode_v2_runtime_tx_wrapper" |
+      awk '{ print $1 }') || {
+        opencode_v2_runtime_transaction_prepare_cleanup
+        return 1
+      }
+    opencode_v2_runtime_tx_had_bundle=1
+    opencode_v2_runtime_tx_had_wrapper=1
+  elif [ -e "$opencode_v2_runtime_tx_wrapper" ] || [ -L "$opencode_v2_runtime_tx_wrapper" ]; then
+    opencode_v2_runtime_error 'Hay un wrapper sin bundle administrado; no se sobrescribirá.'
+    opencode_v2_runtime_transaction_prepare_cleanup
+    return 1
+  fi
+
+  if ! opencode_v2_runtime_transaction_profile_snapshot; then
+    opencode_v2_runtime_error 'No se pudo respaldar el perfil v2 de forma consistente.'
+    opencode_v2_runtime_transaction_prepare_cleanup
+    return 1
+  fi
+
+  if [ -e "$opencode_v2_runtime_recovery/previous" ] || [ -L "$opencode_v2_runtime_recovery/previous" ]; then
+    [ -d "$opencode_v2_runtime_recovery/previous" ] && [ ! -L "$opencode_v2_runtime_recovery/previous" ] || {
+      opencode_v2_runtime_transaction_prepare_cleanup
+      return 1
+    }
+  fi
+  if ! opencode_v2_runtime_transaction_write_journal prepared; then
+    if [ ! -e "$opencode_v2_runtime_journal" ]; then
+      opencode_v2_runtime_transaction_prepare_cleanup
+    else
+      opencode_v2_runtime_error 'El journal quedó escrito pero sync falló; se conserva el estado para rollback explícito.'
+    fi
+    return 1
+  fi
+  # shellcheck disable=SC2034
+  BACKUP_DIR="$opencode_v2_runtime_tx_bundle_backup"
+}
+
+opencode_v2_runtime_transaction_validate() {
+  opencode_v2_runtime_transaction_context || return 1
+  opencode_v2_runtime_transaction_load_journal || {
+    opencode_v2_runtime_error 'El journal transaccional está ausente o no es válido.'
+    return 1
+  }
+  [ "$opencode_v2_runtime_tx_phase" = prepared ] &&
+    [ "$opencode_v2_runtime_tx_candidate_tag" = "$TAG" ] &&
+    [ "$opencode_v2_runtime_tx_candidate_digest" = "$TARBALL_CHECKSUM" ] || return 1
+  [ -d "$opencode_v2_runtime_tx_libexec" ] && [ ! -L "$opencode_v2_runtime_tx_libexec" ] &&
+    [ -f "$opencode_v2_runtime_tx_manifest" ] && [ ! -L "$opencode_v2_runtime_tx_manifest" ] &&
+    [ -f "$opencode_v2_runtime_tx_wrapper" ] && [ -x "$opencode_v2_runtime_tx_wrapper" ] &&
+    [ ! -L "$opencode_v2_runtime_tx_wrapper" ] || return 1
+  opencode_v2_runtime_candidate_app=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_tx_manifest" app)
+  opencode_v2_runtime_candidate_version=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_tx_manifest" version)
+  opencode_v2_runtime_candidate_tag=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_tx_manifest" tag)
+  opencode_v2_runtime_candidate_sequence=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_tx_manifest" release_sequence)
+  opencode_v2_runtime_candidate_contract=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_tx_manifest" release_contract)
+  opencode_v2_runtime_candidate_source_commit=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_tx_manifest" release_source_commit)
+  opencode_v2_runtime_candidate_digest=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_tx_manifest" tarball_checksum)
+  [ "$opencode_v2_runtime_candidate_app" = opencode-v2 ] &&
+    [ "$opencode_v2_runtime_candidate_version" = "$VERSION" ] &&
+    [ "$opencode_v2_runtime_candidate_tag" = "$TAG" ] &&
+    [ "$opencode_v2_runtime_candidate_sequence" = "$CATALOG_SEQUENCE" ] &&
+    [ "$opencode_v2_runtime_candidate_contract" = "$CATALOG_CONTRACT" ] &&
+    [ "$opencode_v2_runtime_candidate_source_commit" = "$CATALOG_SOURCE_COMMIT" ] &&
+    [ "$opencode_v2_runtime_candidate_digest" = "$TARBALL_CHECKSUM" ] || return 1
+  opencode_v2_runtime_transaction_verify_bundle "$opencode_v2_runtime_tx_libexec" || {
+    opencode_v2_runtime_error 'El bundle candidato no coincide con sus hashes del manifest.'
+    return 1
+  }
+  opencode_v2_runtime_transaction_verify_wrapper "$opencode_v2_runtime_tx_wrapper" \
+    "$opencode_v2_runtime_tx_libexec" "$opencode_v2_runtime_tx_libexec" || {
+      opencode_v2_runtime_error 'El wrapper candidato no apunta al bundle y runner registrados.'
+      return 1
+    }
+  if [ "$opencode_v2_runtime_tx_had_bundle" = 1 ]; then
+    opencode_v2_runtime_current_backup_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+      "$opencode_v2_runtime_tx_bundle_backup") || return 1
+    [ "$opencode_v2_runtime_current_backup_digest" = "$opencode_v2_runtime_tx_old_bundle_digest" ] || return 1
+    opencode_v2_runtime_current_wrapper_digest=$(sha256sum \
+      "$opencode_v2_runtime_tx_bundle_backup/.wrapper" | awk '{ print $1 }') || return 1
+    [ "$opencode_v2_runtime_current_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ] || return 1
+  fi
+  if [ -n "${opencode_v2_runtime_project_root:-}" ]; then
+    bash "$opencode_v2_runtime_project_root/verify.sh" opencode-v2 || return 1
+  else
+    opencode_v2_runtime_error 'No se configuró verify.sh para validar el bundle candidato.'
+    return 1
+  fi
+  opencode_v2_runtime_candidate_version_output=$("$opencode_v2_runtime_tx_wrapper" --version 2>&1) || {
+    opencode_v2_runtime_error 'El candidato no respondió a --version.'
+    return 1
+  }
+  opencode_v2_runtime_candidate_version_core=$(printf '%s\n' "$opencode_v2_runtime_candidate_version_output" |
+    grep -Eo '[0-9]+[.][0-9]+[.][0-9]+' | head -1)
+  opencode_v2_runtime_expected_version_core=${VERSION%%+*}
+  opencode_v2_runtime_expected_version_core=${opencode_v2_runtime_expected_version_core#v}
+  [ "$opencode_v2_runtime_candidate_version_core" = "$opencode_v2_runtime_expected_version_core" ] || {
+    opencode_v2_runtime_error 'La versión ejecutada por el wrapper no coincide con el candidato.'
+    return 1
+  }
+  opencode_v2_runtime_tx_candidate_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+    "$opencode_v2_runtime_tx_libexec") || return 1
+  opencode_v2_runtime_tx_candidate_wrapper_digest=$(sha256sum \
+    "$opencode_v2_runtime_tx_wrapper" | awk '{ print $1 }') || return 1
+  opencode_v2_runtime_tx_phase=validated
+  opencode_v2_runtime_transaction_write_journal validated
+}
+
+opencode_v2_runtime_transaction_restore_profile() {
+  [ -d "$opencode_v2_runtime_tx_profile_snapshot" ] &&
+    [ ! -L "$opencode_v2_runtime_tx_profile_snapshot" ] || return 1
+  opencode_v2_runtime_current_profile_digest=$(opencode_v2_runtime_transaction_tree_digest \
+    "$opencode_v2_runtime_tx_profile_snapshot") || return 1
+  [ "$opencode_v2_runtime_current_profile_digest" = "$opencode_v2_runtime_tx_profile_digest" ] || return 1
+  if [ "$opencode_v2_runtime_tx_had_profile" = 0 ]; then
+    if [ -e "$opencode_v2_runtime_profile" ] || [ -L "$opencode_v2_runtime_profile" ]; then
+      [ -d "$opencode_v2_runtime_profile" ] && [ ! -L "$opencode_v2_runtime_profile" ] || return 1
+      if find "$opencode_v2_runtime_profile" -type l -print -quit | grep -q .; then
+        return 1
+      fi
+      opencode_v2_runtime_profile_unknown=$(find "$opencode_v2_runtime_profile" -mindepth 1 -maxdepth 1 \
+        ! -name config ! -name data ! -name cache ! -name state ! -name log ! -name tmp -print -quit)
+      [ -z "$opencode_v2_runtime_profile_unknown" ] || return 1
+      rm -rf "${opencode_v2_runtime_profile:?}" || return 1
+    fi
+    return 0
+  fi
+  if [ -e "$opencode_v2_runtime_profile" ] || [ -L "$opencode_v2_runtime_profile" ]; then
+    [ -d "$opencode_v2_runtime_profile" ] && [ ! -L "$opencode_v2_runtime_profile" ] || return 1
+    if find "$opencode_v2_runtime_profile" -type l -print -quit | grep -q .; then
+      return 1
+    fi
+    opencode_v2_runtime_profile_unknown=$(find "$opencode_v2_runtime_profile" -mindepth 1 -maxdepth 1 \
+      ! -name config ! -name data ! -name cache ! -name state ! -name log ! -name tmp -print -quit)
+    [ -z "$opencode_v2_runtime_profile_unknown" ] || return 1
+  else
+    mkdir -p "$opencode_v2_runtime_profile" || return 1
+  fi
+  for opencode_v2_runtime_directory in config data state; do
+    rm -rf "${opencode_v2_runtime_profile:?}/$opencode_v2_runtime_directory" || return 1
+    if [ -d "$opencode_v2_runtime_tx_profile_snapshot/$opencode_v2_runtime_directory" ]; then
+      cp -a "$opencode_v2_runtime_tx_profile_snapshot/$opencode_v2_runtime_directory" \
+        "$opencode_v2_runtime_profile/" || return 1
+    fi
+  done
+  if [ -e "$opencode_v2_runtime_profile/cache" ] || [ -L "$opencode_v2_runtime_profile/cache" ]; then
+    [ ! -L "$opencode_v2_runtime_profile/cache" ] || return 1
+    rm -rf "$opencode_v2_runtime_profile/cache" || return 1
+  fi
+}
+
+opencode_v2_runtime_transaction_current_owner() {
+  opencode_v2_runtime_owner_file="$opencode_v2_runtime_lock/owner"
+  [ -f "$opencode_v2_runtime_owner_file" ] && [ ! -L "$opencode_v2_runtime_owner_file" ] || return 1
+  [ "$(opencode_v2_runtime_owner_value "$opencode_v2_runtime_owner_file" pid)" = "$$" ] || return 1
+  opencode_v2_runtime_owner_kind=$(opencode_v2_runtime_owner_value "$opencode_v2_runtime_owner_file" kind)
+  case "$opencode_v2_runtime_owner_kind" in
+    transaction|recovery) ;;
+    *) return 1 ;;
+  esac
+  opencode_v2_runtime_owner_start=$(opencode_v2_runtime_owner_value "$opencode_v2_runtime_owner_file" start_time)
+  opencode_v2_runtime_process_matches "$$" "$opencode_v2_runtime_owner_start"
+}
+
+opencode_v2_runtime_recovery_stop_recorded_child() {
+  opencode_v2_runtime_recorded_pid=$(opencode_v2_runtime_owner_value "$1" "$2")
+  opencode_v2_runtime_recorded_start=$(opencode_v2_runtime_owner_value "$1" "$3")
+  [ -n "$opencode_v2_runtime_recorded_pid" ] || return 0
+  printf '%s\n' "$opencode_v2_runtime_recorded_pid" "$opencode_v2_runtime_recorded_start" |
+    grep -Eqv '^[0-9]+$' && return 1
+  if opencode_v2_runtime_process_matches "$opencode_v2_runtime_recorded_pid" \
+    "$opencode_v2_runtime_recorded_start"; then
+    opencode_v2_runtime_stop_child "$opencode_v2_runtime_recorded_pid" \
+      "$opencode_v2_runtime_recorded_start"
+  fi
+}
+
+opencode_v2_runtime_recovery_acquire_lock() {
+  umask 077
+  opencode_v2_runtime_create_private_dir "$opencode_v2_runtime_recovery" || return 1
+  if [ -L "$opencode_v2_runtime_lock" ]; then
+    opencode_v2_runtime_error 'El lock es un symlink; no se recuperará.'
+    return 1
+  fi
+  opencode_v2_runtime_recovery_new_lock=false
+  if [ -e "$opencode_v2_runtime_lock" ]; then
+    [ -d "$opencode_v2_runtime_lock" ] || return 1
+    opencode_v2_runtime_stale_owner="$opencode_v2_runtime_lock/owner"
+    [ -f "$opencode_v2_runtime_stale_owner" ] && [ ! -L "$opencode_v2_runtime_stale_owner" ] || {
+      opencode_v2_runtime_error 'El lock no tiene identidad verificable; no se recuperará automáticamente.'
+      return 1
+    }
+    [ "$(opencode_v2_runtime_owner_value "$opencode_v2_runtime_stale_owner" schema)" = 1 ] || return 1
+    case "$(opencode_v2_runtime_owner_value "$opencode_v2_runtime_stale_owner" kind)" in
+      run|transaction|recovery) ;;
+      *) return 1 ;;
+    esac
+    opencode_v2_runtime_stale_pid=$(opencode_v2_runtime_owner_value \
+      "$opencode_v2_runtime_stale_owner" pid)
+    opencode_v2_runtime_stale_start=$(opencode_v2_runtime_owner_value \
+      "$opencode_v2_runtime_stale_owner" start_time)
+    printf '%s\n' "$opencode_v2_runtime_stale_pid" "$opencode_v2_runtime_stale_start" |
+      grep -Eqv '^[0-9]+$' && return 1
+    if opencode_v2_runtime_process_matches "$opencode_v2_runtime_stale_pid" \
+      "$opencode_v2_runtime_stale_start"; then
+      opencode_v2_runtime_error 'OpenCode v2 mantiene una ejecución u operación activa.'
+      return 1
+    fi
+    if ! mkdir "$opencode_v2_runtime_lock/recover" 2>/dev/null; then
+      opencode_v2_runtime_error 'Otro proceso está recuperando el lock de OpenCode v2.'
+      return 1
+    fi
+    if ! opencode_v2_runtime_recovery_stop_recorded_child "$opencode_v2_runtime_stale_owner" \
+      server_pid server_start_time ||
+      ! opencode_v2_runtime_recovery_stop_recorded_child "$opencode_v2_runtime_stale_owner" \
+        reader_pid reader_start_time ||
+      ! opencode_v2_runtime_recovery_stop_recorded_child "$opencode_v2_runtime_stale_owner" \
+        client_pid client_start_time; then
+      rmdir "$opencode_v2_runtime_lock/recover" 2>/dev/null || true
+      return 1
+    fi
+  else
+    if ! mkdir "$opencode_v2_runtime_lock" 2>/dev/null; then
+      opencode_v2_runtime_error 'OpenCode v2 adquirió el lock antes de la recuperación.'
+      return 1
+    fi
+    opencode_v2_runtime_recovery_new_lock=true
+    chmod 700 "$opencode_v2_runtime_lock" || {
+      rmdir "$opencode_v2_runtime_lock" 2>/dev/null || true
+      return 1
+    }
+  fi
+  opencode_v2_runtime_owner_start=$(opencode_v2_runtime_proc_start_time "$$")
+  case "$opencode_v2_runtime_owner_start" in
+    ''|*[!0-9]*)
+      [ "$opencode_v2_runtime_recovery_new_lock" = true ] &&
+        rmdir "$opencode_v2_runtime_lock" 2>/dev/null || true
+      return 1
+      ;;
+  esac
+  opencode_v2_runtime_write_owner recovery "$$" "$opencode_v2_runtime_owner_start" \
+    '' '' '' '' '' '' || {
+      if [ "$opencode_v2_runtime_recovery_new_lock" = true ]; then
+        rmdir "$opencode_v2_runtime_lock" 2>/dev/null || true
+      else
+        rmdir "$opencode_v2_runtime_lock/recover" 2>/dev/null || true
+      fi
+      return 1
+    }
+}
+
+opencode_v2_runtime_manual_write_journal() {
+  opencode_v2_runtime_manual_journal_tmp=$(mktemp "$opencode_v2_runtime_recovery/.journal.XXXXXX") || return 1
+  chmod 600 "$opencode_v2_runtime_manual_journal_tmp" || {
+    rm -f "$opencode_v2_runtime_manual_journal_tmp"
+    return 1
+  }
+  if ! cat > "$opencode_v2_runtime_manual_journal_tmp" <<EOF
+schema=1
+operation=manual-rollback
+phase=$1
+previous_tag=$opencode_v2_runtime_manual_previous_tag
+previous_contract=$opencode_v2_runtime_manual_previous_contract
+previous_bundle_digest=$opencode_v2_runtime_manual_previous_bundle_digest
+previous_wrapper_digest=$opencode_v2_runtime_manual_previous_wrapper_digest
+previous_profile_digest=$opencode_v2_runtime_manual_previous_profile_digest
+previous_had_profile=$opencode_v2_runtime_manual_previous_had_profile
+current_tag=$opencode_v2_runtime_manual_current_tag
+current_contract=$opencode_v2_runtime_manual_current_contract
+current_bundle_digest=$opencode_v2_runtime_manual_current_bundle_digest
+current_wrapper_digest=$opencode_v2_runtime_manual_current_wrapper_digest
+current_profile_digest=$opencode_v2_runtime_manual_current_profile_digest
+current_had_profile=$opencode_v2_runtime_manual_current_had_profile
+EOF
+  then
+    rm -f "$opencode_v2_runtime_manual_journal_tmp"
+    return 1
+  fi
+  mv -f "$opencode_v2_runtime_manual_journal_tmp" "$opencode_v2_runtime_journal" || {
+    rm -f "$opencode_v2_runtime_manual_journal_tmp"
+    return 1
+  }
+  sync
+}
+
+opencode_v2_runtime_manual_load_journal() {
+  [ -f "$opencode_v2_runtime_journal" ] && [ ! -L "$opencode_v2_runtime_journal" ] || return 1
+  opencode_v2_runtime_transaction_key_file_valid "$opencode_v2_runtime_journal" 15 || return 1
+  [ "$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal" schema)" = 1 ] &&
+    [ "$(opencode_v2_runtime_transaction_value "$opencode_v2_runtime_journal" operation)" = manual-rollback ] || return 1
+  opencode_v2_runtime_manual_phase=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" phase)
+  case "$opencode_v2_runtime_manual_phase" in
+    manual-prepared|manual-restoring|manual-restored) ;;
+    *) return 1 ;;
+  esac
+  opencode_v2_runtime_manual_previous_tag=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" previous_tag)
+  opencode_v2_runtime_manual_previous_contract=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" previous_contract)
+  opencode_v2_runtime_manual_previous_bundle_digest=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" previous_bundle_digest)
+  opencode_v2_runtime_manual_previous_wrapper_digest=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" previous_wrapper_digest)
+  opencode_v2_runtime_manual_previous_profile_digest=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" previous_profile_digest)
+  opencode_v2_runtime_manual_previous_had_profile=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" previous_had_profile)
+  opencode_v2_runtime_manual_current_tag=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" current_tag)
+  opencode_v2_runtime_manual_current_contract=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" current_contract)
+  opencode_v2_runtime_manual_current_bundle_digest=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" current_bundle_digest)
+  opencode_v2_runtime_manual_current_wrapper_digest=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" current_wrapper_digest)
+  opencode_v2_runtime_manual_current_profile_digest=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" current_profile_digest)
+  opencode_v2_runtime_manual_current_had_profile=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" current_had_profile)
+  printf '%s\n' "$opencode_v2_runtime_manual_previous_tag" "$opencode_v2_runtime_manual_current_tag" |
+    grep -Eqv '^v?2\.[0-9]+\.[0-9]+([+]android[0-9]+)?$' && return 1
+  [ "$opencode_v2_runtime_manual_previous_contract" = termux-glibc-1 ] &&
+    [ "$opencode_v2_runtime_manual_current_contract" = termux-glibc-1 ] || return 1
+  printf '%s\n' "$opencode_v2_runtime_manual_previous_bundle_digest" \
+    "$opencode_v2_runtime_manual_previous_wrapper_digest" \
+    "$opencode_v2_runtime_manual_previous_profile_digest" \
+    "$opencode_v2_runtime_manual_current_bundle_digest" \
+    "$opencode_v2_runtime_manual_current_wrapper_digest" \
+    "$opencode_v2_runtime_manual_current_profile_digest" | grep -Eqv '^[a-f0-9]{64}$' && return 1
+  case "$opencode_v2_runtime_manual_previous_had_profile:$opencode_v2_runtime_manual_current_had_profile" in
+    0:0|0:1|1:0|1:1) ;;
+    *) return 1 ;;
+  esac
+}
+
+opencode_v2_runtime_manual_rollback_begin() {
+  opencode_v2_runtime_transaction_recovery_context || return 1
+  opencode_v2_runtime_manual_previous="$opencode_v2_runtime_recovery/previous"
+  opencode_v2_runtime_manual_dir="$opencode_v2_runtime_recovery/manual"
+  opencode_v2_runtime_manual_displaced="$opencode_v2_runtime_recovery/displaced"
+  opencode_v2_runtime_manual_bundle_stage="$opencode_v2_runtime_tx_prefix/libexec/.opencode-v2-restore"
+  opencode_v2_runtime_manual_wrapper_stage="$opencode_v2_runtime_tx_prefix/bin/.opencode-v2-restore"
+  [ -d "$opencode_v2_runtime_manual_previous" ] &&
+    [ ! -L "$opencode_v2_runtime_manual_previous" ] || return 1
+  [ ! -e "$opencode_v2_runtime_manual_dir" ] && [ ! -L "$opencode_v2_runtime_manual_dir" ] &&
+    [ ! -e "$opencode_v2_runtime_manual_displaced" ] && [ ! -L "$opencode_v2_runtime_manual_displaced" ] &&
+    [ ! -e "$opencode_v2_runtime_manual_bundle_stage" ] && [ ! -L "$opencode_v2_runtime_manual_bundle_stage" ] &&
+    [ ! -e "$opencode_v2_runtime_manual_wrapper_stage" ] && [ ! -L "$opencode_v2_runtime_manual_wrapper_stage" ] || {
+      opencode_v2_runtime_error 'Hay un destino de recuperación existente; no se sobrescribirá.'
+      return 1
+    }
+  opencode_v2_runtime_transaction_load_journal "$opencode_v2_runtime_manual_previous/transaction.txt" || return 1
+  [ "$opencode_v2_runtime_tx_phase" = committing ] &&
+    [ "$opencode_v2_runtime_tx_had_bundle" = 1 ] &&
+    [ "$opencode_v2_runtime_tx_had_wrapper" = 1 ] || return 1
+  opencode_v2_runtime_manual_previous_tag="$opencode_v2_runtime_tx_old_tag"
+  opencode_v2_runtime_manual_previous_contract="$opencode_v2_runtime_tx_old_contract"
+  opencode_v2_runtime_manual_previous_bundle_digest="$opencode_v2_runtime_tx_old_bundle_digest"
+  opencode_v2_runtime_manual_previous_wrapper_digest="$opencode_v2_runtime_tx_old_wrapper_digest"
+  opencode_v2_runtime_manual_previous_profile_digest="$opencode_v2_runtime_tx_profile_digest"
+  opencode_v2_runtime_manual_previous_had_profile="$opencode_v2_runtime_tx_had_profile"
+  opencode_v2_runtime_manual_current_tag="$opencode_v2_runtime_tx_candidate_tag"
+  opencode_v2_runtime_manual_current_contract="$opencode_v2_runtime_tx_candidate_contract"
+  opencode_v2_runtime_manual_current_bundle_digest="$opencode_v2_runtime_tx_candidate_bundle_digest"
+  opencode_v2_runtime_manual_current_wrapper_digest="$opencode_v2_runtime_tx_candidate_wrapper_digest"
+
+  opencode_v2_runtime_previous_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+    "$opencode_v2_runtime_manual_previous/bundle") || return 1
+  [ "$opencode_v2_runtime_previous_bundle_digest" = "$opencode_v2_runtime_manual_previous_bundle_digest" ] || return 1
+  opencode_v2_runtime_previous_wrapper_digest=$(sha256sum \
+    "$opencode_v2_runtime_manual_previous/bundle/.wrapper" | awk '{ print $1 }') || return 1
+  [ "$opencode_v2_runtime_previous_wrapper_digest" = "$opencode_v2_runtime_manual_previous_wrapper_digest" ] || return 1
+  opencode_v2_runtime_previous_profile_digest=$(opencode_v2_runtime_transaction_tree_digest \
+    "$opencode_v2_runtime_manual_previous/profile") || return 1
+  [ "$opencode_v2_runtime_previous_profile_digest" = "$opencode_v2_runtime_manual_previous_profile_digest" ] || return 1
+  opencode_v2_runtime_transaction_verify_bundle "$opencode_v2_runtime_tx_libexec" || return 1
+  opencode_v2_runtime_current_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+    "$opencode_v2_runtime_tx_libexec") || return 1
+  [ "$opencode_v2_runtime_current_bundle_digest" = "$opencode_v2_runtime_manual_current_bundle_digest" ] || return 1
+  opencode_v2_runtime_current_wrapper_digest=$(sha256sum "$opencode_v2_runtime_tx_wrapper" |
+    awk '{ print $1 }') || return 1
+  [ "$opencode_v2_runtime_current_wrapper_digest" = "$opencode_v2_runtime_manual_current_wrapper_digest" ] || return 1
+
+  opencode_v2_runtime_tx_snapshot="$opencode_v2_runtime_manual_dir"
+  opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_tx_snapshot/profile"
+  opencode_v2_runtime_transaction_profile_snapshot || return 1
+  opencode_v2_runtime_manual_current_had_profile="$opencode_v2_runtime_tx_had_profile"
+  opencode_v2_runtime_manual_current_profile_digest="$opencode_v2_runtime_tx_profile_digest"
+  opencode_v2_runtime_live_profile_digest=$(opencode_v2_runtime_transaction_active_profile_digest) || return 1
+  [ "$opencode_v2_runtime_live_profile_digest" = "$opencode_v2_runtime_manual_current_profile_digest" ] || return 1
+  opencode_v2_runtime_manual_write_journal manual-prepared || return 1
+  opencode_v2_runtime_manual_phase=manual-prepared
+  opencode_v2_runtime_manual_rollback_continue
+}
+
+opencode_v2_runtime_manual_rollback_continue() {
+  opencode_v2_runtime_manual_load_journal || {
+    opencode_v2_runtime_error 'El journal de rollback manual no es válido.'
+    return 1
+  }
+  opencode_v2_runtime_manual_dir="$opencode_v2_runtime_recovery/manual"
+  opencode_v2_runtime_manual_profile="$opencode_v2_runtime_manual_dir/profile"
+  opencode_v2_runtime_manual_displaced="$opencode_v2_runtime_recovery/displaced"
+  opencode_v2_runtime_manual_bundle_stage="$opencode_v2_runtime_tx_prefix/libexec/.opencode-v2-restore"
+  opencode_v2_runtime_manual_wrapper_stage="$opencode_v2_runtime_tx_prefix/bin/.opencode-v2-restore"
+  opencode_v2_runtime_manual_previous="$opencode_v2_runtime_recovery/previous"
+
+  if [ "$opencode_v2_runtime_manual_phase" = manual-prepared ]; then
+    [ -d "$opencode_v2_runtime_manual_profile" ] && [ ! -L "$opencode_v2_runtime_manual_profile" ] || return 1
+    opencode_v2_runtime_manual_snapshot_digest=$(opencode_v2_runtime_transaction_tree_digest \
+      "$opencode_v2_runtime_manual_profile") || return 1
+    [ "$opencode_v2_runtime_manual_snapshot_digest" = "$opencode_v2_runtime_manual_current_profile_digest" ] || return 1
+    opencode_v2_runtime_manual_live_profile_digest=$(opencode_v2_runtime_transaction_active_profile_digest) || return 1
+    [ "$opencode_v2_runtime_manual_live_profile_digest" = "$opencode_v2_runtime_manual_current_profile_digest" ] || return 1
+    opencode_v2_runtime_manual_live_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+      "$opencode_v2_runtime_tx_libexec") || return 1
+    [ "$opencode_v2_runtime_manual_live_bundle_digest" = "$opencode_v2_runtime_manual_current_bundle_digest" ] || return 1
+    opencode_v2_runtime_manual_live_wrapper_digest=$(sha256sum "$opencode_v2_runtime_tx_wrapper" |
+      awk '{ print $1 }') || return 1
+    [ "$opencode_v2_runtime_manual_live_wrapper_digest" = "$opencode_v2_runtime_manual_current_wrapper_digest" ] || return 1
+    opencode_v2_runtime_manual_write_journal manual-restoring || return 1
+    opencode_v2_runtime_manual_phase=manual-restoring
+  fi
+
+  if [ "$opencode_v2_runtime_manual_phase" = manual-restoring ]; then
+    if [ "$opencode_v2_runtime_manual_current_had_profile" = 1 ]; then
+      if [ -d "$opencode_v2_runtime_manual_displaced/profile" ]; then
+        opencode_v2_runtime_manual_displaced_digest=$(opencode_v2_runtime_transaction_tree_digest \
+          "$opencode_v2_runtime_manual_displaced/profile") || return 1
+        [ "$opencode_v2_runtime_manual_displaced_digest" = "$opencode_v2_runtime_manual_current_profile_digest" ] || return 1
+      else
+        [ ! -e "$opencode_v2_runtime_manual_displaced" ] &&
+          [ ! -L "$opencode_v2_runtime_manual_displaced" ] || return 1
+        opencode_v2_runtime_manual_live_profile_digest=$(opencode_v2_runtime_transaction_active_profile_digest) || return 1
+        [ "$opencode_v2_runtime_manual_live_profile_digest" = "$opencode_v2_runtime_manual_current_profile_digest" ] || return 1
+        mkdir -m 700 "$opencode_v2_runtime_manual_displaced" || return 1
+        mv "$opencode_v2_runtime_manual_profile" "$opencode_v2_runtime_manual_displaced/profile" || return 1
+      fi
+    fi
+
+    if [ -d "$opencode_v2_runtime_manual_previous/bundle" ]; then
+      opencode_v2_runtime_previous_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+        "$opencode_v2_runtime_manual_previous/bundle") || return 1
+      [ "$opencode_v2_runtime_previous_bundle_digest" = "$opencode_v2_runtime_manual_previous_bundle_digest" ] || return 1
+      opencode_v2_runtime_previous_wrapper_digest=$(sha256sum \
+        "$opencode_v2_runtime_manual_previous/bundle/.wrapper" | awk '{ print $1 }') || return 1
+      [ "$opencode_v2_runtime_previous_wrapper_digest" = "$opencode_v2_runtime_manual_previous_wrapper_digest" ] || return 1
+      opencode_v2_runtime_previous_profile_digest=$(opencode_v2_runtime_transaction_tree_digest \
+        "$opencode_v2_runtime_manual_previous/profile") || return 1
+      [ "$opencode_v2_runtime_previous_profile_digest" = "$opencode_v2_runtime_manual_previous_profile_digest" ] || return 1
+
+      opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_manual_previous/profile"
+      opencode_v2_runtime_tx_profile_digest="$opencode_v2_runtime_manual_previous_profile_digest"
+      opencode_v2_runtime_tx_had_profile="$opencode_v2_runtime_manual_previous_had_profile"
+      opencode_v2_runtime_transaction_restore_profile || return 1
+
+      if [ -e "$opencode_v2_runtime_manual_bundle_stage" ] || [ -L "$opencode_v2_runtime_manual_bundle_stage" ]; then
+        [ ! -L "$opencode_v2_runtime_manual_bundle_stage" ] || return 1
+        rm -rf "$opencode_v2_runtime_manual_bundle_stage" || return 1
+      fi
+      if [ -e "$opencode_v2_runtime_manual_wrapper_stage" ] || [ -L "$opencode_v2_runtime_manual_wrapper_stage" ]; then
+        [ ! -L "$opencode_v2_runtime_manual_wrapper_stage" ] || return 1
+        rm -f "$opencode_v2_runtime_manual_wrapper_stage" || return 1
+      fi
+      cp -a "$opencode_v2_runtime_manual_previous/bundle" "$opencode_v2_runtime_manual_bundle_stage" || return 1
+      cp -a "$opencode_v2_runtime_manual_previous/bundle/.wrapper" \
+        "$opencode_v2_runtime_manual_wrapper_stage" || return 1
+      opencode_v2_runtime_staged_wrapper_digest=$(sha256sum \
+        "$opencode_v2_runtime_manual_wrapper_stage" | awk '{ print $1 }') || return 1
+      [ "$opencode_v2_runtime_staged_wrapper_digest" = "$opencode_v2_runtime_manual_previous_wrapper_digest" ] || return 1
+      rm -f "$opencode_v2_runtime_manual_bundle_stage/.wrapper" || return 1
+      opencode_v2_runtime_staged_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+        "$opencode_v2_runtime_manual_bundle_stage") || return 1
+      [ "$opencode_v2_runtime_staged_bundle_digest" = "$opencode_v2_runtime_manual_previous_bundle_digest" ] || return 1
+
+      if [ -e "$opencode_v2_runtime_tx_libexec" ] || [ -L "$opencode_v2_runtime_tx_libexec" ]; then
+        [ ! -L "$opencode_v2_runtime_tx_libexec" ] || return 1
+        opencode_v2_runtime_live_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+          "$opencode_v2_runtime_tx_libexec") || return 1
+        case "$opencode_v2_runtime_live_bundle_digest" in
+          "$opencode_v2_runtime_manual_previous_bundle_digest")
+            rm -rf "$opencode_v2_runtime_manual_bundle_stage"
+            ;;
+          "$opencode_v2_runtime_manual_current_bundle_digest")
+            rm -rf "$opencode_v2_runtime_tx_libexec" || return 1
+            mv "$opencode_v2_runtime_manual_bundle_stage" "$opencode_v2_runtime_tx_libexec" || return 1
+            ;;
+          *)
+            opencode_v2_runtime_error 'El bundle activo cambió durante el rollback; se conserva para revisión.'
+            return 1
+            ;;
+        esac
+      else
+        mv "$opencode_v2_runtime_manual_bundle_stage" "$opencode_v2_runtime_tx_libexec" || return 1
+      fi
+
+      opencode_v2_runtime_live_wrapper_digest=$(sha256sum "$opencode_v2_runtime_tx_wrapper" 2>/dev/null |
+        awk '{ print $1 }' || true)
+      if [ "$opencode_v2_runtime_live_wrapper_digest" != "$opencode_v2_runtime_manual_previous_wrapper_digest" ]; then
+        if [ -e "$opencode_v2_runtime_tx_wrapper" ] || [ -L "$opencode_v2_runtime_tx_wrapper" ]; then
+          [ ! -L "$opencode_v2_runtime_tx_wrapper" ] || return 1
+          [ "$opencode_v2_runtime_live_wrapper_digest" = "$opencode_v2_runtime_manual_current_wrapper_digest" ] || return 1
+          rm -f "$opencode_v2_runtime_tx_wrapper" || return 1
+        fi
+        mv "$opencode_v2_runtime_manual_wrapper_stage" "$opencode_v2_runtime_tx_wrapper" || return 1
+        chmod 755 "$opencode_v2_runtime_tx_wrapper" || return 1
+      else
+        rm -f "$opencode_v2_runtime_manual_wrapper_stage"
+      fi
+    fi
+
+    opencode_v2_runtime_manual_write_journal manual-restored || return 1
+    opencode_v2_runtime_manual_phase=manual-restored
+  fi
+
+  if [ "$opencode_v2_runtime_manual_phase" = manual-restored ]; then
+    opencode_v2_runtime_restored_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+      "$opencode_v2_runtime_tx_libexec") || return 1
+    [ "$opencode_v2_runtime_restored_bundle_digest" = "$opencode_v2_runtime_manual_previous_bundle_digest" ] || return 1
+    opencode_v2_runtime_restored_wrapper_digest=$(sha256sum "$opencode_v2_runtime_tx_wrapper" |
+      awk '{ print $1 }') || return 1
+    [ "$opencode_v2_runtime_restored_wrapper_digest" = "$opencode_v2_runtime_manual_previous_wrapper_digest" ] || return 1
+    opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_manual_previous/profile"
+    opencode_v2_runtime_tx_profile_digest="$opencode_v2_runtime_manual_previous_profile_digest"
+    opencode_v2_runtime_tx_had_profile="$opencode_v2_runtime_manual_previous_had_profile"
+    opencode_v2_runtime_restored_profile_digest=$(opencode_v2_runtime_transaction_active_profile_digest) || return 1
+    [ "$opencode_v2_runtime_restored_profile_digest" = "$opencode_v2_runtime_manual_previous_profile_digest" ] || return 1
+    rm -rf "$opencode_v2_runtime_manual_previous" "$opencode_v2_runtime_manual_dir" || return 1
+    if [ -d "$opencode_v2_runtime_manual_displaced" ] &&
+       [ "$opencode_v2_runtime_manual_current_had_profile" = 0 ]; then
+      rm -rf "$opencode_v2_runtime_manual_displaced" || return 1
+    fi
+    rm -f "$opencode_v2_runtime_journal" || return 1
+    opencode_v2_runtime_release_run_lock
+    sync
+  fi
+}
+
+opencode_v2_runtime_rollback() {
+  opencode_v2_runtime_transaction_recovery_context || return 1
+  if [ -L "$opencode_v2_runtime_journal" ] ||
+     { [ -e "$opencode_v2_runtime_journal" ] && [ ! -f "$opencode_v2_runtime_journal" ]; }; then
+    opencode_v2_runtime_error 'El journal de recuperación no es un archivo regular; no se sobrescribirá.'
+    return 1
+  fi
+  if [ -f "$opencode_v2_runtime_journal" ] && [ ! -L "$opencode_v2_runtime_journal" ]; then
+    opencode_v2_runtime_operation=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_journal" operation)
+    opencode_v2_runtime_recovery_acquire_lock || return 1
+    if [ "$opencode_v2_runtime_operation" = manual-rollback ]; then
+      opencode_v2_runtime_manual_rollback_continue
+    else
+      opencode_v2_runtime_transaction_rollback
+    fi
+    return $?
+  fi
+  for opencode_v2_runtime_incomplete_path in \
+    "$opencode_v2_runtime_recovery/current" \
+    "$opencode_v2_runtime_recovery/previous.old" \
+    "$opencode_v2_runtime_recovery/manual"; do
+    if [ -e "$opencode_v2_runtime_incomplete_path" ] || [ -L "$opencode_v2_runtime_incomplete_path" ]; then
+      opencode_v2_runtime_error 'Hay un snapshot sin journal; no se puede restaurar automáticamente con certeza.'
+      return 1
+    fi
+  done
+  if [ -d "$opencode_v2_runtime_recovery/previous" ]; then
+    opencode_v2_runtime_recovery_acquire_lock || return 1
+    if opencode_v2_runtime_manual_rollback_begin; then
+      return 0
+    fi
+    if [ ! -e "$opencode_v2_runtime_journal" ]; then
+      if [ -d "$opencode_v2_runtime_recovery/manual" ] &&
+         [ ! -L "$opencode_v2_runtime_recovery/manual" ]; then
+        rm -rf "$opencode_v2_runtime_recovery/manual"
+      fi
+      opencode_v2_runtime_release_run_lock
+    fi
+    return 1
+  fi
+  if [ -d "$opencode_v2_runtime_lock" ]; then
+    opencode_v2_runtime_recovery_acquire_lock || return 1
+    opencode_v2_runtime_release_run_lock
+    return 0
+  fi
+  opencode_v2_runtime_error 'No hay una transacción pendiente ni un respaldo anterior para restaurar.'
+  return 1
+}
+
+opencode_v2_runtime_transaction_finish_rollback() {
+  if [ "$opencode_v2_runtime_tx_had_bundle" = 1 ]; then
+    opencode_v2_runtime_restored_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+      "$opencode_v2_runtime_tx_libexec") || return 1
+    [ "$opencode_v2_runtime_restored_bundle_digest" = "$opencode_v2_runtime_tx_old_bundle_digest" ] || return 1
+    opencode_v2_runtime_restored_wrapper_digest=$(sha256sum "$opencode_v2_runtime_tx_wrapper" |
+      awk '{ print $1 }') || return 1
+    [ "$opencode_v2_runtime_restored_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ] || return 1
+  else
+    [ ! -e "$opencode_v2_runtime_tx_libexec" ] && [ ! -L "$opencode_v2_runtime_tx_libexec" ] &&
+      [ ! -e "$opencode_v2_runtime_tx_wrapper" ] && [ ! -L "$opencode_v2_runtime_tx_wrapper" ] || return 1
+  fi
+  opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_recovery/current/profile"
+  if [ ! -d "$opencode_v2_runtime_tx_profile_snapshot" ] &&
+     [ -d "$opencode_v2_runtime_recovery/previous/profile" ]; then
+    opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_recovery/previous/profile"
+  fi
+  opencode_v2_runtime_tx_profile_digest=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" profile_digest)
+  opencode_v2_runtime_tx_had_profile=$(opencode_v2_runtime_transaction_value \
+    "$opencode_v2_runtime_journal" had_profile)
+  opencode_v2_runtime_restored_profile_digest=$(opencode_v2_runtime_transaction_active_profile_digest) || return 1
+  if [ "$opencode_v2_runtime_tx_had_profile" = 1 ]; then
+    opencode_v2_runtime_snapshot_profile_digest=$(opencode_v2_runtime_transaction_tree_digest \
+      "$opencode_v2_runtime_tx_profile_snapshot") || return 1
+  else
+    opencode_v2_runtime_snapshot_profile_digest=$(printf '' | sha256sum | awk '{ print $1 }')
+  fi
+  [ "$opencode_v2_runtime_restored_profile_digest" = "$opencode_v2_runtime_snapshot_profile_digest" ] || return 1
+
+  rm -rf "$opencode_v2_runtime_recovery/current" || return 1
+  if [ "$opencode_v2_runtime_tx_restore_from_previous" = true ]; then
+    rm -rf "$opencode_v2_runtime_recovery/previous" || return 1
+  fi
+  if [ -d "$opencode_v2_runtime_recovery/previous.old" ]; then
+    [ ! -e "$opencode_v2_runtime_recovery/previous" ] || return 1
+    mv "$opencode_v2_runtime_recovery/previous.old" "$opencode_v2_runtime_recovery/previous" || return 1
+  fi
+  rm -f "$opencode_v2_runtime_journal" || return 1
+  opencode_v2_runtime_release_run_lock
+  sync
+}
+
+opencode_v2_runtime_transaction_rollback() {
+  opencode_v2_runtime_transaction_recovery_context || return 1
+  if [ ! -e "$opencode_v2_runtime_journal" ]; then
+    if [ -d "$opencode_v2_runtime_lock" ] && opencode_v2_runtime_transaction_current_owner; then
+      opencode_v2_runtime_transaction_prepare_cleanup
+    fi
+    return 0
+  fi
+  opencode_v2_runtime_transaction_load_journal || {
+    opencode_v2_runtime_error 'Journal inválido; se conserva para recuperación manual.'
+    return 1
+  }
+  opencode_v2_runtime_transaction_current_owner || {
+    opencode_v2_runtime_error 'La transacción no conserva el lock de este proceso.'
+    return 1
+  }
+  if [ "$opencode_v2_runtime_tx_phase" = rolled-back ]; then
+    opencode_v2_runtime_transaction_finish_rollback
+    return $?
+  fi
+
+  if [ ! -d "$opencode_v2_runtime_tx_profile_snapshot" ] &&
+     { [ "$opencode_v2_runtime_tx_phase" = committing ] ||
+       [ "$opencode_v2_runtime_tx_phase" = promoted ]; } &&
+     [ -d "$opencode_v2_runtime_recovery/previous/profile" ]; then
+    opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_recovery/previous/profile"
+  fi
+  opencode_v2_runtime_tx_restore_bundle="$opencode_v2_runtime_tx_bundle_backup"
+  opencode_v2_runtime_tx_bundle_already_active=false
+  opencode_v2_runtime_tx_restore_wrapper_from_backup=false
+  if [ "$opencode_v2_runtime_tx_had_bundle" = 1 ]; then
+    if [ ! -d "$opencode_v2_runtime_tx_restore_bundle" ] &&
+       { [ "$opencode_v2_runtime_tx_phase" = committing ] ||
+         [ "$opencode_v2_runtime_tx_phase" = promoted ]; } &&
+       [ -d "$opencode_v2_runtime_recovery/previous/bundle" ]; then
+      opencode_v2_runtime_tx_restore_bundle="$opencode_v2_runtime_recovery/previous/bundle"
+      opencode_v2_runtime_tx_restore_from_previous=true
+    fi
+    if [ -e "$opencode_v2_runtime_tx_restore_bundle" ] ||
+       [ -L "$opencode_v2_runtime_tx_restore_bundle" ]; then
+      [ -d "$opencode_v2_runtime_tx_restore_bundle" ] &&
+        [ ! -L "$opencode_v2_runtime_tx_restore_bundle" ] || return 1
+      opencode_v2_runtime_current_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+        "$opencode_v2_runtime_tx_restore_bundle") || return 1
+      if [ "$opencode_v2_runtime_current_bundle_digest" = "$opencode_v2_runtime_tx_old_bundle_digest" ]; then
+        opencode_v2_runtime_backup_wrapper="$opencode_v2_runtime_tx_restore_bundle/.wrapper"
+        if [ -f "$opencode_v2_runtime_backup_wrapper" ] &&
+           [ -x "$opencode_v2_runtime_backup_wrapper" ] &&
+           [ ! -L "$opencode_v2_runtime_backup_wrapper" ]; then
+          opencode_v2_runtime_backup_wrapper_digest=$(sha256sum \
+            "$opencode_v2_runtime_backup_wrapper" | awk '{ print $1 }') || return 1
+          if [ "$opencode_v2_runtime_backup_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ]; then
+            opencode_v2_runtime_tx_restore_wrapper_from_backup=true
+          fi
+        fi
+        if [ "$opencode_v2_runtime_tx_restore_wrapper_from_backup" != true ]; then
+          [ -f "$opencode_v2_runtime_tx_wrapper" ] &&
+            [ -x "$opencode_v2_runtime_tx_wrapper" ] &&
+            [ ! -L "$opencode_v2_runtime_tx_wrapper" ] || return 1
+          opencode_v2_runtime_current_wrapper_digest=$(sha256sum \
+            "$opencode_v2_runtime_tx_wrapper" | awk '{ print $1 }') || return 1
+          [ "$opencode_v2_runtime_current_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ] || return 1
+        fi
+      elif [ -d "$opencode_v2_runtime_tx_libexec" ] &&
+           [ ! -L "$opencode_v2_runtime_tx_libexec" ]; then
+        opencode_v2_runtime_current_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+          "$opencode_v2_runtime_tx_libexec") || return 1
+        [ "$opencode_v2_runtime_current_bundle_digest" = "$opencode_v2_runtime_tx_old_bundle_digest" ] || return 1
+        [ -f "$opencode_v2_runtime_tx_wrapper" ] &&
+          [ -x "$opencode_v2_runtime_tx_wrapper" ] &&
+          [ ! -L "$opencode_v2_runtime_tx_wrapper" ] || return 1
+        opencode_v2_runtime_current_wrapper_digest=$(sha256sum \
+          "$opencode_v2_runtime_tx_wrapper" | awk '{ print $1 }') || return 1
+        [ "$opencode_v2_runtime_current_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ] || return 1
+        opencode_v2_runtime_tx_bundle_already_active=true
+      else
+        return 1
+      fi
+    elif [ -d "$opencode_v2_runtime_tx_libexec" ]; then
+      opencode_v2_runtime_current_bundle_digest=$(opencode_v2_runtime_transaction_bundle_digest \
+        "$opencode_v2_runtime_tx_libexec") || return 1
+      [ "$opencode_v2_runtime_current_bundle_digest" = "$opencode_v2_runtime_tx_old_bundle_digest" ] || return 1
+      opencode_v2_runtime_tx_current_wrapper_digest=$(sha256sum \
+        "$opencode_v2_runtime_tx_wrapper" | awk '{ print $1 }') || return 1
+      [ "$opencode_v2_runtime_tx_current_wrapper_digest" = "$opencode_v2_runtime_tx_old_wrapper_digest" ] || return 1
+      opencode_v2_runtime_tx_bundle_already_active=true
+    else
+      return 1
+    fi
+  fi
+  opencode_v2_runtime_transaction_restore_profile || return 1
+
+  if [ "$opencode_v2_runtime_tx_bundle_already_active" != true ]; then
+    if [ -e "$opencode_v2_runtime_tx_libexec" ] || [ -L "$opencode_v2_runtime_tx_libexec" ]; then
+      [ ! -L "$opencode_v2_runtime_tx_libexec" ] || return 1
+      rm -rf "$opencode_v2_runtime_tx_libexec" || return 1
+    fi
+  fi
+  if [ "$opencode_v2_runtime_tx_had_bundle" = 1 ]; then
+    if [ "$opencode_v2_runtime_tx_bundle_already_active" != true ]; then
+      mkdir -p "$(dirname "$opencode_v2_runtime_tx_libexec")" || return 1
+      mv "$opencode_v2_runtime_tx_restore_bundle" "$opencode_v2_runtime_tx_libexec" || return 1
+      if [ "$opencode_v2_runtime_tx_restore_wrapper_from_backup" = true ]; then
+        mv "$opencode_v2_runtime_tx_libexec/.wrapper" "$opencode_v2_runtime_tx_wrapper" || return 1
+        chmod 755 "$opencode_v2_runtime_tx_wrapper" || return 1
+      else
+        rm -f "$opencode_v2_runtime_tx_libexec/.wrapper" || return 1
+      fi
+    fi
+  else
+    if [ -e "$opencode_v2_runtime_tx_wrapper" ] || [ -L "$opencode_v2_runtime_tx_wrapper" ]; then
+      [ ! -L "$opencode_v2_runtime_tx_wrapper" ] || return 1
+      rm -f "$opencode_v2_runtime_tx_wrapper" || return 1
+    fi
+  fi
+  opencode_v2_runtime_tx_phase=rolled-back
+  opencode_v2_runtime_transaction_write_journal rolled-back || return 1
+  opencode_v2_runtime_transaction_finish_rollback
+}
+
+opencode_v2_runtime_transaction_commit() {
+  opencode_v2_runtime_transaction_load_journal || return 1
+  [ "$opencode_v2_runtime_tx_phase" = validated ] || return 1
+  opencode_v2_runtime_transaction_current_owner || return 1
+  if [ -d "$opencode_v2_runtime_recovery/previous" ]; then
+    opencode_v2_runtime_transaction_validate_previous || {
+      opencode_v2_runtime_error 'El respaldo anterior cambió antes de rotarse; se conserva la transacción pendiente.'
+      return 1
+    }
+    opencode_v2_runtime_transaction_load_journal || return 1
+    [ "$opencode_v2_runtime_tx_phase" = validated ] || return 1
+  fi
+  opencode_v2_runtime_tx_phase=committing
+  opencode_v2_runtime_transaction_write_journal committing || return 1
+  cp "$opencode_v2_runtime_journal" "$opencode_v2_runtime_tx_snapshot/transaction.txt" || return 1
+  chmod 600 "$opencode_v2_runtime_tx_snapshot/transaction.txt" || return 1
+  sync
+  if [ -d "$opencode_v2_runtime_recovery/previous" ]; then
+    [ ! -e "$opencode_v2_runtime_recovery/previous.old" ] &&
+      [ ! -L "$opencode_v2_runtime_recovery/previous.old" ] || return 1
+    mv "$opencode_v2_runtime_recovery/previous" "$opencode_v2_runtime_recovery/previous.old" || return 1
+  fi
+  mv "$opencode_v2_runtime_tx_snapshot" "$opencode_v2_runtime_recovery/previous" || return 1
+  opencode_v2_runtime_tx_snapshot="$opencode_v2_runtime_recovery/previous"
+  opencode_v2_runtime_tx_profile_snapshot="$opencode_v2_runtime_tx_snapshot/profile"
+  opencode_v2_runtime_tx_bundle_backup="$opencode_v2_runtime_tx_snapshot/bundle"
+  opencode_v2_runtime_tx_phase=promoted
+  opencode_v2_runtime_transaction_write_journal promoted || return 1
+  rm -rf "$opencode_v2_runtime_recovery/previous.old"
+  rm -f "$opencode_v2_runtime_journal" || return 1
+  opencode_v2_runtime_release_run_lock
+  sync
+}
+
+opencode_v2_runtime_transaction() {
+  case "$1" in
+    prepare) opencode_v2_runtime_transaction_prepare ;;
+    validate) opencode_v2_runtime_transaction_validate ;;
+    commit) opencode_v2_runtime_transaction_commit ;;
+    rollback) opencode_v2_runtime_transaction_rollback ;;
+    *) opencode_v2_runtime_error 'Fase transaccional inválida.'; return 2 ;;
+  esac
+}
+
+opencode_v2_runtime_status() {
+  opencode_v2_runtime_init_paths || return 1
+  opencode_v2_runtime_validate_path_ancestors "$opencode_v2_runtime_recovery" || return 1
+  if [ -L "$opencode_v2_runtime_journal" ] ||
+     { [ -e "$opencode_v2_runtime_journal" ] && [ ! -f "$opencode_v2_runtime_journal" ]; }; then
+    opencode_v2_runtime_error 'El journal de recuperación no es un archivo regular.'
+    return 1
+  fi
+  if [ -L "$opencode_v2_runtime_recovery/previous" ]; then
+    opencode_v2_runtime_error 'El respaldo anterior es un symlink; no se leerá.'
+    return 1
+  fi
+  if [ -f "$opencode_v2_runtime_journal" ] && [ ! -L "$opencode_v2_runtime_journal" ]; then
+    opencode_v2_runtime_status_operation=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_journal" operation)
+    if [ "$opencode_v2_runtime_status_operation" = manual-rollback ]; then
+      opencode_v2_runtime_manual_load_journal || {
+        opencode_v2_runtime_error 'El journal de rollback manual es inválido; v2 permanece bloqueado.'
+        return 1
+      }
+      printf 'pending=%s\nprevious=%s\nprevious_contract=%s\ncurrent=%s\ncurrent_contract=%s\n' \
+        "$opencode_v2_runtime_manual_phase" "$opencode_v2_runtime_manual_previous_tag" \
+        "$opencode_v2_runtime_manual_previous_contract" "$opencode_v2_runtime_manual_current_tag" \
+        "$opencode_v2_runtime_manual_current_contract"
+      return 0
+    fi
+    if ! opencode_v2_runtime_transaction_load_journal; then
+      opencode_v2_runtime_error 'La transacción tiene un journal inválido; v2 permanece bloqueado.'
+      return 1
+    fi
+    printf 'pending=%s\nprevious=%s\nprevious_contract=%s\ncandidate=%s\ncandidate_contract=%s\n' \
+      "$opencode_v2_runtime_tx_phase" "$opencode_v2_runtime_tx_old_tag" \
+      "${opencode_v2_runtime_tx_old_contract:-none}" "$opencode_v2_runtime_tx_candidate_tag" \
+      "$opencode_v2_runtime_tx_candidate_contract"
+  elif [ -e "$opencode_v2_runtime_recovery/current" ] ||
+       [ -L "$opencode_v2_runtime_recovery/current" ] ||
+       [ -e "$opencode_v2_runtime_recovery/previous.old" ] ||
+       [ -L "$opencode_v2_runtime_recovery/previous.old" ] ||
+       [ -e "$opencode_v2_runtime_recovery/manual" ] ||
+       [ -L "$opencode_v2_runtime_recovery/manual" ]; then
+    opencode_v2_runtime_error 'Hay un snapshot sin journal; v2 permanece bloqueado para revisión.'
+    printf 'state=incomplete\n'
+    return 1
+  elif [ -d "$opencode_v2_runtime_lock" ]; then
+    printf 'lock=present\n'
+  elif [ -d "$opencode_v2_runtime_recovery/previous" ]; then
+    opencode_v2_runtime_previous_tag=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_recovery/previous/bundle/manifest.txt" tag 2>/dev/null || true)
+    opencode_v2_runtime_previous_contract=$(opencode_v2_runtime_transaction_value \
+      "$opencode_v2_runtime_recovery/previous/bundle/manifest.txt" release_contract 2>/dev/null || true)
+    printf 'lock=absent\nprevious=%s\nprevious_contract=%s\n' \
+      "${opencode_v2_runtime_previous_tag:-unknown}" "${opencode_v2_runtime_previous_contract:-unknown}"
+    if [ -d "$opencode_v2_runtime_recovery/displaced/profile" ]; then
+      printf 'displaced_profile=present\n'
+    fi
+  elif [ -d "$opencode_v2_runtime_recovery/displaced/profile" ]; then
+    printf 'state=rolled-back\ndisplaced_profile=present\n'
+  else
+    printf 'state=clean\n'
+  fi
 }
 
 opencode_v2_runtime_run() {
@@ -461,7 +1953,20 @@ opencode_v2_runtime() {
       shift
       opencode_v2_runtime_run "$@"
       ;;
-    status|rollback|evaluate|transaction)
+    status)
+      [ "$#" -eq 1 ] || { opencode_v2_runtime_error 'status no recibe argumentos.'; return 2; }
+      opencode_v2_runtime_status
+      ;;
+    rollback)
+      [ "$#" -eq 1 ] || { opencode_v2_runtime_error 'rollback no recibe argumentos.'; return 2; }
+      opencode_v2_runtime_rollback
+      ;;
+    transaction)
+      [ "$#" -eq 2 ] || { opencode_v2_runtime_error 'transaction requiere una fase.'; return 2; }
+      shift
+      opencode_v2_runtime_transaction "$1"
+      ;;
+    evaluate)
       opencode_v2_runtime_error "La operación '$1' todavía no está disponible."
       return 2
       ;;
