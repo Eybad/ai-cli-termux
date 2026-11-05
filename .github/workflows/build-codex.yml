@@ -47,6 +47,11 @@ on:
         description: 'Versión específica de OpenAI Codex (ej: 0.146.0). Vacío = última.'
         required: false
         default: ''
+      publish:
+        description: 'Publicar release después del build. false conserva solo los artifacts de validación.'
+        type: boolean
+        required: false
+        default: false
       patch_rev:
         description: 'Rev del parche Android (locks + ctype V8; sufijo +androidN del tag de dist). Incrementar para re-emitir una versión corregida.'
         required: false
@@ -584,6 +589,14 @@ jobs:
           path: codex-arm64.tar.gz
           if-no-files-found: error
 
+      - name: Subir probe Android para validación nativa
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: validation-arm64
+          path: ${{ runner.temp }}/codex-clear-cache-probe
+          if-no-files-found: error
+          retention-days: 7
+
   build-amd64:
     needs: check
     if: needs.check.outputs.should_build == 'true'
@@ -665,7 +678,7 @@ jobs:
 
   release:
     needs: [check, build-arm64, build-amd64]
-    if: needs.check.outputs.should_build == 'true'
+    if: needs.check.outputs.should_build == 'true' && (github.event_name != 'workflow_dispatch' || inputs.publish)
     runs-on: ubuntu-latest
     permissions:
       contents: write
