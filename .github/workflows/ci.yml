@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           # Estricto (cero findings) en el código ejecutable:
-          shellcheck install.sh verify.sh aicli
+          shellcheck -x install.sh verify.sh aicli
           # Confs: archivos sourceados por install.sh — SC2034 (variables
           # consumidas por el instalador) es falso positivo; -S error solo
           # falla ante errores reales.

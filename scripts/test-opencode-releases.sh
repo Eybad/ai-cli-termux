@@ -170,7 +170,8 @@ exit 1
 EOF
 chmod 755 "$mock_bin_dir/curl"
 
-list_out=$(PATH="$mock_bin_dir:$PATH" bash "$repo_dir/aicli" list --json 2>/dev/null) || fail "aicli list --json must not exit with error on network failure"
+mkdir -p "$test_root/tmp"
+list_out=$(PATH="$mock_bin_dir:$PATH" TMPDIR="$test_root/tmp" bash "$repo_dir/aicli" list --json 2>/dev/null) || fail "aicli list --json must not exit with error on network failure"
 printf '%s' "$list_out" | jq -e '.tools[] | select(.name == "opencode") | .latest_version == null' >/dev/null || fail "latest_version should be null when network fails"
 
 printf 'PASS: aicli list --json degrades gracefully on network failure\n'

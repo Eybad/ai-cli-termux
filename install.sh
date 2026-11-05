@@ -33,7 +33,7 @@ LOADER=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY_DIR="$SCRIPT_DIR/registry"
 HASH_FILE="$SCRIPT_DIR/sha256.txt"
-# shellcheck source=registry/lib/releases.sh
+# shellcheck source=registry/lib/releases.sh disable=SC1091
 source "$SCRIPT_DIR/registry/lib/releases.sh"
 
 # ── Colores ────────────────────────────────────────────────────────────────────
