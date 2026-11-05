@@ -1,0 +1,445 @@
+#!/bin/sh
+# shellcheck shell=sh disable=SC2329
+set -eu
+
+TMPDIR="${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}"
+export TMPDIR
+if [ ! -d "$TMPDIR" ] || [ ! -w "$TMPDIR" ]; then
+  printf 'ERROR: TMPDIR no es un directorio escribible: %s\n' "$TMPDIR" >&2
+  exit 1
+fi
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+
+loader=""
+rpath=""
+binary=""
+
+if [ $# -ge 4 ] && [ "$2" = "--library-path" ]; then
+  loader="$1"
+  rpath="$3"
+  binary="$4"
+  shift 4
+elif [ $# -ge 1 ]; then
+  binary="$1"
+  shift 1
+else
+  printf 'ERROR: Argumentos insuficientes para opencode-runner.sh\n' >&2
+  exit 1
+fi
+
+case "$binary" in
+  /*) ;;
+  *)
+    printf 'ERROR: La ruta del binario debe ser absoluta: %s\n' "$binary" >&2
+    exit 1
+    ;;
+esac
+
+if [ ! -f "$binary" ] || [ ! -x "$binary" ]; then
+  printf 'ERROR: El binario no existe o no es ejecutable: %s\n' "$binary" >&2
+  exit 1
+fi
+
+if [ -n "$loader" ]; then
+  case "$loader" in
+    /*) ;;
+    *)
+      printf 'ERROR: La ruta del loader debe ser absoluta: %s\n' "$loader" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -f "$loader" ] || [ ! -x "$loader" ]; then
+    printf 'ERROR: El loader no existe o no es ejecutable: %s\n' "$loader" >&2
+    exit 1
+  fi
+fi
+
+in_options=1
+skip_next=0
+first_positional=""
+second_positional=""
+is_exec_direct=0
+
+for arg in "$@"; do
+  if [ "$in_options" -eq 1 ]; then
+    if [ "$skip_next" -eq 1 ]; then
+      skip_next=0
+      continue
+    fi
+    if [ "$arg" = "--" ]; then
+      in_options=0
+      continue
+    fi
+    case "$arg" in
+      --server=*|--completions=*)
+        is_exec_direct=1
+        continue
+        ;;
+      --server|--completions)
+        is_exec_direct=1
+        skip_next=1
+        continue
+        ;;
+      -s|--session|--prompt|--log-level|-m|--model|--agent|--format|-f|--file|--title|-d|--data|-H|--header|--param|--hostname|--port|--cors)
+        skip_next=1
+        continue
+        ;;
+      --session=*|--prompt=*|--log-level=*|--model=*|--agent=*|--format=*|--file=*|--title=*|--data=*|--header=*|--param=*|--hostname=*|--port=*|--cors=*)
+        continue
+        ;;
+      -h|--help|-v|--version)
+        is_exec_direct=1
+        continue
+        ;;
+      --standalone)
+        continue
+        ;;
+      -*)
+        continue
+        ;;
+      *)
+        if [ -z "$first_positional" ]; then
+          first_positional="$arg"
+        elif [ -z "$second_positional" ]; then
+          second_positional="$arg"
+        fi
+        ;;
+    esac
+  fi
+done
+
+if [ "$first_positional" = "help" ] || [ "$first_positional" = "serve" ]; then
+  is_exec_direct=1
+elif [ "$first_positional" = "debug" ] && [ "$second_positional" = "paths" ]; then
+  is_exec_direct=1
+fi
+
+case "$first_positional" in
+  upgrade|update)
+    printf 'ERROR: El actualizador interno está deshabilitado en Termux. Usá: aicli update opencode\n' >&2
+    exit 1
+    ;;
+  uninstall)
+    printf 'ERROR: La desinstalación en Termux se administra con aicli. Usá: aicli remove opencode\n' >&2
+    exit 1
+    ;;
+  service)
+    printf "ERROR: El daemon en segundo plano ('opencode service') no es compatible con el loader glibc de Termux. Ejecutá 'opencode' directamente o usá 'opencode serve' junto con 'opencode --server <url>'.\n" >&2
+    exit 1
+    ;;
+esac
+
+if [ -n "$loader" ]; then
+  exec_binary() {
+    exec "$loader" --library-path "$rpath" "$binary" "$@"
+  }
+else
+  exec_binary() {
+    exec "$binary" "$@"
+  }
+fi
+
+if [ "$is_exec_direct" -eq 1 ]; then
+  exec_binary "$@"
+fi
+
+get_proc_stat() {
+  [ -r "/proc/$1/stat" ] || return 1
+  awk '{
+    n = split($0, a, ") ")
+    if (n < 2) exit 1
+    split(a[2], b, " ")
+    print b[1], b[2], b[20]
+  }' "/proc/$1/stat" 2>/dev/null
+}
+
+get_proc_starttime() {
+  [ -r "/proc/$1/stat" ] || return 1
+  awk '{
+    n = split($0, a, ") ")
+    if (n < 2) exit 1
+    split(a[2], b, " ")
+    print b[20]
+  }' "/proc/$1/stat" 2>/dev/null
+}
+
+proc_alive_matching() {
+  p="$1"
+  exp_start="$2"
+  [ -n "$p" ] && [ -n "$exp_start" ] || return 1
+  act_start=$(get_proc_starttime "$p" || echo "")
+  [ "$act_start" = "$exp_start" ]
+}
+
+reap_stale_runners() {
+  [ -r "/proc/$$/stat" ] || return 0
+
+  for d in "$TMPDIR"/opencode-runner.*; do
+    [ -d "$d" ] || continue
+    owner_file="$d/owner.env"
+    [ -f "$owner_file" ] && [ ! -L "$owner_file" ] || continue
+
+    o_runner_pid=""
+    o_runner_start=""
+    o_server_pid=""
+    o_server_start=""
+
+    while IFS='=' read -r key val || [ -n "$key" ]; do
+      case "$key" in
+        runner_pid) o_runner_pid="$val" ;;
+        runner_start) o_runner_start="$val" ;;
+        server_pid) o_server_pid="$val" ;;
+        server_start) o_server_start="$val" ;;
+      esac
+    done < "$owner_file"
+
+    case "$o_runner_pid" in ''|*[!0-9]*) continue ;; esac
+    case "$o_runner_start" in ''|*[!0-9]*) continue ;; esac
+    case "$o_server_pid" in ''|*[!0-9]*) continue ;; esac
+    case "$o_server_start" in ''|*[!0-9]*) continue ;; esac
+
+    [ "$o_runner_pid" -ne "$$" ] || continue
+
+    runner_dead=0
+    if ! kill -0 "$o_runner_pid" 2>/dev/null && [ ! -d "/proc/$o_runner_pid" ]; then
+      runner_dead=1
+    elif [ -r "/proc/$o_runner_pid/stat" ]; then
+      cur_runner_start=$(get_proc_starttime "$o_runner_pid" || echo "")
+      if [ -n "$cur_runner_start" ] && [ "$cur_runner_start" != "$o_runner_start" ]; then
+        runner_dead=1
+      fi
+    fi
+    [ "$runner_dead" -eq 1 ] || continue
+
+    if ! kill -0 "$o_server_pid" 2>/dev/null && [ ! -d "/proc/$o_server_pid" ]; then
+      rm -rf "$d"
+      continue
+    fi
+
+    s_stat=$(get_proc_stat "$o_server_pid" || echo "")
+    if [ -z "$s_stat" ]; then
+      if ! kill -0 "$o_server_pid" 2>/dev/null && [ ! -d "/proc/$o_server_pid" ]; then
+        rm -rf "$d"
+      fi
+      continue
+    fi
+
+    s_state=$(printf '%s\n' "$s_stat" | awk '{print $1}')
+    s_ppid=$(printf '%s\n' "$s_stat" | awk '{print $2}')
+    s_start=$(printf '%s\n' "$s_stat" | awk '{print $3}')
+
+    [ "$s_ppid" != "$o_runner_pid" ] || continue
+    [ "$s_start" = "$o_server_start" ] || continue
+    [ "$s_state" != "Z" ] && [ "$s_state" != "X" ] || continue
+
+    [ -r "/proc/$o_server_pid/cmdline" ] || continue
+    cmd_text=$(tr '\0' ' ' < "/proc/$o_server_pid/cmdline" 2>/dev/null || echo "")
+    case "$cmd_text" in
+      *"$binary"*"serve"*"--hostname"*"127.0.0.1"*"--port"*"0"*) ;;
+      *) continue ;;
+    esac
+
+    kill -TERM "$o_server_pid" 2>/dev/null || true
+
+    i=0
+    server_stopped=0
+    while [ "$i" -lt 10 ]; do
+      if ! kill -0 "$o_server_pid" 2>/dev/null && [ ! -d "/proc/$o_server_pid" ]; then
+        server_stopped=1
+        break
+      fi
+      sleep 0.1 2>/dev/null || sleep 1
+      i=$((i + 1))
+    done
+
+    if [ "$server_stopped" -eq 1 ]; then
+      rm -rf "$d"
+    else
+      printf 'WARN: No se pudo terminar el servidor huérfano (PID %s) tras SIGTERM en %s\n' "$o_server_pid" "$d" >&2
+    fi
+  done
+}
+
+reap_stale_runners
+
+num_args=$#
+seen_dash=0
+while [ "$num_args" -gt 0 ]; do
+  arg="$1"
+  shift
+  num_args=$((num_args - 1))
+  if [ "$seen_dash" -eq 0 ]; then
+    if [ "$arg" = "--" ]; then
+      seen_dash=1
+      set -- "$@" "$arg"
+    elif [ "$arg" = "--standalone" ]; then
+      :
+    else
+      set -- "$@" "$arg"
+    fi
+  else
+    set -- "$@" "$arg"
+  fi
+done
+
+runner_tmp=""
+server_pid=""
+server_start=""
+client_pid=""
+client_start=""
+exit_code=0
+
+cleanup() {
+  trap '' EXIT HUP INT TERM
+  if [ -n "$server_pid" ] && [ -n "$server_start" ]; then
+    if proc_alive_matching "$server_pid" "$server_start"; then
+      kill -TERM "$server_pid" 2>/dev/null || true
+      i=0
+      while [ "$i" -lt 10 ]; do
+        if ! kill -0 "$server_pid" 2>/dev/null && [ ! -d "/proc/$server_pid" ]; then
+          break
+        fi
+        sleep 0.1 2>/dev/null || sleep 1
+        i=$((i + 1))
+      done
+      if kill -0 "$server_pid" 2>/dev/null; then
+        kill -KILL "$server_pid" 2>/dev/null || true
+      fi
+      wait "$server_pid" 2>/dev/null || true
+    fi
+  fi
+
+  if [ -n "$client_pid" ] && [ -n "$client_start" ]; then
+    if proc_alive_matching "$client_pid" "$client_start"; then
+      kill -TERM "$client_pid" 2>/dev/null || true
+      if kill -0 "$client_pid" 2>/dev/null; then
+        kill -KILL "$client_pid" 2>/dev/null || true
+      fi
+      wait "$client_pid" 2>/dev/null || true
+    fi
+  fi
+
+  if [ -n "$runner_tmp" ] && [ -d "$runner_tmp" ]; then
+    rm -rf "$runner_tmp"
+  fi
+
+  exit "$exit_code"
+}
+
+on_signal() {
+  case "$1" in
+    HUP) exit_code=129 ;;
+    INT) exit_code=130 ;;
+    TERM) exit_code=143 ;;
+    *) exit_code=1 ;;
+  esac
+  cleanup
+}
+
+old_umask=$(umask)
+umask 077
+runner_tmp=$(mktemp -d "$TMPDIR/opencode-runner.XXXXXX")
+umask "$old_umask"
+
+trap 'cleanup' EXIT
+trap 'on_signal HUP' HUP
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+
+if [ -n "$loader" ]; then
+  env -u OPENCODE_PASSWORD -u OPENCODE_SERVER_PASSWORD \
+    "$loader" --library-path "$rpath" "$binary" serve --hostname 127.0.0.1 --port 0 >"$runner_tmp/server.log" 2>&1 </dev/null &
+else
+  env -u OPENCODE_PASSWORD -u OPENCODE_SERVER_PASSWORD \
+    "$binary" serve --hostname 127.0.0.1 --port 0 >"$runner_tmp/server.log" 2>&1 </dev/null &
+fi
+server_pid=$!
+server_start=$(get_proc_starttime "$server_pid" || echo "")
+
+runner_pid=$$
+runner_start=$(get_proc_starttime "$$" || echo "")
+
+cat > "$runner_tmp/owner.env.tmp" <<EOF
+runner_pid=$runner_pid
+runner_start=$runner_start
+server_pid=$server_pid
+server_start=$server_start
+EOF
+mv "$runner_tmp/owner.env.tmp" "$runner_tmp/owner.env"
+
+port=""
+pw=""
+poll_count=0
+while [ "$poll_count" -lt 150 ]; do
+  if ! kill -0 "$server_pid" 2>/dev/null && [ ! -d "/proc/$server_pid" ]; then
+    printf 'ERROR: El servidor OpenCode terminó prematuramente:\n' >&2
+    if [ -f "$runner_tmp/server.log" ]; then
+      grep -v '^server password ' "$runner_tmp/server.log" | tail -n 20 >&2 || true
+    fi
+    exit_code=1
+    exit 1
+  fi
+
+  if [ -f "$runner_tmp/server.log" ]; then
+    port=$(sed -n 's#^server listening on http://127\.0\.0\.1:\([0-9]*\)#\1#p' "$runner_tmp/server.log" | tail -n 1)
+    pw=$(sed -n 's#^server password \(.*\)#\1#p' "$runner_tmp/server.log" | tail -n 1)
+    if [ -n "$port" ] && [ -n "$pw" ]; then
+      break
+    fi
+  fi
+
+  sleep 0.1 2>/dev/null || sleep 1
+  poll_count=$((poll_count + 1))
+done
+
+if [ -z "$port" ] || [ -z "$pw" ]; then
+  printf 'ERROR: Timeout esperando inicio del servidor OpenCode:\n' >&2
+  if [ -f "$runner_tmp/server.log" ]; then
+    grep -v '^server password ' "$runner_tmp/server.log" | tail -n 20 >&2 || true
+  fi
+  exit_code=1
+  exit 1
+fi
+
+expected_version=""
+manifest_file="${binary%/*}/manifest.txt"
+if [ -f "$manifest_file" ]; then
+  expected_version=$(sed -n 's/^version=v*\([0-9.]*\).*/\1/p' "$manifest_file" | head -n 1)
+fi
+
+info_json=$(printf 'user = "opencode:%s"\n' "$pw" | curl -sS -f --config - "http://127.0.0.1:$port/api/info") || {
+  printf 'ERROR: Falló la validación HTTP de /api/info en el servidor OpenCode.\n' >&2
+  exit_code=1
+  exit 1
+}
+
+printf '%s' "$info_json" | jq -e --arg v "$expected_version" --argjson p "$server_pid" '($v == "" or .version == $v) and .pid == $p' >/dev/null || {
+  printf 'ERROR: /api/info no coincide con versión o PID del servidor.\n' >&2
+  exit_code=1
+  exit 1
+}
+
+rm -f "$runner_tmp/server.log"
+
+exec 3<&0
+if [ -n "$loader" ]; then
+  OPENCODE_PASSWORD="$pw" env -u OPENCODE_SERVER_PASSWORD \
+    "$loader" --library-path "$rpath" "$binary" --server "http://127.0.0.1:$port" "$@" 0<&3 3<&- &
+else
+  OPENCODE_PASSWORD="$pw" env -u OPENCODE_SERVER_PASSWORD \
+    "$binary" --server "http://127.0.0.1:$port" "$@" 0<&3 3<&- &
+fi
+client_pid=$!
+client_start=$(get_proc_starttime "$client_pid" || echo "")
+exec 3<&-
+
+if [ -t 0 ] && [ -t 1 ]; then
+  trap '' INT
+fi
+
+set +e
+wait "$client_pid"
+client_exit=$?
+set -e
+exit_code=$client_exit
+exit "$exit_code"
