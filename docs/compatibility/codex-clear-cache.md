@@ -66,3 +66,15 @@ probe con Clang de Termux tampoco sustituye la compilación con el NDK pineado
 ni la ejecución del host Android completo. Registrar esas evidencias por
 separado. Publicación e instalación siguen requiriendo autorización; una
 re-emisión conserva checksums, attestation y una nueva revisión `+androidN`.
+
+## Build de validación en GitHub Actions
+
+El dispatch manual usa `publish=false` por defecto: compila ambas arquitecturas
+sin publicar una release. El cron conserva la publicación automática anterior.
+Para reconstruir una versión ya distribuida, elegí una nueva revisión
+`patch_rev`; el gate de idempotencia sigue evitando sobrescribir releases.
+
+El run entrega `codex-arm64`, `codex-amd64` y `validation-arm64`. Este último
+contiene el probe del mismo build para su ejecución nativa en Termux. No forma
+parte de los assets de distribución. La instalación existente no es necesaria
+para probar los ejecutables extraídos del artifact.
