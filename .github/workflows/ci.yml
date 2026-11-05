@@ -68,7 +68,14 @@ jobs:
           set -euo pipefail
           # PYTHONPYCACHEPREFIX: los .pyc van a /tmp, el checkout queda limpio
           python3 -m py_compile -q \
-            scripts/gen-codex-lock-patch.py scripts/gen-ctype-tables.py
+            scripts/gen-codex-lock-patch.py scripts/gen-ctype-tables.py \
+            scripts/check-codex-clear-cache.py scripts/smoke-codex-code-mode.py \
+            scripts/test-codex-code-mode-smoke.py
+
+      - name: Tests del smoke de code-mode (protocolo sintético)
+        run: |
+          set -euo pipefail
+          python3 scripts/test-codex-code-mode-smoke.py
 
       - name: Tests del generador de locks (fixtures sintéticos)
         env:
