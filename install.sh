@@ -159,7 +159,6 @@ fi
 APP_NAME=""; DISPLAY_NAME=""; REPO=""
 RELEASE_SOURCE=""; ARCHIVE_TEMPLATE=""; MANIFEST_URL=""
 VERSION_MAJOR=""; RELEASE_CHANNEL=""
-RELEASE_POLICY_FILE=""
 DOWNLOAD_MAX_TIME=300
 # Overrides opcionales del manifest por arquitectura (uname -m): si hay valor
 # para la arquitectura actual, se usa en vez de MANIFEST_URL. Permite que un
@@ -181,7 +180,6 @@ ARCH_OVERRIDE_X86_64=""
 # Variables de entorno extra para el wrapper (ej: GODEBUG, SSL_CERT_FILE).
 # Array asociativo no es portable en bash 3; se usa un string con newlines.
 WRAPPER_ENV=""
-RUNTIME_SETUP="managed"
 WRAPPER_UNSET_ENV=""
 WRAPPER_RUNNER=""
 DOWNLOAD_URL=""
@@ -213,32 +211,6 @@ WRAPPER_DEFAULT_ARGS=""
 # shellcheck source=/dev/null
 source "$CONF"
 
-INSTALL_TRANSACTION_ENABLED=false
-if declare -f install_transaction_hook >/dev/null 2>&1; then
-  INSTALL_TRANSACTION_ENABLED=true
-fi
-
-case "$RUNTIME_SETUP" in
-  managed|existing) ;;
-  *)
-    err "$CONF: RUNTIME_SETUP inválido: '$RUNTIME_SETUP' (valores permitidos: managed, existing)."
-    exit 1 ;;
-esac
-
-if [[ -n "$RELEASE_POLICY_FILE" ]]; then
-  if [[ ! "$RELEASE_POLICY_FILE" =~ ^[a-zA-Z0-9._/-]+$ || "$RELEASE_POLICY_FILE" == /* || "$RELEASE_POLICY_FILE" =~ (^|/)[.][.]?(/|$) ]]; then
-    err "$CONF: RELEASE_POLICY_FILE debe ser una ruta relativa dentro del repositorio."
-    exit 1
-  fi
-  if [[ -z "$VERSION_MAJOR" || "$RELEASE_CHANNEL" != stable || "$RELEASE_SOURCE" != github || "$CHECKSUM_SOURCE" != release_digest || "$CHECKSUM_ALGO" != sha256 ]]; then
-    err "$CONF: el catálogo requiere major/canal estable, RELEASE_SOURCE=github y SHA256 release_digest."
-    exit 1
-  fi
-  if [[ ! -f "$SCRIPT_DIR/$RELEASE_POLICY_FILE" || -L "$SCRIPT_DIR/$RELEASE_POLICY_FILE" ]]; then
-    err "$CONF: catálogo ausente o no regular: $RELEASE_POLICY_FILE"
-    exit 1
-  fi
-fi
 if [[ ! "$DOWNLOAD_MAX_TIME" =~ ^[1-9][0-9]{0,4}$ ]]; then
   err "$CONF: DOWNLOAD_MAX_TIME debe ser un entero entre 1 y 99999 segundos."
   exit 1
@@ -391,28 +363,19 @@ EXTRACT_DIR=""
 BACKUP_DIR=""
 FRESH_INSTALL=false
 INSTALL_DONE=false
-INSTALL_TRANSACTION_STARTED=false
 VERSION=""; TAG=""; TARBALL_CHECKSUM=""; BIN_CHECKSUM_ORIG=""; BIN_CHECKSUM_PATCHED=""
 # Checksums post-patchelf de los binarios compañeros, como "nombre=hash ".
 EXTRA_PATCHED=""
 ATTEST_STATUS="omitida"
 # JSON del release de GitHub ya descargado (evita una segunda llamada a la API).
 RELEASE_JSON=""
-CATALOG_SEQUENCE=""; CATALOG_CONTRACT=""; CATALOG_SOURCE_COMMIT=""; CATALOG_SHA256=""
 
 cleanup() {
   local rc=$?
   [[ -n "$TMP_FILE" && -f "$TMP_FILE" ]]   && rm -f "$TMP_FILE"
   [[ -n "$EXTRACT_DIR" && -d "$EXTRACT_DIR" ]] && rm -rf "$EXTRACT_DIR"
 
-  if [[ "$INSTALL_TRANSACTION_STARTED" == true ]]; then
-    if [[ $rc -ne 0 && "$INSTALL_DONE" != true ]]; then
-      warn "Instalación transaccional fallida ($DISPLAY_NAME): restaurando el conjunto anterior..."
-      if ! install_transaction_hook rollback; then
-        err "La recuperación transaccional de $DISPLAY_NAME falló; se conserva el journal y los respaldos."
-      fi
-    fi
-  elif [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
+  if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
     if [[ $rc -ne 0 && "$INSTALL_DONE" != true ]]; then
       warn "Instalación fallida ($DISPLAY_NAME): restaurando versión anterior..."
       # Delta de esta corrida: los shims/aliases NUEVOS que la versión previa
@@ -734,57 +697,15 @@ preflight() {
   for c in curl tar awk jq; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
-  if [[ "$RUNTIME_SETUP" == existing ]]; then
-    command -v file >/dev/null 2>&1 || missing+=(file)
-  fi
   command -v sha256sum >/dev/null 2>&1 || missing+=(sha256sum)
   if [[ "$CHECKSUM_ALGO" == "sha512" ]]; then
     command -v sha512sum >/dev/null 2>&1 || missing+=(sha512sum)
   fi
   if [[ ${#missing[@]} -gt 0 ]]; then
-    if [[ "$RUNTIME_SETUP" == existing ]]; then
-      err "RUNTIME_SETUP=existing requiere herramientas ya instaladas: ${missing[*]}"
-    else
-      err "Faltan herramientas: ${missing[*]}"
-      err "Instalá con: pkg install curl tar coreutils gawk jq"
-    fi
+    err "Faltan herramientas: ${missing[*]}"
+    err "Instalá con: pkg install curl tar coreutils gawk jq"
     exit 1
   fi
-
-  if [[ "$RUNTIME_SETUP" == existing ]] && ! check_existing_runtime; then
-    exit 1
-  fi
-
-  if [[ -n "$RELEASE_POLICY_FILE" ]]; then
-    local catalog_file="$SCRIPT_DIR/$RELEASE_POLICY_FILE"
-    if ! release_catalog_validate "$catalog_file" "$APP_NAME" "$VERSION_MAJOR" "$SCRIPT_DIR"; then
-      err "Catálogo de releases inválido para $APP_NAME: $RELEASE_POLICY_FILE"
-      exit 1
-    fi
-    if ! release_catalog_preferred_tag "$catalog_file" "$ARCH" >/dev/null 2>&1; then
-      err "El catálogo de $APP_NAME no tiene releases aprobadas para la arquitectura $ARCH."
-      exit 1
-    fi
-  fi
-}
-
-check_existing_runtime() {
-  if [[ "$EXEC_DIRECT" != true ]]; then
-    if [[ ! -f "$LOADER" || ! -x "$LOADER" ]]; then
-      err "RUNTIME_SETUP=existing requiere un loader glibc ejecutable: $LOADER"
-      return 1
-    fi
-    if [[ ! -d "$RPATH" ]]; then
-      err "RUNTIME_SETUP=existing requiere el directorio de bibliotecas glibc: $RPATH"
-      return 1
-    fi
-    local nsswitch="$GLIBC_PREFIX/etc/nsswitch.conf"
-    if [[ ! -f "$nsswitch" ]] || ! awk '$1 == "hosts:" { for (i = 2; i <= NF; i++) if ($i == "dns") found = 1 } END { exit !found }' "$nsswitch"; then
-      err "RUNTIME_SETUP=existing requiere DNS glibc configurado en $nsswitch."
-      return 1
-    fi
-  fi
-  return 0
 }
 
 uninstall() {
@@ -882,73 +803,8 @@ github_latest_release_with_asset() {
   done
 }
 
-resolve_catalog_version() {
-  local catalog_file="$SCRIPT_DIR/$RELEASE_POLICY_FILE"
-  local catalog_entry asset_entry asset_name expected_asset expected_url api_digest api_sha256
-
-  if [[ -n "$REQUESTED_VERSION" ]]; then
-    if ! catalog_entry=$(release_catalog_entry_by_version "$catalog_file" "$PARSED_REQUESTED_VERSION" 2>/dev/null); then
-      err "La versión $PARSED_REQUESTED_VERSION no está aprobada en el catálogo local de $APP_NAME."
-      exit 1
-    fi
-  else
-    if ! TAG=$(release_catalog_preferred_tag "$catalog_file" "$ARCH" 2>/dev/null); then
-      err "El catálogo de $APP_NAME no tiene una versión preferida para $ARCH."
-      exit 1
-    fi
-    if ! catalog_entry=$(release_catalog_entry_by_tag "$catalog_file" "$TAG" 2>/dev/null); then
-      err "La versión preferida $TAG no existe en el catálogo de $APP_NAME."
-      exit 1
-    fi
-  fi
-
-  TAG=$(printf '%s' "$catalog_entry" | jq -er '.tag')
-  VERSION=$(parse_version_tag "$TAG")
-  CATALOG_SEQUENCE=$(printf '%s' "$catalog_entry" | jq -er '.sequence')
-  CATALOG_CONTRACT=$(printf '%s' "$catalog_entry" | jq -er '.contract')
-  CATALOG_SOURCE_COMMIT=$(printf '%s' "$catalog_entry" | jq -er '.source_commit')
-  if ! asset_entry=$(release_catalog_asset "$catalog_file" "$TAG" "$ARCH" 2>/dev/null); then
-    err "El release $TAG no tiene un asset catalogado para $ARCH."
-    exit 1
-  fi
-  asset_name=$(printf '%s' "$asset_entry" | jq -er '.name')
-  CATALOG_SHA256=$(printf '%s' "$asset_entry" | jq -er '.sha256')
-  expected_asset=$(expand_template "$ARCHIVE_TEMPLATE")
-  if [[ "$asset_name" != "$expected_asset" ]]; then
-    err "El asset catalogado '$asset_name' no coincide con el asset configurado '$expected_asset'."
-    exit 1
-  fi
-
-  RELEASE_JSON=$(github_release_json "tags/$TAG")
-  if ! release_validate_object "$RELEASE_JSON" "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" "$TAG"; then
-    err "El release remoto $TAG no cumple la política local o no contiene un asset único '$asset_name'."
-    exit 1
-  fi
-  expected_url="https://github.com/$REPO/releases/download/$TAG/$asset_name"
-  if ! DOWNLOAD_URL=$(printf '%s' "$RELEASE_JSON" | release_asset_url "$asset_name" "$expected_url" 2>/dev/null); then
-    err "La URL del asset '$asset_name' no coincide con el release catalogado $TAG."
-    exit 1
-  fi
-  if ! api_digest=$(printf '%s' "$RELEASE_JSON" | release_asset_digest "$asset_name" 2>/dev/null); then
-    err "El release $TAG no publica un digest único para '$asset_name'."
-    exit 1
-  fi
-  if [[ ! "$api_digest" =~ ^sha256:[a-fA-F0-9]{64}$ ]]; then
-    err "El digest API del asset '$asset_name' no es SHA256 válido."
-    exit 1
-  fi
-  api_sha256=$(printf '%s' "${api_digest#sha256:}" | tr 'A-F' 'a-f')
-  if [[ "$api_sha256" != "$CATALOG_SHA256" ]]; then
-    err "El digest API del asset $TAG no coincide con el catálogo local."
-    exit 1
-  fi
-}
-
 resolve_version() {
-  if [[ -n "$RELEASE_POLICY_FILE" ]]; then
-    resolve_catalog_version
-  else
-    case "$RELEASE_SOURCE" in
+  case "$RELEASE_SOURCE" in
 
     github)
       if [[ -n "$REQUESTED_VERSION" ]]; then
@@ -1075,7 +931,6 @@ resolve_version() {
       exit 1
       ;;
     esac
-  fi
 
   local resolved_major
   resolved_major=$(release_version_major "$VERSION")
@@ -1093,24 +948,7 @@ resolve_version() {
 
 # ── Paso 3: Resolver checksum esperado ────────────────────────────────────────
 resolve_expected_checksum() {
-  if [[ -n "$RELEASE_POLICY_FILE" ]]; then
-    EXPECTED_CHECKSUM="$CATALOG_SHA256"
-    if [[ -n "$PINNED_CHECKSUM" ]]; then
-      local command_pin
-      command_pin=$(printf '%s' "$PINNED_CHECKSUM" | tr 'A-F' 'a-f' | tr -d '[:space:]')
-      if [[ "$command_pin" != "$EXPECTED_CHECKSUM" ]]; then
-        err "--sha256 no coincide con el digest aprobado para $TAG en el catálogo."
-        exit 1
-      fi
-    fi
-    local hashfile_pin
-    hashfile_pin=$(lookup_hashfile "$APP_NAME/$TAG" | tr 'A-F' 'a-f' | tr -d '[:space:]')
-    if [[ -n "$hashfile_pin" && "$hashfile_pin" != "$EXPECTED_CHECKSUM" ]]; then
-      err "El pin de sha256.txt no coincide con el digest aprobado para $TAG en el catálogo."
-      exit 1
-    fi
-    info "Digest SHA256 aprobado por el catálogo y confirmado por la API."
-  elif [[ -n "$PINNED_CHECKSUM" ]]; then
+  if [[ -n "$PINNED_CHECKSUM" ]]; then
     EXPECTED_CHECKSUM=$(printf '%s' "$PINNED_CHECKSUM" | tr 'A-F' 'a-f' | tr -d '[:space:]')
     warn "Usando checksum pasado con --sha256 (verificalo vos mismo)."
   else
@@ -1177,49 +1015,7 @@ resolve_expected_checksum() {
 }
 
 # ── Paso 4: Verificar versión instalada ────────────────────────────────────────
-validate_catalog_transition() {
-  [[ -n "$RELEASE_POLICY_FILE" && -f "$MANIFEST" ]] || return 0
-
-  local catalog_file="$SCRIPT_DIR/$RELEASE_POLICY_FILE"
-  local installed_tag installed_entry installed_sequence manifest_sequence
-  local manifest_contract manifest_source_commit manifest_digest installed_asset catalog_digest
-  installed_tag=$(manifest_get tag)
-  if [[ -z "$installed_tag" ]] || ! installed_entry=$(release_catalog_entry_by_tag "$catalog_file" "$installed_tag" 2>/dev/null); then
-    err "La instalación existente de $APP_NAME no tiene un tag respaldado por el catálogo actual."
-    exit 1
-  fi
-  installed_sequence=$(printf '%s' "$installed_entry" | jq -er '.sequence')
-  manifest_sequence=$(manifest_get release_sequence)
-  manifest_contract=$(manifest_get release_contract)
-  manifest_source_commit=$(manifest_get release_source_commit)
-  manifest_digest=$(manifest_get tarball_checksum)
-  installed_asset=$(release_catalog_asset "$catalog_file" "$installed_tag" "$ARCH")
-  catalog_digest=$(printf '%s' "$installed_asset" | jq -er '.sha256')
-  if [[ "$manifest_sequence" != "$installed_sequence" || \
-        "$manifest_contract" != "$(printf '%s' "$installed_entry" | jq -er '.contract')" || \
-        "$manifest_source_commit" != "$(printf '%s' "$installed_entry" | jq -er '.source_commit')" || \
-        "$manifest_digest" != "$catalog_digest" ]]; then
-    err "El manifest de $installed_tag no coincide con el catálogo de releases."
-    exit 1
-  fi
-  if [[ ${#CATALOG_SEQUENCE} -lt ${#installed_sequence} ]] || \
-     { [[ ${#CATALOG_SEQUENCE} -eq ${#installed_sequence} ]] && [[ "$CATALOG_SEQUENCE" < "$installed_sequence" ]]; }; then
-    err "La versión aprobada $TAG es anterior a la instalada $installed_tag; usá rollback para volver atrás."
-    exit 1
-  fi
-  if [[ "$CATALOG_SEQUENCE" == "$installed_sequence" && "$TAG" != "$installed_tag" ]]; then
-    err "No se permite reemplazar $installed_tag por otro tag con la misma secuencia; usá rollback."
-    exit 1
-  fi
-}
-
 check_current() {
-  validate_catalog_transition
-  if [[ -n "$RELEASE_POLICY_FILE" && ! -f "$MANIFEST" && ( -e "$WRAPPER" || -e "$LIBEXEC_DIR" ) ]]; then
-    err "Hay archivos existentes de $APP_NAME sin un manifest de catálogo; no se sobrescriben."
-    exit 1
-  fi
-
   [[ "$REINSTALL" == true ]] && return 0
 
   # Con manifest, la fuente de verdad es el tag: identifica el release exacto
@@ -1258,10 +1054,6 @@ check_current() {
 
 # ── Paso 5: Dependencias ──────────────────────────────────────────────────────
 install_deps() {
-  if [[ "$RUNTIME_SETUP" == existing ]]; then
-    info "Usando runtime glibc existente; no se modifican paquetes ni archivos del overlay."
-    return 0
-  fi
   info "Instalando dependencias (glibc-repo, glibc-runner, patchelf, file, jq, curl)..."
   pkg update -y >/dev/null 2>&1 || warn "pkg update falló; continuando con índices actuales."
   local deps=(glibc-repo glibc-runner file jq curl)
@@ -1392,15 +1184,8 @@ extract_install() {
 
   # Respaldar instalación previa para rollback
   if [[ -d "$LIBEXEC_DIR" ]]; then
-    if [[ "$INSTALL_TRANSACTION_ENABLED" == true ]]; then
-      if [[ -L "$LIBEXEC_DIR" || -z "$BACKUP_DIR" || -e "$BACKUP_DIR" || -L "$BACKUP_DIR" ]]; then
-        err 'El hook transaccional no reservó un destino seguro para el bundle anterior.'
-        exit 1
-      fi
-    else
-      BACKUP_DIR="$(dirname "$LIBEXEC_DIR")/.$APP_NAME.backup.$$"
-      rm -rf "$BACKUP_DIR"
-    fi
+    BACKUP_DIR="$(dirname "$LIBEXEC_DIR")/.$APP_NAME.backup.$$"
+    rm -rf "$BACKUP_DIR"
     mv "$LIBEXEC_DIR" "$BACKUP_DIR"
     # Copia del wrapper actual dentro del backup: con ENTRY_POINT el wrapper
     # apunta a un archivo del bundle (ej: launcher del .conf actual), así que
@@ -1485,7 +1270,6 @@ patch_interpreter() {
 
 # ── Paso 11: nsswitch.conf (DNS de glibc) ─────────────────────────────────────
 ensure_nsswitch() {
-  [[ "$RUNTIME_SETUP" == existing ]] && return 0
   local ns="$GLIBC_PREFIX/etc/nsswitch.conf"
   [[ -f "$ns" ]] && return 0
   mkdir -p "$(dirname "$ns")"
@@ -1710,9 +1494,6 @@ elf_name=$ELF_NAME
 version=$VERSION
 tag=$TAG
 release_source=$RELEASE_SOURCE
-release_sequence=$CATALOG_SEQUENCE
-release_contract=$CATALOG_CONTRACT
-release_source_commit=$CATALOG_SOURCE_COMMIT
 checksum_algo=$CHECKSUM_ALGO
 checksum_source=$CHECKSUM_SOURCE
 tarball_checksum=$TARBALL_CHECKSUM
@@ -1752,7 +1533,7 @@ verify_install() {
   version_core=$(normalize_version "$VERSION")
   [[ -n "$got" && "$got" != "$version_core" ]] && \
     warn "Versión reportada ($got) ≠ esperada ($VERSION)."
-  [[ "$INSTALL_TRANSACTION_ENABLED" == true ]] || INSTALL_DONE=true
+  INSTALL_DONE=true
   info "$DISPLAY_NAME ${got:-$VERSION} funcionando correctamente."
 }
 
@@ -1780,13 +1561,6 @@ run_post_install_hook() {
     info "Ejecutando post_install_hook..."
     post_install_hook
   fi
-}
-
-run_install_transaction_hook() {
-  local phase="$1"
-  [[ "$INSTALL_TRANSACTION_ENABLED" == true ]] || return 0
-  info "Ejecutando install_transaction_hook ($phase)..."
-  install_transaction_hook "$phase"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1825,30 +1599,14 @@ main() {
   download
   verify_tarball
   verify_attestation
-  if [[ "$INSTALL_TRANSACTION_ENABLED" == true ]]; then
-    INSTALL_TRANSACTION_STARTED=true
-    run_install_transaction_hook prepare || exit 1
-  fi
   extract_install
   patch_interpreter
   ensure_nsswitch
   run_pre_wrapper_hook
   create_wrapper
-  if [[ "$INSTALL_TRANSACTION_ENABLED" == true ]]; then
-    write_manifest
-    verify_install
-    run_post_install_hook
-    run_install_transaction_hook validate
-    run_install_transaction_hook commit
-    INSTALL_DONE=true
-  else
-    # El manifest se escribe DESPUÉS de verificar la instalación.
-    # Si se escribiera antes, una instalación fallida dejaría un manifest válido
-    # y la próxima corrida la tomaría por buena.
-    verify_install
-    write_manifest
-    run_post_install_hook
-  fi
+  verify_install
+  write_manifest
+  run_post_install_hook
   show_summary
 }
 
