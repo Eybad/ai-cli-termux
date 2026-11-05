@@ -30,25 +30,37 @@ cat > "$test_root/page1.json" <<'EOF'
     "tag_name": "process-daemon-0.1.0",
     "draft": false,
     "prerelease": false,
-    "assets": [{"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:111", "browser_download_url": "https://example/1"}]
+    "assets": [
+      {"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:111", "browser_download_url": "https://example/1"},
+      {"name": "opencode-linux-amd64.tar.gz", "digest": "sha256:111", "browser_download_url": "https://example/1"}
+    ]
   },
   {
     "tag_name": "v1.19.5",
     "draft": false,
     "prerelease": false,
-    "assets": [{"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:222", "browser_download_url": "https://example/2"}]
+    "assets": [
+      {"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:222", "browser_download_url": "https://example/2"},
+      {"name": "opencode-linux-amd64.tar.gz", "digest": "sha256:222", "browser_download_url": "https://example/2"}
+    ]
   },
   {
     "tag_name": "v2.2.6-alpha.1",
     "draft": false,
     "prerelease": true,
-    "assets": [{"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:333", "browser_download_url": "https://example/3"}]
+    "assets": [
+      {"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:333", "browser_download_url": "https://example/3"},
+      {"name": "opencode-linux-amd64.tar.gz", "digest": "sha256:333", "browser_download_url": "https://example/3"}
+    ]
   },
   {
     "tag_name": "v2.2.6-rc.2",
     "draft": false,
     "prerelease": false,
-    "assets": [{"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:444", "browser_download_url": "https://example/4"}]
+    "assets": [
+      {"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:444", "browser_download_url": "https://example/4"},
+      {"name": "opencode-linux-amd64.tar.gz", "digest": "sha256:444", "browser_download_url": "https://example/4"}
+    ]
   }
 ]
 EOF
@@ -59,13 +71,19 @@ cat > "$test_root/page2.json" <<'EOF'
     "tag_name": "v2.2.5+android1",
     "draft": false,
     "prerelease": false,
-    "assets": [{"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:555", "browser_download_url": "https://github.com/anomalyco/opencode/releases/download/v2.2.5+android1/opencode-linux-arm64.tar.gz"}]
+    "assets": [
+      {"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:555", "browser_download_url": "https://github.com/anomalyco/opencode/releases/download/v2.2.5+android1/opencode-linux-arm64.tar.gz"},
+      {"name": "opencode-linux-amd64.tar.gz", "digest": "sha256:555", "browser_download_url": "https://github.com/anomalyco/opencode/releases/download/v2.2.5+android1/opencode-linux-amd64.tar.gz"}
+    ]
   },
   {
     "tag_name": "v2.2.4",
     "draft": false,
     "prerelease": false,
-    "assets": [{"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:666", "browser_download_url": "https://example/6"}]
+    "assets": [
+      {"name": "opencode-linux-arm64.tar.gz", "digest": "sha256:666", "browser_download_url": "https://example/6"},
+      {"name": "opencode-linux-amd64.tar.gz", "digest": "sha256:666", "browser_download_url": "https://example/6"}
+    ]
   }
 ]
 EOF
@@ -143,7 +161,10 @@ chmod 755 "$mock_bin_dir/curl"
 # Test --resolve-version machine contract:
 # - stdout must be EXACTLY "TARGET_VERSION=2.2.5+android1" and nothing else
 # - exit code 0
-res_out=$(PATH="$mock_bin_dir:$PATH" bash "$mock_repo/install.sh" opencode --resolve-version 2>"$test_root/res.err")
+if ! res_out=$(PATH="$mock_bin_dir:$PATH" bash "$mock_repo/install.sh" opencode --resolve-version 2>"$test_root/res.err"); then
+  cat "$test_root/res.err" >&2
+  fail "install.sh --resolve-version failed"
+fi
 [[ "$res_out" == "TARGET_VERSION=2.2.5+android1" ]] || fail "expected 'TARGET_VERSION=2.2.5+android1', got: '$res_out'"
 [[ -s "$test_root/res.err" ]] || fail "expected logs in stderr, got empty stderr"
 

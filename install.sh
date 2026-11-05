@@ -669,7 +669,7 @@ expand_template() {
 
 # ── Paso 1: Preflight ─────────────────────────────────────────────────────────
 preflight() {
-  if [[ ! -d /data/data/com.termux ]]; then
+  if [[ "$RESOLVE_VERSION" != true && ! -d /data/data/com.termux ]]; then
     err "Esto solo funciona en Termux (no se detectó /data/data/com.termux)."
     exit 1
   fi
