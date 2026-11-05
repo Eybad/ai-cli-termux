@@ -53,7 +53,8 @@ jobs:
           # consumidas por el instalador) es falso positivo; -S error solo
           # falla ante errores reales.
           shellcheck -s bash -S error registry/*.conf
-          shellcheck scripts/test-opencode-coexistence.sh
+          # Tests de OpenCode y wrapper runner:
+          shellcheck -x scripts/test-opencode-releases.sh scripts/test-opencode-runner.sh scripts/test-wrapper-runner.sh
           # Lib de hooks: código real (lleva directivas shellcheck en cabecera).
           shopt -s nullglob
           lib_files=(registry/lib/*.sh)
@@ -121,6 +122,8 @@ jobs:
             elf=$(unq "$(get ELF_NAME)")
             version_major=$(unq "$(get VERSION_MAJOR)")
             release_channel=$(unq "$(get RELEASE_CHANNEL)")
+            download_max_time=$(unq "$(get DOWNLOAD_MAX_TIME)")
+            wrapper_runner=$(unq "$(get WRAPPER_RUNNER)")
 
             if [[ -n "$version_major" && ! "$version_major" =~ ^(0|[1-9][0-9]*)$ ]]; then
               echo "::error file=$conf::VERSION_MAJOR inválido: '$version_major' (entero decimal canónico)"
@@ -130,6 +133,21 @@ jobs:
               ''|stable) ;;
               *) echo "::error file=$conf::RELEASE_CHANNEL inválido: '$release_channel' (válido: stable)"; fail=1 ;;
             esac
+
+            if [[ -n "$download_max_time" && ! "$download_max_time" =~ ^[1-9][0-9]{0,4}$ ]]; then
+              echo "::error file=$conf::DOWNLOAD_MAX_TIME inválido: '$download_max_time' (entero entre 1 y 99999)"
+              fail=1
+            fi
+
+            if [[ -n "$wrapper_runner" ]]; then
+              if [[ ! "$wrapper_runner" =~ ^[a-zA-Z0-9._-]+$ || "$wrapper_runner" == "." || "$wrapper_runner" == ".." ]]; then
+                echo "::error file=$conf::WRAPPER_RUNNER inválido: '$wrapper_runner' (nombre de archivo simple)"
+                fail=1
+              elif [[ ! -f "registry/lib/$wrapper_runner" || -L "registry/lib/$wrapper_runner" ]]; then
+                echo "::error file=$conf::WRAPPER_RUNNER no existe o es symlink: registry/lib/$wrapper_runner"
+                fail=1
+              fi
+            fi
 
             # Mismo charset que _name_is_valid de install.sh (con rechazo de
             # "."/".." como token completo): evita que un valor raro llegue a
@@ -189,8 +207,9 @@ jobs:
           done
           exit $fail
 
-      - name: Tests de convivencia y resolución de releases
+      - name: Tests de OpenCode y runner
         run: |
           set -euo pipefail
-          sh -n scripts/test-opencode-coexistence.sh
-          sh scripts/test-opencode-coexistence.sh
+          bash scripts/test-opencode-releases.sh
+          bash scripts/test-opencode-runner.sh
+          bash scripts/test-wrapper-runner.sh

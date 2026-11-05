@@ -33,7 +33,7 @@ Instala y audita CLIs de inteligencia artificial — [opencode](https://github.c
 
 | Herramienta | Distribución | Verificación de integridad | Notas |
 |---|---|---|---|
-| **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | SHA256 del asset vía GitHub API | Invocación directa vía loader glibc (`NEEDS_PATCHELF=false`) |
+| **`opencode`** | [GitHub Releases](https://github.com/anomalyco/opencode) | SHA256 del asset vía GitHub API | Invocación vía runner glibc (`opencode-runner.sh`), rutas XDG estándar (`NEEDS_PATCHELF=false`) |
 | **`agy`** (Antigravity CLI) | [endpoint de actualización de Google](https://antigravity.google) (Cloud Run, manifest JSON) | SHA512 dinámico del manifest | Binario nativo bionic en Android (manifest `android_arm64`, `EXEC_DIRECT`) |
 | **`kiro-cli`** (Kiro CLI) | [CDN de Amazon](https://prod.download.cli.kiro.dev) | SHA256 del `manifest.json` oficial | TUI vía runtime bun parcheado; `EXTRA_BINS` |
 | **`codex`** (OpenAI Codex) | [Repo de distribución](https://github.com/Eybad/ai-cli-termux-dist) — **build propio en CI** desde el código oficial (Apache-2.0) | SHA256 del asset vía GitHub API + attestation SLSA del workflow | Binario nativo bionic (arm64, sin proot) o musl verificado (amd64); `EXEC_DIRECT` |
@@ -124,7 +124,7 @@ aicli install codex -v 0.146.0+android1   # ejemplo: release con el parche de lo
 aicli install cursor-agent -v 2026.07.23-e383d2b  # ejemplo: versión pineada (ver sha256.txt)
 ```
 
-**opencode** — digest SHA256 verificado contra la GitHub API (el pin de `sha256.txt` gana si existe).
+**opencode** — v2 estable; digest SHA256 verificado contra la GitHub API (el pin de `sha256.txt` gana si existe). Orquesta el servidor efímero glibc vía `opencode-runner.sh` y utiliza rutas XDG estándar.
 
 **agy** — build Android oficial de Google (bionic nativo, `EXEC_DIRECT`): instalación directa sin parches; `verify_install` confirma `--version` y `verify.sh` audita el hash post-instalación.
 
@@ -216,7 +216,7 @@ Cada instalación registra un `manifest.txt` con la versión y los hashes del bi
 aicli update <tool>
 ```
 
-- **opencode**: última release de GitHub; digest SHA256 verificado contra la GitHub API (el pin de `sha256.txt` gana si existe).
+- **opencode**: última release v2 estable de GitHub; digest SHA256 verificado contra la GitHub API (el pin de `sha256.txt` gana si existe).
 - **agy**: última versión del manifest de Google, con re-aplicación del parche adaptativo.
 - **kiro-cli**: última versión del `manifest.json` del CDN de Amazon.
 - **codex**: última versión publicada por el build propio de CI en el repo de distribución ([`build-codex.yml`](.github/workflows/build-codex.yml)); digest + attestation del workflow (emitida por el repo del proyecto).
@@ -314,6 +314,7 @@ ai-cli-termux/
 │   ├── kiro-cli.conf
 │   ├── codex.conf
 │   ├── cursor-agent.conf
+│   ├── lib/opencode-runner.sh   # Runner de servidor efímero glibc para OpenCode v2
 │   ├── lib/shims.sh             # Helpers compartidos de hooks (shims, etc.)
 ├── scripts/
 │   ├── gen-codex-lock-patch.py  # Generador fail-closed del parche de locks (CI)
