@@ -78,3 +78,52 @@ El run entrega `codex-arm64`, `codex-amd64` y `validation-arm64`. Este último
 contiene el probe del mismo build para su ejecución nativa en Termux. No forma
 parte de los assets de distribución. La instalación existente no es necesaria
 para probar los ejecutables extraídos del artifact.
+
+## Evidencia del build 0.166.0+android2
+
+Fecha: 2026-11-05.
+
+- Run: [41960828923](https://github.com/Eybad/ai-cli-termux/actions/runs/41960828923),
+  intento 1, concluido con éxito.
+- Commit del workflow: `94953d56872b6bc6b2126839b56a841a63a2d4b9`.
+- Source upstream pineado: `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`.
+- NDK r26d: checksum verificado por el workflow. Pasaron la inspección del
+  objeto de compiler-rt, la del probe y la del host Android enlazado.
+- El job amd64 completó ambas regex con resultado `true` y salida 0.
+- `publish=false`: el job de release quedó omitido.
+
+SHA256 de los ZIP informados por la API de Actions:
+
+| Artifact | SHA256 |
+|---|---|
+| `codex-arm64` | `109fccfe50ee7df01b1e397d4270395f0b340fb198a773d14d01bcfbce271777` |
+| `validation-arm64` | `465313de0156fc84004aa84cfda1f457e289b0c9a3433eb0bbbcdeff9ade3654` |
+
+El log del job Android informa SHA256 del tarball `codex-arm64.tar.gz`:
+`6e2f2e1127af95901b626dffaad10b27b61a5098badb289aa3eedb3ec73b3a01`.
+
+La descarga del probe verificó su ZIP contra el digest de Actions antes de
+extraerlo. El probe del run ejecutó correctamente 128 reemplazos de código en
+Android aarch64/Termux y terminó con 0.
+
+La descarga del ZIP Android verificó su SHA256 contra el digest de Actions y
+el tarball extraído coincidió con el SHA256 del log del build, antes de extraer
+y ejecutar binarios. Una interrupción de la transferencia se recuperó mediante
+una petición HTTP Range; la verificación final cubrió el archivo completo.
+
+El bundle extraído en un temporal de Termux reportó
+`codex-cli 0.166.0+android2`. El smoke nativo del host devolvió:
+
+```text
+PASS: text(/a|b/.test("alpha"));
+PASS: text(/[ab]/.test("alpha"));
+```
+
+Cada regex se ejecutó en una sesión sintética sin herramientas habilitadas,
+con resultado final `true`, sin error de ejecución y salida del host con 0.
+Esta prueba alcanza las dos reproducciones que causaban SIGSEGV en el build
+instalado anterior. No acredita todos los flujos de Codex, MCP o uso prolongado.
+
+No se instaló ni reemplazó la distribución vigente, no se modificó la
+configuración del usuario y no se publicó una release. Los cambios ajenos de
+OpenCode y los documentos temporales del checkout principal quedaron intactos.
