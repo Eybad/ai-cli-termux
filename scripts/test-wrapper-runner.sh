@@ -61,7 +61,7 @@ export RUNNER_SECRET_FILE="$secret_file"
 export RUNNER_CONFIG_FILE="$config_file"
 _write_wrapper "$WRAPPER" "$BIN_FILE" "$BIN_FILE"
 TEST_WRAPPER_SECRET=inherited TEST_WRAPPER_CONFIG=inherited \
-  "$WRAPPER" 'argument with spaces' '--option=two words'
+  bash "$WRAPPER" 'argument with spaces' '--option=two words'
 
 cat > "$test_root/expected-args" <<EOF
 $LOADER
