@@ -1,24 +1,24 @@
 # Security Policy
 
-## Alcance
+## Scope
 
-Este repositorio contiene el instalador y el gestor (`install.sh`, `verify.sh`, `aicli`), la configuración por herramienta (`registry/`) y los workflows de CI/build (`.github/workflows/`). Los binarios que se instalan son **artefactos de terceros**: este proyecto no los compila (salvo codex, cuyo build en CI usa el código oficial de OpenAI) y su seguridad depende de la cadena de verificación descrita abajo.
+This repository provides the installer and manager CLI (`install.sh`, `verify.sh`, `aicli`), tool configurations (`registry/`), and CI/build workflows (`.github/workflows/`). The software binaries installed through this project are **third-party upstream artifacts**: this project does not compile them (with the exception of Codex, whose CI build compiles directly from OpenAI's official source code), and their security relies on the verification chain outlined below.
 
-## Reportar una vulnerabilidad
+## Reporting a Vulnerability
 
-- Reportá en **privado** usando el flujo de advisory de GitHub: la pestaña **Security → Report a vulnerability** del repositorio (no abras un issue público para fallos de seguridad activos).
-- Incluí: versión afectada, descripción, pasos para reproducir y, si aplica, un parche propuesto.
-- Plazo de respuesta: 7 días hábiles para triaje inicial. El fix se publica con advisory (GHSA) cuando corresponde.
+- Report security issues **privately** via GitHub Security Advisories: navigate to the **Security → Report a vulnerability** tab of this repository. Please do not open public issues for active vulnerabilities.
+- Include: affected version, description, reproduction steps, and a proposed patch if available.
+- Response timeline: Initial triage within 7 business days. Security fixes are published alongside a GitHub Security Advisory (GHSA) when applicable.
 
-## Modelo de confianza (cómo se protege la cadena)
+## Trust Model & Supply Chain Security
 
-- **Fail-closed en checksums**: sin hash verificado no se instala nada. La fuente del checksum varía por herramienta (digest de la GitHub API, manifest JSON del vendor, o pin manual en `sha256.txt` para vendors sin manifest). Un mismatch aborta la instalación.
-- **Attestation**: los builds propios (codex) publican attestation del workflow (Sigstore/SLSA v1); `install.sh` la verifica con `gh attestation verify` cuando el vendor la emite.
-- **Sandbox de codex**: `sandbox_mode` usa landlock; en kernels Android sin soporte se documenta `sandbox_mode = "off"` en `~/.codex/config.toml` (riesgo asumido por el usuario).
-- **Superficie reducida**: el instalador no descarga ni ejecuta scripts de terceros; el código del repo se audita con `verify.sh` post-instalación y CI (shellcheck + validación de registros).
+- **Fail-closed checksums**: No binary or archive is installed without verified integrity. Checksum sources vary by tool (GitHub API asset digests, vendor JSON manifests, or manual pins in `sha256.txt`). Any mismatch immediately aborts the installation.
+- **Attestation**: In-house CI builds (Codex) publish workflow attestations (Sigstore/SLSA v1); `install.sh` verifies them using `gh attestation verify` when provided.
+- **Codex sandbox**: Defaults to `landlock`. On Android kernels without Landlock support, `sandbox_mode = "off"` in `~/.codex/config.toml` is documented as an acknowledged user risk.
+- **Minimal attack surface**: The installer does not download or execute remote scripts; all repository code is audited with `verify.sh` post-installation and continuously checked in CI (ShellCheck + registry validation).
 
-## Dependencias
+## Dependencies
 
-- **GitHub Actions**: pineadas por commit SHA (no por tag mutable) y actualizadas por Dependabot (`.github/dependabot.yml`).
-- **NDK del build de codex**: verificado contra el checksum oficial de Google.
-- **Binarios instalados**: verificados en cada instalación/actualización contra el hash de su fuente oficial.
+- **GitHub Actions**: Pinned by immutable commit SHA (not mutable release tags) and kept up to date by Dependabot (`.github/dependabot.yml`).
+- **Codex Build NDK**: Verified against Google's official SHA256 checksums.
+- **Installed binaries**: Validated on every install or update against official upstream hashes.

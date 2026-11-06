@@ -1,47 +1,34 @@
-# sha256.txt — Hashes de tarballs por herramienta
+# sha256.txt — Tarball checksums by tool
 #
-# Formato:  <tool>/<tag>[:<arch>]  <checksum>
-#           <arch> opcional (arm64/amd64) para pins específicos de arquitectura.
+# Format:   <tool>/<tag>[:<arch>]  <checksum>
+#           <arch> optional (arm64/amd64) for architecture-specific pins.
 #
-# ── Rol actual ─────────────────────────────────────────────────────────────────
+# Role:
+# - MANDATORY for tools with CHECKSUM_SOURCE=hashfile: only source of version
+#   and checksum (vendors without JSON manifests or public asset digests).
+#   Without an entry, installation fails closed.
+# - OPTIONAL for remaining tools: version and checksum resolve automatically
+#   in a fail-closed manner (release_digest via GitHub API, or vendor manifest).
+#   If a pin exists for the target tag, install.sh prioritizes it over remote digests.
 #
-# OBLIGATORIO para herramientas con CHECKSUM_SOURCE=hashfile: son la única
-# fuente de versión y checksum (vendor sin manifest JSON ni digest público de
-# assets). Sin entrada no hay instalación (fail-closed).
-#
-# OPCIONAL para el resto: versión y checksum se resuelven solos de forma
-# fail-closed (digest SHA256 del asset desde la GitHub API con release_digest,
-# o SHA512/SHA256 del manifest JSON del vendor con manifest). Si existe una
-# entrada para el tag que se está instalando, install.sh la usa en lugar del
-# digest remoto (el pin del repo gana).
-#
-# ── Cómo agregar un hash nuevo ─────────────────────────────────────────────────
-#
+# Adding a new checksum:
 #   TAG=v1.18.9
 #   TOOL=opencode
 #   curl -fLO "https://github.com/anomalyco/opencode/releases/download/$TAG/opencode-linux-arm64.tar.gz"
 #   sha256sum opencode-linux-arm64.tar.gz
 #
-# Confirmá la attestation antes de agregar (requiere gh autenticado):
-#
+# Verify attestation before adding (requires authenticated gh):
 #   gh attestation verify <tarball> \
 #     --repo <user>/<repo> --predicate-type <predicate>
 #
-# Para herramientas hashfile la actualización es manual: detectar la versión
-# nueva en la fuente del vendor, descargar el tarball exacto, sha256sum y
-# actualizar la entrada acá.
+# Note:
+# patchelf modifies ELF binaries after extraction; installed binary hashes
+# never match the upstream tarball. verify.sh checks against manifest.txt,
+# not this file. This file covers the downloaded archive only.
 #
-# ── Notas sobre colisiones de hash ─────────────────────────────────────────────
-#
-# patchelf modifica el ELF después de la extracción, por lo que el hash del
-# binario instalado NUNCA coincide con el del tarball. verify.sh compara el
-# binario parcheado contra el hash registrado en el manifest local, NO contra
-# este archivo. Este archivo cubre únicamente el tarball descargado.
-#
-# ── Entradas ───────────────────────────────────────────────────────────────────
-
+# Entries:
 # opencode — https://github.com/anomalyco/opencode/releases
-# Pin opcional: la instalación default usa el digest de la GitHub API.
+# Optional pin: default installation uses the GitHub API digest.
 
-# agy (Antigravity CLI) — usa el SHA512 del manifest JSON de Google.
-# No agregar entradas para agy acá.
+# agy (Antigravity CLI) — uses SHA512 from Google's JSON manifest.
+# Do not add agy entries here.
