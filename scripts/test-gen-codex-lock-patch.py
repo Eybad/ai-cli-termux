@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-# test-gen-codex-lock-patch.py — Tests del generador de locks (fixtures sintéticos).
-#
-# Corre sin red ni clone upstream: construye un árbol codex-rs mínimo y ejercita
-# el generador por su interfaz (--src / --dist-version / --apply). Uso:
-#   python3 scripts/test-gen-codex-lock-patch.py
 
 import importlib.util
 import tempfile
@@ -104,11 +99,9 @@ class TestScan(unittest.TestCase):
             lib = root / "alpha/src/lib.rs"
             lib.write_text(lib.read_text() + "\n// file.try_lock()\n")
             sites = gen.scan_sites(root)
-            self.assertEqual(len(sites), 7)  # el comentario no suma
+            self.assertEqual(len(sites), 7)
 
     def test_trailing_comment_skipped(self):
-        # Un call site dentro de un comentario trailing no se escanea ni se
-        # reescribe (el `//` corta la línea fuera de strings).
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "codex-rs"
             build_tree(root)
@@ -118,13 +111,12 @@ class TestScan(unittest.TestCase):
                 + '\n    let file = std::fs::File::open("q")?; // file.try_lock()\n'
             )
             sites = gen.scan_sites(root)
-            self.assertEqual(len(sites), 7)  # el trailing no suma
+            self.assertEqual(len(sites), 7)
             old = gen.INVENTORY
             gen.INVENTORY = INVENTORY_FIXTURE
             try:
                 gen.main(["--apply", "--src", str(root), "--dist-version", "0.1.0+android1"])
                 text = (root / "alpha/src/lib.rs").read_text()
-                # el comentario quedó intacto y el call real fue reemplazado
                 self.assertIn("// file.try_lock()", text)
                 self.assertIn("crate::file_lock_shim::lock(&file)?;", text)
             finally:
@@ -161,17 +153,14 @@ class TestVerify(unittest.TestCase):
                 gen.INVENTORY = old
 
     def test_verify_mode_reports_drift(self):
-        # Sin --apply, una deriva también reporta el inventario propuesto
-        # (exit 1, sin modificar nada).
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "codex-rs"
             build_tree(root)
             old = gen.INVENTORY
-            gen.INVENTORY = {"alpha/src/lib.rs": {("lock_file", "try_lock"): 1}}  # mal
+            gen.INVENTORY = {"alpha/src/lib.rs": {("lock_file", "try_lock"): 1}}
             try:
                 rc = gen.main(["--src", str(root), "--dist-version", "0.1.0+android1"])
                 self.assertEqual(rc, 1)
-                # el árbol quedó intacto
                 self.assertIn("file.try_lock()", (root / "beta/src/lib.rs").read_text())
             finally:
                 gen.INVENTORY = old
@@ -186,7 +175,6 @@ class TestApply(unittest.TestCase):
             gen.INVENTORY = INVENTORY_FIXTURE
             try:
                 gen.main(["--apply", "--src", str(root), "--dist-version", "0.1.0+android1"])
-                # call sites reemplazados (forma exacta: sin paréntesis huérfanos)
                 beta_lib = (root / "beta/src/lib.rs").read_text()
                 self.assertIn(
                     "crate::file_lock_shim::try_lock(&file)?;",
@@ -198,12 +186,9 @@ class TestApply(unittest.TestCase):
                     "crate::file_lock_shim::try_lock(&self.file)?;",
                     (root / "beta/src/deep/nested.rs").read_text(),
                 )
-                # shims en los crate roots derivados (incluye main.rs de gamma)
                 for root_file in ("alpha/src/lib.rs", "beta/src/lib.rs", "gamma/src/main.rs"):
                     self.assertIn("mod file_lock_shim", (root / root_file).read_text())
-                # versión bumpada
                 self.assertIn('version = "0.1.0+android1"', (root / "Cargo.toml").read_text())
-                # idempotencia: segunda corrida no toca nada (árbol intacto)
                 before = {
                     p.relative_to(root): p.read_bytes()
                     for p in root.rglob("*")
@@ -220,8 +205,7 @@ class TestApply(unittest.TestCase):
                 gen.INVENTORY = old
 
     def test_apply_substring_collision(self):
-        # lock_file.try_lock() y file.try_lock() en el mismo archivo: el receiver
-        # corto no debe corromper al largo (lock_crate::...).
+        # Short receiver must not corrupt substring in longer receiver.
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "codex-rs"
             build_tree(root)
@@ -254,7 +238,7 @@ class TestApply(unittest.TestCase):
             old = gen.INVENTORY
             gen.INVENTORY = {
                 "alpha/src/lib.rs": {("lock_file", "try_lock"): 2, ("file", "lock"): 1}
-            }  # faltan beta y gamma
+            }
             try:
                 with self.assertRaises(SystemExit):
                     gen.main(["--apply", "--src", str(root), "--dist-version", "0.1.0+android1"])
@@ -269,11 +253,10 @@ class TestDynamicApply(unittest.TestCase):
             build_tree(root)
             old_inv = gen.INVENTORY
             old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
-            # Inventario desactualizado que normalmente abortaría
             gen.INVENTORY = {
                 "alpha/src/lib.rs": {("lock_file", "try_lock"): 1}
             }
-            gen.MIN_DYNAMIC_SITES = 5  # el fixture tiene 7 sitios
+            gen.MIN_DYNAMIC_SITES = 5
             try:
                 rc = gen.main([
                     "--apply",
@@ -294,7 +277,7 @@ class TestDynamicApply(unittest.TestCase):
             root = Path(td) / "codex-rs"
             build_tree(root)
             old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
-            gen.MIN_DYNAMIC_SITES = 15  # el fixture tiene 7, debe abortar
+            gen.MIN_DYNAMIC_SITES = 15
             try:
                 with self.assertRaises(SystemExit):
                     gen.main([
@@ -310,7 +293,6 @@ class TestDynamicApply(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "codex-rs"
             build_tree(root)
-            # Agregar llamada a try_lock_shared con receiver 'directory' (caso file-system/local_logs.rs)
             beta_lib = root / "beta/src/lib.rs"
             beta_lib.write_text(
                 beta_lib.read_text() + '\npub fn log() { let directory = std::fs::File::open("x")?; directory.try_lock_shared()?; Ok(()) }\n'
@@ -334,7 +316,6 @@ class TestDynamicApply(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "codex-rs"
             build_tree(root)
-            # Agregar llamada a lock() con pista File:: y receiver sin 'file'
             beta_lib = root / "beta/src/lib.rs"
             beta_lib.write_text(
                 beta_lib.read_text() + '\npub fn leak() { let fd = std::fs::File::open("x")?; fd.lock()?; Ok(()) }\n'

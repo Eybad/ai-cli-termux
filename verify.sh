@@ -1,15 +1,4 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# verify.sh — Verificador de integridad de CLIs instaladas en Termux
-#
-# Uso: verify.sh <herramienta>
-# Ejemplos:
-#   verify.sh opencode
-#   verify.sh agy
-#
-# Verifica: manifest, binario (presencia, permisos, formato ELF), interpreter/rpath,
-# integridad del binario post-patchelf, coherencia con sha256.txt, attestation
-# registrada, wrapper (LD_PRELOAD/LD_LIBRARY_PATH), loader glibc, nsswitch, y
-# ejecución real. Sale con código 1 si hay fallos.
 
 set -uo pipefail
 
@@ -36,7 +25,6 @@ fail() { printf '%sFAIL%s: %s\n' "$RED"   "$NC" "$1"; FAILS=$((FAILS + 1)); }
 warn() { printf '%sWARN%s: %s\n' "$ORANGE" "$NC" "$1"; WARNS=$((WARNS + 1)); }
 note() { printf '%s      %s%s\n' "$MUTED" "$1" "$NC"; }
 
-# Resolver loader según arquitectura
 case "$(uname -m)" in
   aarch64)
     LOADER="$GLIBC_LIB/ld-linux-aarch64.so.1"
@@ -77,7 +65,6 @@ lookup_hashfile() {
   printf '%s' "$res"
 }
 
-# ── Argumento ─────────────────────────────────────────────────────────────────
 if [[ $# -lt 1 ]]; then
   echo "Uso: verify.sh <herramienta>"
   echo "Herramientas disponibles:"
@@ -100,7 +87,6 @@ if [[ ! -f "$CONF" ]]; then
   exit 1
 fi
 
-# Cargar configuración
 APP_NAME=""; DISPLAY_NAME=""; ELF_NAME=""; CHECKSUM_ALGO="sha256"
 CHECKSUM_SOURCE="hashfile"; NEEDS_PATCHELF=true; EXEC_DIRECT=false
 ALIASES=""; EXTRA_BINS=""; WRAPPER_UNSET_ENV=""; WRAPPER_RUNNER=""
@@ -114,7 +100,6 @@ WRAPPER="$PREFIX/bin/$APP_NAME"
 
 printf '=== Verificación de %s en Termux ===\n\n' "$DISPLAY_NAME"
 
-# ── 1. Manifest ───────────────────────────────────────────────────────────────
 M_VERSION=""; M_TAG=""; M_CHECKSUM_PATCHED=""; M_CHECKSUM_TARBALL=""
 M_INTERP=""; M_RPATH=""; M_ATTEST=""; M_NEEDS_PATCHELF=""
 M_CHECKSUM_ALGO="$CHECKSUM_ALGO"
@@ -181,7 +166,6 @@ if [[ -n "$M_WRAPPER_RUNNER" || -n "$WRAPPER_RUNNER" ]]; then
   fi
 fi
 
-# ── 2. Binario presente y ejecutable ──────────────────────────────────────────
 if [[ -f "$BIN_FILE" ]]; then
   pass "Binario presente: $BIN_FILE"
   if [[ -x "$BIN_FILE" ]]; then
@@ -193,7 +177,6 @@ else
   fail "Binario NO encontrado: $BIN_FILE"
 fi
 
-# ── 3. Formato ELF ────────────────────────────────────────────────────────────
 if [[ -f "$BIN_FILE" ]]; then
   if command -v file >/dev/null 2>&1; then
     FT=$(file "$BIN_FILE" 2>/dev/null || true)
@@ -207,7 +190,6 @@ if [[ -f "$BIN_FILE" ]]; then
   fi
 fi
 
-# ── 4. Interpreter y rpath (solo si patchelf fue aplicado) ────────────────────
 _needs_patchelf="${M_NEEDS_PATCHELF:-$NEEDS_PATCHELF}"
 if [[ "$_needs_patchelf" == "true" && -f "$BIN_FILE" ]]; then
   if command -v patchelf >/dev/null 2>&1; then
@@ -235,9 +217,6 @@ if [[ "$_needs_patchelf" == "true" && -f "$BIN_FILE" ]]; then
   fi
 fi
 
-# ── 5. Integridad del binario post-patchelf ───────────────────────────────────
-# Helper compartido por el binario principal y los compañeros (EXTRA_BINS):
-# compara el checksum actual contra el registrado en el manifest.
 _verify_checksum() {
   local f="$1" expected="$2" desc="$3" actual="" algo="${M_CHECKSUM_ALGO:-sha256}"
   if [[ -z "$expected" ]]; then
@@ -265,18 +244,9 @@ if [[ -f "$BIN_FILE" ]]; then
   _verify_checksum "$BIN_FILE" "$M_CHECKSUM_PATCHED" "del binario"
 fi
 
-# ── 5.2. Binarios compañeros (EXTRA_BINS) ─────────────────────────────────────
-# El binario principal invoca a estos por PATH.
-# El manifest registra su checksum post-patchelf. La lista de extras sale del
-# manifest (fuente de verdad instalada): instalaciones previas a esta feature
-# no la registran y solo emiten WARN, sin auditar nada.
 M_EXTRA_BINS=""
 [[ -f "$MANIFEST" ]] && M_EXTRA_BINS=$(manifest_get extra_bins "$MANIFEST")
 
-# WARN solo si el .conf ACTUAL define EXTRA_BINS y el manifest no los registra
-# (instalación previa a la feature): reinstalar audita los compañeros. Un tool
-# sin EXTRA_BINS tiene el manifest sin el campo por diseño — no es una
-# instalación vieja y no debe emitir ruido.
 if [[ -n "$EXTRA_BINS" && -z "$M_EXTRA_BINS" ]]; then
   warn "Manifest sin extra_bins (instalación previa a esta feature); auditoría de binarios compañeros omitida"
   note "Reinstalá con: bash install.sh $APP_NAME -r para auditar también los binarios compañeros"
@@ -306,9 +276,6 @@ elif [[ -n "$M_EXTRA_BINS" ]]; then
   done
 fi
 
-# ── 6. Cross-check tarball contra sha256.txt (solo CHECKSUM_SOURCE=hashfile) ──
-# El source se toma del manifest (si está registrado) para no depender de
-# cambios posteriores en el .conf. Fallback al .conf por compatibilidad.
 CHECKSUM_SOURCE_INSTALLED="${M_CHECKSUM_SOURCE:-$CHECKSUM_SOURCE}"
 if [[ "$CHECKSUM_SOURCE_INSTALLED" == "hashfile" && -n "$M_CHECKSUM_TARBALL" && -n "$M_TAG" ]]; then
   REG=$(lookup_hashfile "$APP_NAME/$M_TAG")
@@ -323,7 +290,6 @@ if [[ "$CHECKSUM_SOURCE_INSTALLED" == "hashfile" && -n "$M_CHECKSUM_TARBALL" && 
   fi
 fi
 
-# ── 7. Estado de attestation ──────────────────────────────────────────────────
 case "${M_ATTEST:-}" in
   verificada)  pass "Release attestation de GitHub verificada al instalar" ;;
   fallida)     warn "La attestation no pudo verificarse al instalar" ;;
@@ -334,7 +300,6 @@ case "${M_ATTEST:-}" in
   *)           warn "Estado de attestation desconocido: ${M_ATTEST:-}" ;;
 esac
 
-# ── 8. Wrapper ────────────────────────────────────────────────────────────────
 if [[ -x "$WRAPPER" ]]; then
   pass "Wrapper presente: $WRAPPER"
   if grep -q 'unset LD_PRELOAD' "$WRAPPER" && grep -q 'unset LD_LIBRARY_PATH' "$WRAPPER"; then
@@ -357,9 +322,6 @@ if [[ -n "$WRAPPER_UNSET_ENV" && -x "$WRAPPER" ]]; then
   done <<< "$WRAPPER_UNSET_ENV"
 fi
 
-# ── 8.0. Args por defecto (WRAPPER_DEFAULT_ARGS del .conf) ──────────────────
-# Si el .conf define defaults, el wrapper debe contenerlos: un wrapper de una
-# instalación previa al knob los omite. Solo WARN, el CLI sigue andando.
 if [[ -n "${WRAPPER_DEFAULT_ARGS:-}" && -x "$WRAPPER" ]]; then
   _default_toks=()
   read -ra _default_toks <<< "$WRAPPER_DEFAULT_ARGS" || true
@@ -374,10 +336,6 @@ if [[ -n "${WRAPPER_DEFAULT_ARGS:-}" && -x "$WRAPPER" ]]; then
   unset _default_toks _i
 fi
 
-# ── 8.1. Aliases (ALIASES del .conf/manifest) ─────────────────────────────────
-# El manifest es la fuente de verdad instalada; fallback al .conf (mismo
-# patrón que extra_bins, sección 5.2). Sin aliases → se omite: la mayoría de
-# los tools no define ninguno y no debe emitir ni warning ni ruido.
 M_ALIASES=""
 [[ -f "$MANIFEST" ]] && M_ALIASES=$(manifest_get aliases "$MANIFEST")
 [[ -n "$M_ALIASES" ]] || M_ALIASES="$ALIASES"
@@ -390,10 +348,6 @@ for alias_name in $M_ALIASES; do
   fi
 done
 
-# ── 9. Loader glibc y DNS (solo modo overlay; ejecución directa no lo usa) ─────
-# EXEC_DIRECT=true: el binario corre nativo (estático musl o bionic/Android),
-# sin loader glibc ni resolv.conf de glibc. Fuente de verdad: el .conf actual
-# con fallback al manifest (instalaciones previas no lo registran).
 EXEC_DIRECT_CONF="${EXEC_DIRECT:-false}"
 M_EXEC_DIRECT=$(manifest_get exec_direct "$MANIFEST")
 _EXEC_DIRECT="${M_EXEC_DIRECT:-$EXEC_DIRECT_CONF}"
@@ -422,7 +376,6 @@ else
   fi
 fi
 
-# ── 10. Ejecución real ────────────────────────────────────────────────────────
 if [[ -x "$WRAPPER" ]]; then
   if OUT=$("$WRAPPER" --version 2>&1); then
     RUNV=$(normalize_version "$OUT")

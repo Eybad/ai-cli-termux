@@ -1,32 +1,13 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# aicli — Gestor de CLIs de IA para Termux (fachada sobre install.sh/verify.sh)
-#
-# aicli orquesta; la lógica de instalación/verificación vive en install.sh y
-# verify.sh. Patrón fachada: NO se duplica lógica de negocio acá (invariant
-# del repo). La interfaz sigue clig.dev (Command Line Interface Guidelines)
-# y las convenciones de gestores de referencia (mise, uv, gh):
-#   - help en todas las formas: aicli, -h/--help, help, help <sub>, <sub> -h
-#   - exit codes: 0 éxito · 1 error de ejecución · 2 uso inválido
-#   - --help/--version a stdout con exit 0; errores a stderr
-#   - NO_COLOR / TERM=dumb / no-TTY / --no-color → sin colores
-#   - stdout = output primario (listados, JSON); stderr = mensajes de proceso
-#
-# Los CLIs se usan con SUS propios comandos (opencode run, codex exec, ...):
-# aicli solo las gestiona (instalar/actualizar/quitar/auditar). Cada CLI
-# expone su ayuda con <tool> --help — sin comandos redundantes acá.
 
 set -euo pipefail
 
 AICLI_VERSION="1.3.0"
-# Marca de propiedad del wrapper en $PREFIX/bin/aicli (fail-closed en
-# self-install/self-update: nunca se pisa un binario que no sea nuestro).
+# Ownership marker for $PREFIX/bin/aicli wrapper to prevent overwriting third-party binaries.
 AICLI_MARK="aicli-managed: ai-cli-termux"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Resolución del repo (orden): $AI_CLI_TERMUX_DIR (env) → SCRIPT_DIR.
-# El wrapper creado por self-install execa el aicli real del repo, así que
-# SCRIPT_DIR ya es la ruta correcta cuando se corre desde $PREFIX/bin.
 REPO_DIR="${AI_CLI_TERMUX_DIR:-$SCRIPT_DIR}"
 INSTALL_SH="$REPO_DIR/install.sh"
 VERIFY_SH="$REPO_DIR/verify.sh"
@@ -34,42 +15,28 @@ REGISTRY_DIR="$REPO_DIR/registry"
 
 SUBCOMMANDS="install update remove verify list help doctor completion self-install self-update"
 
-# ── Colores (estándar clig.dev: TTY + NO_COLOR + TERM=dumb) ───────────────────
-# Se inicializan en main() (después de parsear --no-color global).
 MUTED=''; GREEN=''; RED=''; ORANGE=''; NC=''
 
 info() { printf '%sINFO%s: %s\n' "$GREEN" "$NC" "$*" >&2; }
 warn() { printf '%sWARN%s: %s\n' "$ORANGE" "$NC" "$*" >&2; }
 err()  { printf '%sERROR%s: %s\n' "$RED" "$NC" "$*" >&2; }
 
-# ── Helpers de registry ──────────────────────────────────────────────────────
-# Lee el valor del primer campo key=... de un registry/*.conf, quitando
-# comentario, espacios y comillas envolventes. Fail-safe: vacío si no está.
 conf_get() {
   local file="$1" key="$2"
-  # Sanitización final (fail-closed): los valores viajan a prints de terminal
-  # (help/list), filas internas y JSON. Bytes de control (0x00-0x1f, 0x7f —
-  # incluye \n, \r, tab y ESC, el vector de ANSI injection) → espacio.
   awk -F= -v k="$key" '
     $1 == k {
       v = $0; sub(/^[^=]*=/, "", v)
-      sub(/#.*$/, "", v)          # comentario de fin de línea
-      gsub(/[ \t]+$/, "", v)      # espacios/ tabs finales
-      gsub(/^[ \t]+/, "", v)      # espacios/ tabs iniciales
-      gsub(/^"|"$/, "", v)        # comillas envolventes
-      gsub(/[\001-\037\177]/, " ", v)   # controles (octal POSIX, mawk+gawk)
-      gsub(/  +/, " ", v)         # colapsa espacios (de controles removidos)
+      sub(/#.*$/, "", v)
+      gsub(/[ \t]+$/, "", v)
+      gsub(/^[ \t]+/, "", v)
+      gsub(/^"|"$/, "", v)
+      gsub(/[\001-\037\177]/, " ", v)
+      gsub(/  +/, " ", v)
       print v
       exit
     }' "$file" | sed 's/ $//'
 }
 
-# Nombres de registry/*.conf. Filtro fail-closed (mismo charset de
-# validate_tool + primer carácter alfanumérico): los nombres viajan a prints de
-# terminal (tabla de list, doctor, help), a completions que el usuario sourcea
-# y a argumentos de install.sh — un .conf con metacharacters o nombre con '-'
-# inicial (colisiona con opciones de compadd en zsh) se descarta de todas las
-# rutas de una vez. Sin pipeline: evita interacciones con pipefail.
 list_registry() {
   local f name
   [[ -d "$REGISTRY_DIR" ]] || return 0
@@ -81,8 +48,6 @@ list_registry() {
   done
 }
 
-# Mismo charset que list_registry (primer carácter alfanumérico): un tool con
-# guion inicial sería parseado como flag por install.sh/verify.sh.
 validate_tool() {
   local t="$1"
   [[ "$t" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || {
@@ -96,7 +61,6 @@ validate_tool() {
   }
 }
 
-# Lee un campo del manifest.txt de un tool instalado.
 manifest_get() {
   local key="$1" mf="$2"
   [[ -f "$mf" ]] || return 0
@@ -112,7 +76,6 @@ check_repo() {
   }
 }
 
-# ── Ayuda ─────────────────────────────────────────────────────────────────────
 usage_short() {
   cat <<EOF
 aicli — gestor de CLIs de IA para Termux (instala, actualiza, audita; sin proot)
@@ -382,22 +345,13 @@ cmd_help() {
   return 2
 }
 
-# ── list ──────────────────────────────────────────────────────────────────────
-# Cache para resultados de resolución de versión. TTL: 5 minutos.
-# Directorio privado (mktemp -d + chmod 700) para evitar symlink TOCTOU.
-RESOLVE_CACHE_TTL=300  # segundos
-RESOLVE_CACHE_DIR=""  # se inicializa en resolve_all_latest (mktemp -d)
+RESOLVE_CACHE_TTL=300
+RESOLVE_CACHE_DIR=""
 
-# Helpers de caché (centralizados para evitar duplicación).
-# Formato del archivo: línea 1 = epoch de expiración, línea 2 = valor.
-# Sin mtime (sin ls/stat/date -d): solo `date +%s` + awk (dep ya exigida
-# en doctor). Archivos viejos (solo valor, sin expiración) se consideran
-# inválidos y se regeneran solos.
-# Retorna 0 si la caché es válida (existe, no es symlink, y no expiró), 1 si no.
 _cache_is_valid() {
   local cache_file="$1"
   test -f "$cache_file" || return 1
-  test -L "$cache_file" && return 1  # symlink → inválido (TOCTOU)
+  test -L "$cache_file" && return 1
   local expiry now_ts
   expiry=$(awk 'NR==1{print; exit}' "$cache_file" 2>/dev/null) || return 1
   case "$expiry" in
@@ -407,18 +361,15 @@ _cache_is_valid() {
   test "$now_ts" -lt "$expiry"
 }
 
-# Lee el resultado de la caché (solo archivos regulares, no symlinks).
 _cache_get() {
   local cache_file="$1"
   test -f "$cache_file" || return 1
-  test -L "$cache_file" && return 1  # symlink → rechazar
+  test -L "$cache_file" && return 1
   awk 'NR==2{print; exit}' "$cache_file" 2>/dev/null
 }
 
-# Escribe un resultado a la caché (solo si no es symlink).
 _cache_set() {
   local cache_file="$1" value="$2"
-  # Si ya existe y es symlink, no pisar (fail-closed).
   test -L "$cache_file" && return 1
   mkdir -p "$(dirname "$cache_file")"
   local now_ts expiry
@@ -427,7 +378,6 @@ _cache_set() {
   printf '%s\n%s\n' "$expiry" "$value" > "$cache_file"
 }
 
-# Limpia archivos de caché expirados.
 _cleanup_resolve_cache() {
   test -d "$RESOLVE_CACHE_DIR" || return 0
   local f
@@ -439,15 +389,9 @@ _cleanup_resolve_cache() {
   done
 }
 
-# Resuelve todas las versiones en paralelo.
-# Delega en install.sh --resolve-version (contrato máquina estable).
-# $1 = nombre del array de tools (nameref).
 resolve_all_latest() {
   local -n _tools_ref=$1
 
-  # Directorio de caché predecible bajo $TMPDIR (privado en Termux, drwx------).
-  # Se reutiliza entre invocaciones para persistir la caché. Fallback igual
-  # que install.sh (nunca /tmp directo: no existe en Termux).
   if test -z "$RESOLVE_CACHE_DIR" || ! test -d "$RESOLVE_CACHE_DIR"; then
     RESOLVE_CACHE_DIR="${TMPDIR:-$PREFIX/tmp}/aicli_resolve"
     mkdir -p "$RESOLVE_CACHE_DIR"
@@ -459,13 +403,11 @@ resolve_all_latest() {
     test -f "$PREFIX/libexec/$tool/manifest.txt" || continue
     cache_file="$RESOLVE_CACHE_DIR/${tool}.latest"
 
-    # Si la caché es válida, no lanzar subproceso.
     if _cache_is_valid "$cache_file"; then
       _cache_get "$cache_file" > "$RESOLVE_CACHE_DIR/${tool}.result"
       continue
     fi
 
-    # Lanzar resolución en background (un solo fork, no N).
     (
       version=$(timeout 20 bash "$INSTALL_SH" "$tool" --resolve-version 2>/dev/null || true)
       case "$version" in
@@ -478,7 +420,6 @@ resolve_all_latest() {
     pids+=("$!")
   done
 
-  # Esperar todos los subprocesos en paralelo.
   local p
   for p in "${pids[@]:-}"; do
     test -n "$p" && wait "$p" || true
@@ -488,10 +429,6 @@ resolve_all_latest() {
 }
 
 json_escape() {
-  # JSON válido ante cualquier contenido de los .conf: escapa \, ", y todo
-  # byte de control (0x01-0x1f, 0x7f) como \u00xx. Los reemplazos del pattern
-  # ${var//pat/rep} se interpretan literalmente (sin re-expansión). IFS local
-  # por si el llamador usa un separador custom (cmd_list/print_json_rows).
   local s="$1" i ch hex
   local IFS=$' \t\n'
   s=${s//\\/\\\\}
@@ -507,8 +444,7 @@ json_escape() {
   done
   printf -v ch '%b' '\177'
   s=${s//$ch/\\u007f}
-  # Bytes altos (0x80-0xff, ej. latin-1): escapar como \u00xx. El JSON queda
-  # siempre válido (mojibake aceptable) ante contenido no-UTF-8 de los .conf.
+  # Escape non-UTF-8 high bytes (0x80-0xff) as \u00xx for valid JSON output.
   for ((i = 128; i <= 255; i++)); do
     printf -v hex '%02x' "$i"
     printf -v ch '%b' "\\$(printf '%03o' "$i")"
@@ -535,8 +471,7 @@ cmd_list() {
   local f app display desc mf tag version installed_at installed update latest
   local rows=() row
   local names=() name
-  # Separador de campos de las filas internas: unit separator (0x1f), que no
-  # puede aparecer en texto de los .conf (un '|' del contenido desalinearía).
+  # ASCII unit separator (0x1f) delimiter prevents collisions with config content.
   local USEP=$'\x1f'
 
   if [[ -n "$filter" ]]; then
@@ -550,8 +485,6 @@ cmd_list() {
     return 1
   }
 
-  # Consultas de red en paralelo (un solo proceso, curls paralelos, caché).
-  # N tools no bloquean el listado N×20s en serie.
   if [[ "$offline" != true ]]; then
     resolve_all_latest names
   fi
@@ -593,8 +526,6 @@ cmd_list() {
     return 0
   fi
 
-  # Tabla: ancho TOOL = nombre más largo (mín. 4); VERSIÓN = versión más larga
-  # visible (mín. 7) para que versiones con +build no desalineen las columnas.
   local w=4 wv=7 n v
   for n in "${names[@]}"; do [[ ${#n} -gt $w ]] && w=${#n}; done
   for row in "${rows[@]}"; do
@@ -659,7 +590,6 @@ print_json_rows() {
   printf '  ]\n}\n'
 }
 
-# ── install / update / remove / verify (delegación pura) ─────────────────────
 cmd_install() {
   [[ $# -ge 1 ]] || { err "Uso: aicli install <tool> [flags]"; err "Ejecutá 'aicli install --help' para los flags."; return 2; }
   [[ "$1" == "-h" || "$1" == "--help" ]] && { help_sub install; return 0; }
@@ -682,8 +612,6 @@ cmd_update() {
       err "--all no acepta más argumentos."
       return 2
     }
-    # Actualiza todos los CLIs instalados (manifest presente), secuencial.
-    # Una falla no detiene al resto; el resumen final y el exit code lo reflejan.
     local tool failed=0 updated=0 skipped=0
     for tool in $(list_registry); do
       if [[ ! -f "$PREFIX/libexec/$tool/manifest.txt" ]]; then
@@ -731,7 +659,6 @@ cmd_verify() {
   exec bash "$VERIFY_SH" "$1"
 }
 
-# ── doctor ────────────────────────────────────────────────────────────────────
 cmd_doctor() {
   local fails=0 warns=0
   pass() { printf '%sPASS%s: %s\n' "$GREEN" "$NC" "$1"; }
@@ -802,7 +729,6 @@ cmd_doctor() {
   return 0
 }
 
-# ── completion ────────────────────────────────────────────────────────────────
 cmd_completion() {
   local shell="${1:-}"
   [[ -n "$shell" ]] || { err "Uso: aicli completion <bash|zsh|fish>"; return 2; }
@@ -814,8 +740,6 @@ cmd_completion() {
   esac
 }
 
-# Lista de tools como una sola línea (sin espacio final) para completions.
-# list_registry ya filtra el charset (fail-closed); aquí solo se unen.
 tools_spaced() {
   list_registry | paste -sd ' ' -
 }
@@ -823,8 +747,7 @@ tools_spaced() {
 comp_bash() {
   local tools; tools=$(tools_spaced)
   cat <<EOF
-# bash completions para aicli — generado por 'aicli completion bash'
-# Instalación: aicli completion bash > ~/.bash_completion.d/aicli && source ~/.bashrc
+# bash completion for aicli
 _aicli() {
   local cur sub
   cur="\${COMP_WORDS[COMP_CWORD]}"
@@ -856,9 +779,6 @@ comp_zsh() {
   local tools; tools=$(tools_spaced)
   cat <<EOF
 #compdef aicli
-# zsh completions para aicli — generado por 'aicli completion zsh'
-# La lista de subcomandos y tools se emite literal (interpolada por bash): zsh
-# tokeniza el texto del script, así que no hace falta word splitting en runtime.
 _aicli() {
   if (( CURRENT == 2 )); then
     compadd $SUBCOMMANDS $tools --version --help --no-color
@@ -877,7 +797,7 @@ EOF
 comp_fish() {
   local tools; tools=$(tools_spaced)
   cat <<EOF
-# fish completions para aicli — generado por 'aicli completion fish'
+# fish completion for aicli
 complete -c aicli -f -a "$SUBCOMMANDS $tools --version --help --no-color" -d 'aicli: gestor de CLIs de IA'
 for t in install update remove verify list
   complete -c aicli -n "__fish_seen_subcommand_from \$t" -f -a "$tools" -d 'CLI de IA'
@@ -887,25 +807,17 @@ complete -c aicli -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fi
 EOF
 }
 
-# ── self-install / self-update ────────────────────────────────────────────────
 write_wrapper() {
   local wrapper="$PREFIX/bin/aicli"
   if ! mkdir -p "$(dirname "$wrapper")"; then
     err "No se pudo crear $(dirname "$wrapper") (¿permisos?)."
     return 1
   fi
-  # Fail-closed: nunca pisar un binario ajeno (puede ser del usuario o de
-  # otro paquete). Solo reescribe si no existe o si lleva NUESTRA marca.
   if [[ -e "$wrapper" || -L "$wrapper" ]] && ! grep -qF "$AICLI_MARK" "$wrapper" 2>/dev/null; then
     err "$wrapper ya existe y no es el wrapper de aicli (sin marca '$AICLI_MARK')."
     err "Fail-closed: no se pisa un binario existente."
     return 1
   fi
-  # La ruta viaja interpolada al heredoc: rechazar los caracteres que el
-  # heredoc expande, interpreta o rompe (" ' $ ` \ y newline) — fail-closed
-  # total ante cualquier ruta inesperada. Mismo patrón que install.sh con
-  # DISPLAY_NAME: grep -F por carácter (los case patterns con comillas
-  # dentro de [ ] son frágiles de parsear).
   local bad
   for bad in '"' "'" '$' '`' $'\\'; do
     if printf '%s' "$REPO_DIR" | grep -qF "$bad"; then
@@ -913,21 +825,17 @@ write_wrapper() {
       return 1
     fi
   done
-  # Newline: NO va por grep -F — un pattern con \n se trata como patrón vacío
-  # múltiple y matchea cualquier input. Case con patrón literal en su lugar.
+  # Match newline via case pattern; grep -F with \n is treated as multiple empty patterns.
   case "$REPO_DIR" in
     *$'\n'*)
       err "Ruta del repo inválida para embeber en el wrapper: $REPO_DIR"
       return 1
       ;;
   esac
-  # Fail-closed también en la escritura: un wrapper truncado sin marca bloquearía
-  # self-install/self-update futuros (el guard de la marca lo rechaza).
   if ! cat > "$wrapper" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 # $AICLI_MARK
-# Wrapper del gestor ai-cli-termux. No editar: se regenera con
-# 'aicli self-install' (o self-update) desde el repositorio.
+# Generated wrapper for ai-cli-termux. Do not edit: regenerated by aicli self-install.
 set -euo pipefail
 exec "$REPO_DIR/aicli" "\$@"
 EOF
@@ -969,7 +877,6 @@ cmd_self_update() {
   fi
 }
 
-# ── Dispatch ──────────────────────────────────────────────────────────────────
 suggest_cmd() {
   local guess="" c
   for c in $SUBCOMMANDS; do
@@ -979,9 +886,7 @@ suggest_cmd() {
 }
 
 main() {
-  # Flags globales antes del subcomando (estándar: tool [global] <sub> ...).
   [[ "${1:-}" == "--no-color" ]] && { NO_COLOR=1; shift; }
-  # Colores tras parsear --no-color (TTY + NO_COLOR + TERM=dumb → sin color).
   if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then
     MUTED=$'\033[0;2m'; GREEN=$'\033[0;32m'; RED=$'\033[0;31m'
     ORANGE=$'\033[38;5;214m'; NC=$'\033[0m'

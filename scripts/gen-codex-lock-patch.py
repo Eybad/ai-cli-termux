@@ -1,35 +1,6 @@
 #!/usr/bin/env python3
-# gen-codex-lock-patch.py — Generador del parche de locks de archivo para Android.
-#
-# std::fs::File::{try_,}{lock,lock_shared}() devuelven io::ErrorKind::Unsupported
-# en Android desde Rust 1.89 (flock no se usa en esa plataforma; ver
-# rust-lang/rust#148325). Este script reescribe el source de codex-rs de forma
-# determinista y fail-closed:
-#
-#   1. Inserta el módulo `file_lock_shim` en el crate root de cada crate con
-#      call sites (delega en std fuera de Android; usa flock(2) directo en
-#      Android, mapeando EWOULDBLOCK a std::fs::TryLockError::WouldBlock).
-#   2. Reemplaza todos los call sites por crate::file_lock_shim::{...}(&recv),
-#      preservando `?`, `match` y `map_err` de cada llamada.
-#      (El prefijo crate:: es obligatorio: desde Rust 1.96 los paths no
-#      calificados hacia módulos del crate root ya no resuelven desde submódulos
-#      anidados — E0433 —; ver docs/adr/0001-release-scheme.md.)
-#   3. Bump de [workspace.package] version → <core>+<build> (--dist-version).
-#
-# Inventario semántico (sin números de línea): INVENTORY es un multiset por
-# archivo de pares (receiver, método). El generador ubica cada par por
-# contenido y verifica que el multiset escaneado coincida exactamente. Un
-# desplazamiento de líneas en el source upstream NO rompe el inventario; una
-# deriva semántica (par nuevo, par removido, cantidad distinta, archivo nuevo)
-# aborta con el inventario propuesto listo para revisar y pegar.
-#
-# Fail-closed: si el source difiere del inventario esperado, aborta con un
-# informe y no deja un árbol a medio parchear.
-#
-# Uso:
-#   gen-codex-lock-patch.py --src <codex-rs> --dist-version <X.Y.Z+BUILD> [--apply]
-#
-# Sin --apply solo verifica el estado (0 = ya parcheado completo, 1 = no).
+# std::fs::File::{try_,}{lock,lock_shared} return Unsupported on Android (rust-lang/rust#148325).
+# Rewrites call sites to flock(2) shims and bumps version.
 
 import argparse
 import re
@@ -37,10 +8,6 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-# ── Inventario esperado de call sites (archivo relativo a codex-rs/) ──
-# Formato: {archivo: {(receiver, método): cantidad}}. Sin números de línea: el
-# generador ubica cada par por contenido y verifica el multiset completo.
-# Fuente: escaneo exhaustivo de codex-rs v0.164.0 (27 sitios en 16 archivos).
 INVENTORY = {
     "app-server-transport/src/transport/unix_socket.rs": {("file", "lock"): 1, ("file", "try_lock"): 1, ("self._file", "try_lock"): 1},
     "arg0/src/lib.rs": {("lock_file", "try_lock"): 3},
@@ -62,32 +29,17 @@ INVENTORY = {
 
 METHODS = ("try_lock", "lock", "lock_shared", "try_lock_shared")
 
-# Umbral mínimo de call sites para el modo dinámico (fail-closed ante fallos del regex).
 MIN_DYNAMIC_SITES = 10
 
-# Receiver: cadena punteada cuyo último identificador contiene "file" o "dir"
-# (heurística que limita el escaneo a receivers tipo archivo/directorio; el
-# compilador es el gate final para receivers que no sean std::fs::File). Exige
-# la llamada completa `()` en una línea: un call site multi-línea no se escanea
-# → verify_inventory aborta ANTES de modificar el árbol (fail-closed, sin árbol
-# a medio parchear).
 SITE_RE = re.compile(r"\b((?:[\w]+\.)*\w*(?:file|dir)\w*)\.(try_lock|lock|lock_shared|try_lock_shared)\(")
 
-# Métodos exclusivos de std::fs::File (bloqueo a nivel OS; Mutex/RwLock no los implementan).
 EXCLUSIVE_FILE_LOCK_RE = re.compile(r"\b((?:[\w]+\.)*\w+)\.(lock_shared|try_lock_shared)\(")
-# Pistas contextuales que indican descriptores de archivo en la misma línea con lock()/try_lock().
 FILE_HINT_RE = re.compile(r"\b(File|OpenOptions|NamedTempFile|tempfile|as_file)\b")
 ANY_LOCK_RE = re.compile(r"\b((?:[\w]+\.)*\w+)\.(lock|try_lock)\(")
 
 
 def strip_line_comment(line: str) -> str:
-    """Corta la línea en el primer `//` fuera de un string literal.
-
-    Un comentario trailing (`x = file.lock()?; // file.try_lock()`) no debe
-    contarse como call site ni reescribirse. Los `/* */` en línea propia ya los
-    descarta is_comment; un bloque `/* */` inline no se maneja (upstream usa
-    `//`; un miss aborta fail-closed por conteo).
-    """
+    """Strip line at the first `//` outside string literals."""
     in_str = False
     i = 0
     while i < len(line) - 1:
@@ -106,30 +58,16 @@ def strip_line_comment(line: str) -> str:
         i += 1
     return line
 
-SHIM = """// ─────────────────────────────────────────────────────────────────────────
-// file_lock_shim: compatibilidad Android para File::{try_,}{lock,lock_shared}
-//
-// Generado por scripts/gen-codex-lock-patch.py (repo ai-cli-termux). No editar.
-//
-// std::fs::File::lock* / try_lock* devuelven io::ErrorKind::Unsupported en
-// android (flock no se usa en esa plataforma; rust-lang/rust#148325). Este
-// módulo usa flock(2) directo en android (bionic lo expone como libc::flock,
-// soportado y sin dependencias) replicando la semántica de std:
-//   - lock / lock_shared: bloqueante (LOCK_EX / LOCK_SH)
-//   - try_lock / try_lock_shared: no bloqueante (| LOCK_NB), EWOULDBLOCK
-//     mapeado a std::fs::TryLockError::WouldBlock (igual que std)
-// En plataformas no-android delega en std (comportamiento original).
-// El CI compila solo para android; la rama no-android se valida por inspección.
-// ─────────────────────────────────────────────────────────────────────────
-#[allow(dead_code)]  // cada crate usa un subconjunto de los cuatro métodos
+SHIM = """// Injected by scripts/gen-codex-lock-patch.py. Provides flock(2) shim on Android (rust-lang/rust#148325).
+#[allow(dead_code)]
 mod file_lock_shim {
     #[cfg(target_os = "android")]
-    const LOCK_SH: i32 = 1; // flock(2): shared lock
+    const LOCK_SH: i32 = 1;
     #[cfg(target_os = "android")]
-    const LOCK_EX: i32 = 2; // flock(2): exclusive lock
+    const LOCK_EX: i32 = 2;
     #[cfg(target_os = "android")]
-    const LOCK_NB: i32 = 4; // flock(2): non-blocking
-    // EAGAIN == EWOULDBLOCK == 11 en Linux/Android (constante ABI estable).
+    const LOCK_NB: i32 = 4;
+    // EAGAIN == EWOULDBLOCK == 11 on Linux/Android ABI.
     #[cfg(target_os = "android")]
     const EWOULDBLOCK: i32 = 11;
 
@@ -180,7 +118,6 @@ mod file_lock_shim {
         f.try_lock_shared()
     }
 
-    /// Bloquea el archivo con lock exclusivo.
     pub fn lock(file: &std::fs::File) -> std::io::Result<()> {
         #[cfg(target_os = "android")]
         {
@@ -192,7 +129,6 @@ mod file_lock_shim {
         }
     }
 
-    /// Bloquea el archivo con lock compartido.
     pub fn lock_shared(file: &std::fs::File) -> std::io::Result<()> {
         #[cfg(target_os = "android")]
         {
@@ -204,7 +140,6 @@ mod file_lock_shim {
         }
     }
 
-    /// Intenta un lock exclusivo no bloqueante (WouldBlock si está tomado).
     pub fn try_lock(file: &std::fs::File) -> Result<(), std::fs::TryLockError> {
         #[cfg(target_os = "android")]
         {
@@ -216,7 +151,6 @@ mod file_lock_shim {
         }
     }
 
-    /// Intenta un lock compartido no bloqueante (WouldBlock si está tomado).
     pub fn try_lock_shared(file: &std::fs::File) -> Result<(), std::fs::TryLockError> {
         #[cfg(target_os = "android")]
         {
@@ -249,7 +183,7 @@ def write_lines(path: Path, lines):
 
 
 def workspace_version(src: Path) -> str:
-    """Versión de [workspace.package] del Cargo.toml raíz (fail-closed si falta)."""
+    """Return root workspace version from Cargo.toml."""
     cargo = src / "Cargo.toml"
     lines = read_lines(cargo)
     in_workspace = False
@@ -266,7 +200,7 @@ def workspace_version(src: Path) -> str:
 
 
 def scan_sites(src: Path):
-    """Todos los call sites (rel, receiver, method) fuera de comentarios y shims."""
+    """Scan call sites (rel_path, receiver, method) outside comments and shims."""
     sites = []
     for p in sorted(src.rglob("*.rs")):
         if "target" in p.parts:
@@ -277,7 +211,6 @@ def scan_sites(src: Path):
                 in_shim = True
             if in_shim or is_comment(line):
                 continue
-            # Pre-filtro barato: cualquier llamada a los métodos de interés contiene "lock".
             if "lock" not in line:
                 continue
             clean = strip_line_comment(line)
@@ -287,7 +220,7 @@ def scan_sites(src: Path):
 
 
 def site_multiset(sites):
-    """Multiset por archivo de (receiver, method)."""
+    """Return multiset of (receiver, method) per file."""
     per_file = {}
     for rel, recv, method in sites:
         per_file.setdefault(rel, Counter())[(recv, method)] += 1
@@ -295,7 +228,7 @@ def site_multiset(sites):
 
 
 def verify_inventory(src: Path):
-    """Compara el multiset escaneado contra INVENTORY; devuelve (problemas, escaneado)."""
+    """Compare scanned sites against INVENTORY."""
     scanned = site_multiset(scan_sites(src))
     problems = []
     for rel, pairs in INVENTORY.items():
@@ -321,7 +254,7 @@ def verify_inventory(src: Path):
 
 
 def proposed_inventory(scanned) -> str:
-    """Inventario propuesto como literal Python (revisar y pegar en INVENTORY)."""
+    """Format proposed INVENTORY literal."""
     lines = ["INVENTORY = {"]
     for rel in sorted(scanned):
         pairs = ", ".join(
@@ -333,13 +266,7 @@ def proposed_inventory(scanned) -> str:
 
 
 def check_call_site_leaks(src: Path):
-    """Detecta llamadas a locks de archivo cuyos receivers no son contemplados por SITE_RE.
-
-    Fail-closed:
-      1. Cualquier llamada a lock_shared() o try_lock_shared() cuyo receiver no contenga 'file' o 'dir'.
-      2. Cualquier llamada a lock() o try_lock() en líneas con pistas explícitas de File
-         (File::, OpenOptions, etc.) cuyo receiver no contenga 'file' o 'dir'.
-    """
+    """Detect file lock calls with receivers unhandled by SITE_RE."""
     leaks = []
     for p in sorted(src.rglob("*.rs")):
         if "target" in p.parts:
@@ -373,7 +300,7 @@ def check_call_site_leaks(src: Path):
 
 
 def derive_crate_roots(src: Path, site_files):
-    """Crate root de cada archivo con call sites: sube hasta src/lib.rs o src/main.rs."""
+    """Find crate roots for call site files."""
     roots = set()
     for rel in site_files:
         d = (src / rel).parent
@@ -393,14 +320,7 @@ def derive_crate_roots(src: Path, site_files):
 
 
 def apply_replacements(src: Path, sites):
-    """Reemplaza todas las ocurrencias de cada par (receiver, method) por el shim.
-
-    Alternación longest-first con \b: evita que un receiver corto (file)
-    corrompa uno largo (lock_file, self.file) por substring. El patrón consume
-    la llamada completa `recv.method()` (ambos paréntesis) y el reemplazo
-    produce `crate::file_lock_shim::method(&recv)`: el `?`/`match`/`map_err`
-    que sigue a la llamada queda intacto.
-    """
+    """Replace (receiver, method) pairs with file_lock_shim calls."""
     by_file = {}
     for rel, recv, method in sites:
         by_file.setdefault(rel, []).append((recv, method))
@@ -417,7 +337,7 @@ def apply_replacements(src: Path, sites):
             for i, (recv, method) in enumerate(ordered):
                 if m.group(f"r{i}") is not None:
                     return f"crate::file_lock_shim::{method}(&{recv})"
-            raise AssertionError("alternación sin match")  # inalcanzable
+            raise AssertionError("unreachable alternation match")
 
         total = 0
         for i, line in enumerate(lines):
@@ -429,7 +349,6 @@ def apply_replacements(src: Path, sites):
             if prefix == line:
                 new_line, n = pattern.subn(repl, line)
             else:
-                # Comentario trailing: reemplazar solo en el prefijo real.
                 new_line, n = pattern.subn(repl, prefix)
                 new_line += line[len(prefix):]
             if n:
@@ -479,7 +398,7 @@ def bump_version(src: Path, dist_version: str):
 
 
 def has_shim(src: Path) -> bool:
-    """¿Algún .rs del árbol contiene el shim? (gate de idempotencia)."""
+    """Check if any source file contains file_lock_shim."""
     for p in src.rglob("*.rs"):
         if "target" in p.parts:
             continue
@@ -530,9 +449,6 @@ def main(argv=None):
         )
 
     sites = scan_sites(src)
-    # Estado ya-parcheado (idempotencia): versión con +build, sin call sites
-    # activos y con el shim presente en el árbol (gate equivalente al del
-    # generador anterior: shim en todos los crate roots).
     already = ("+" in full_version) and not sites and has_shim(src)
 
     if already:
@@ -582,7 +498,6 @@ def main(argv=None):
     apply_replacements(src, sites)
     bump_version(src, args.dist_version)
 
-    # Post-checks (fail-closed: si algo quedó sin parchear, abortar).
     remaining = scan_sites(src)
     if remaining:
         print("ERROR: post-check fallido, quedan call sites activos:", file=sys.stderr)

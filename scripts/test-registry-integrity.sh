@@ -12,7 +12,6 @@ pass() {
   printf 'PASS: %s\n' "$1"
 }
 
-# 1. Verificar herramientas en registry/
 expected_tools="agy codex opencode"
 actual_tools=$(cd "$repo_dir/registry" && find . -maxdepth 1 -name '*.conf' | sed -e 's|^\./||' -e 's|\.conf$||' | sort | tr '\n' ' ' | sed 's/ $//')
 
@@ -21,7 +20,6 @@ if [[ "$actual_tools" != "$expected_tools" ]]; then
 fi
 pass "Registro contiene únicamente las herramientas soportadas: $actual_tools"
 
-# 2. Verificar que las herramientas eliminadas son rechazadas con exit code 2
 deleted_tools=("kiro-cli" "cursor-agent" "copilot")
 for t in "${deleted_tools[@]}"; do
   if "$repo_dir/aicli" verify "$t" >/dev/null 2>&1; then
@@ -40,11 +38,9 @@ for t in "${deleted_tools[@]}"; do
 done
 pass "Herramientas eliminadas (kiro-cli, cursor-agent, copilot) son rechazadas con exit code 2"
 
-# 3. Validar invariantes de cada .conf activo
 for conf in "$repo_dir/registry"/*.conf; do
   tool_name=$(basename "$conf" .conf)
 
-  # Campos obligatorios
   for key in APP_NAME DISPLAY_NAME RELEASE_SOURCE CHECKSUM_ALGO CHECKSUM_SOURCE ELF_NAME; do
     val=$(awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/,""); gsub(/(^"|"$)/,""); print; exit }' "$conf")
     [[ -n "$val" ]] || fail "Tool $tool_name falta campo obligatorio: $key"
@@ -59,7 +55,6 @@ for conf in "$repo_dir/registry"/*.conf; do
 done
 pass "Invariantes y campos obligatorios de .conf restantes validados"
 
-# 4. Validar completions dinámicos de aicli
 bash_comp=$("$repo_dir/aicli" completion bash)
 for t in "${deleted_tools[@]}"; do
   if printf '%s' "$bash_comp" | grep -qw "$t"; then
@@ -73,7 +68,6 @@ for t in agy codex opencode; do
 done
 pass "aicli completion expone únicamente las herramientas activas"
 
-# 5. Validar estructura de aicli list --json
 json_out=$("$repo_dir/aicli" list --offline --json)
 tools_in_json=$(printf '%s' "$json_out" | jq -r '.tools[].name' | sort | tr '\n' ' ' | sed 's/ $//')
 if [[ "$tools_in_json" != "$expected_tools" ]]; then
