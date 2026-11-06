@@ -155,7 +155,7 @@ runner_name=runner.sh
 runner_checksum_sha256=$verify_runner_checksum
 EOF
 
-if ! PREFIX="$verify_prefix" "$verify_repo/verify.sh" opencode > "$test_root/verify.out" 2>&1; then
+if ! PREFIX="$verify_prefix" bash "$verify_repo/verify.sh" opencode > "$test_root/verify.out" 2>&1; then
   cat "$test_root/verify.out" >&2
   fail 'verify.sh rechazó el bundle sintético íntegro'
 fi
@@ -167,7 +167,7 @@ fi
 printf 'PASS: verify.sh acepta runner y wrapper sintéticos íntegros\n'
 
 printf '\n' >> "$verify_runner"
-if PREFIX="$verify_prefix" "$verify_repo/verify.sh" opencode > "$test_root/verify-tampered.out" 2>&1; then
+if PREFIX="$verify_prefix" bash "$verify_repo/verify.sh" opencode > "$test_root/verify-tampered.out" 2>&1; then
   fail 'verify.sh aceptó un runner modificado'
 fi
 grep -Fq 'Checksum SHA256 incorrecto para el runner runner.sh' "$test_root/verify-tampered.out" ||
