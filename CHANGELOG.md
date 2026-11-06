@@ -9,13 +9,13 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 ### Added
 
 - **CI automático** (`.github/workflows/ci.yml`): shellcheck estricto de `install.sh`/`verify.sh`/`aicli`, shellcheck de `registry/*.conf` y `registry/lib/*.sh`, sintaxis Python de los generadores/parches y validación declarativa de los registros (campos obligatorios + invariantes EXEC_DIRECT/EXTRA_BINS/ENTRY_POINT/ALIASES/RELEASE_SOURCE). Corre en push a main y PRs.
-- **`registry/lib/shims.sh`**: helpers compartidos de `pre_wrapper_hook` (`tool_shims_reset`, `tool_browser_shims`, `tool_clipboard_shims`). codex/agy/cursor-agent sourcean el lib en vez de duplicar ~200 líneas; lógica idéntica (ownership por marcador, migración pre-ownership, guardias FIFO-safe, contrato reset-antes-de-append con fail-safe). cursor-agent sigue sin crear shims de portapapeles.
+- **`registry/lib/shims.sh`**: helpers compartidos de `pre_wrapper_hook` (`tool_shims_reset`, `tool_browser_shims`, `tool_clipboard_shims`). codex/agy sourcean el lib en vez de duplicar ~200 líneas; lógica idéntica (ownership por marcador, migración pre-ownership, guardias FIFO-safe, contrato reset-antes-de-append con fail-safe).
 - **`aicli update --all`**: actualiza todos los CLIs instalados (manifest presente), secuencial; una falla no detiene al resto y el exit code lo refleja (0 todo OK, 1 hubo fallas). `AICLI_VERSION` → 1.3.0. Completions bash/zsh/fish actualizadas.
 - **Dependabot** (`.github/dependabot.yml`, github-actions semanal) para refrescar los pins por SHA de las actions, y **SECURITY.md** (canal de reporte privado + modelo de confianza de la cadena).
-- **`copilot`** (GitHub Copilot CLI): nuevo tool. Tarball oficial `copilot-linux-{ARCH}.tar.gz` con un único ELF self-contained (runtime Node/V8 embebido, ~167 MB) patcheado al overlay glibc (`NEEDS_PATCHELF=true`); `release_digest` fail-closed (el vendor no publica attestations). Auto-update deshabilitado (`COPILOT_AUTO_UPDATE=false` + `WRAPPER_DENY_ARGS="update"`): el updater interno descarga paquetes a `~/.cache/copilot` fuera del fail-closed del instalador (issues #3696/#3328). Shims de navegador/portapapeles para el login OAuth + resolv.conf glibc (patrón agy/cursor-agent). Requiere suscripción Copilot activa.
 
 ### Removed
 
+- **`kiro-cli`**, **`cursor-agent`**, **`copilot`**: eliminados del registro y soporte del proyecto.
 - **Workflow `update-hashes.yml`**: la actualización de hashes vía CI era la pieza más manual y redundante (digest API + attestation ya son automáticos y fail-closed). `sha256.txt` queda como fuente obligatoria para tools `hashfile` y pinning opcional para el resto, con instrucciones dentro del propio archivo. Pin opcional de `opencode/v1.18.9` eliminado.
 
 ### Changed

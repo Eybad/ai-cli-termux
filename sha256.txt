@@ -43,19 +43,5 @@
 # opencode — https://github.com/anomalyco/opencode/releases
 # Pin opcional: la instalación default usa el digest de la GitHub API.
 
-# kiro-cli — usa el SHA256 del manifest.json del CDN (stable/latest/manifest.json)
-# No agregar entradas para kiro-cli acá: el manifest remoto es la fuente.
-
 # agy (Antigravity CLI) — usa el SHA512 del manifest JSON de Google.
 # No agregar entradas para agy acá.
-
-# Tool hashfile (CDN propio sin manifest ni digest público) — pin OBLIGATORIO.
-# Actualización manual: detectar la versión nueva en el script de install del
-# vendor, descargar el tarball, sha256sum y actualizar la entrada.
-cursor-agent/v2026.07.23-e383d2b  f40b99647cb24e0da885e97620a2048034f1fe8961910d573d827d77c4d26dcb
-
-# copilot — https://github.com/github/copilot-cli/releases
-# Pin TOFU inicial (v1.0.80, verificado manualmente contra el digest de la API):
-# el vendor no publica attestations (API → 404), así que el pin del repo gana
-# sobre el digest remoto para este tag (fail-closed de doble fuente).
-copilot/v1.0.80  3ed85e711955e13be523bf492bc6c93b40b69925bcb7f817c9d08abf4839cf89

@@ -1,6 +1,6 @@
 # registry/lib/shims.sh — Helpers compartidos de pre_wrapper_hook
 #
-# Sourceado por los hooks de registry/*.conf (codex, agy, cursor-agent):
+# Sourceado por los hooks de registry/*.conf (codex, agy):
 #
 #   source "$SCRIPT_DIR/registry/lib/shims.sh"
 #

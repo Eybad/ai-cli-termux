@@ -266,7 +266,7 @@ if [[ -f "$BIN_FILE" ]]; then
 fi
 
 # ── 5.2. Binarios compañeros (EXTRA_BINS) ─────────────────────────────────────
-# El binario principal invoca a estos por PATH (ej: kiro-cli → kiro-cli-chat).
+# El binario principal invoca a estos por PATH.
 # El manifest registra su checksum post-patchelf. La lista de extras sale del
 # manifest (fuente de verdad instalada): instalaciones previas a esta feature
 # no la registran y solo emiten WARN, sin auditar nada.

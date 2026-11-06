@@ -238,7 +238,7 @@ Desinstala un CLI por completo: binario, wrapper, aliases, shims registrados
 y manifest de integridad.
 
 Ejemplos:
-  aicli remove kiro-cli
+  aicli remove opencode
 EOF
       ;;
     verify)

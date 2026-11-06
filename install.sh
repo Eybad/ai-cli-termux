@@ -183,9 +183,9 @@ WRAPPER_ENV=""
 WRAPPER_UNSET_ENV=""
 WRAPPER_RUNNER=""
 DOWNLOAD_URL=""
-# Binarios compañeros del bundle que el binario principal invoca por PATH
-# (ej: kiro-cli delega el TUI a kiro-cli-chat). Se patchean igual que ELF_NAME,
-# reciben su propio wrapper en $PREFIX/bin y quedan auditados en el manifest.
+# Binarios compañeros del bundle que el binario principal invoca por PATH.
+# Se patchean igual que ELF_NAME, reciben su propio wrapper en $PREFIX/bin
+# y quedan auditados en el manifest.
 EXTRA_BINS=""
 # Entry point del bundle: si el CLI se ejecuta vía un script del paquete
 # (ej: bundles node/python con launcher bash) en vez del ELF patcheado, el
@@ -193,8 +193,7 @@ EXTRA_BINS=""
 # Requiere NEEDS_PATCHELF=true: el script lanza el ELF del overlay glibc y
 # ELF_NAME sigue siendo el binario auditado por verify.sh.
 ENTRY_POINT=""
-# Alias de comando: symlinks adicionales en $PREFIX/bin apuntando al wrapper
-# (ej: Cursor instala "agent" como nombre primario además de "cursor-agent").
+# Alias de comando: symlinks adicionales en $PREFIX/bin apuntando al wrapper.
 # Fail-closed: no se pisan binarios existentes (ver create_wrapper); se crean
 # con el wrapper y se limpian en uninstall/cleanup.
 ALIASES=""
@@ -582,9 +581,8 @@ _remove_aliases() {
 # Elimina los shims registrados por el pre_wrapper_hook en
 # $LIBEXEC_DIR/shims.txt (una ruta por línea). Guardia de propiedad: solo borra
 # archivos que sigan siendo NUESTROS shims — el marcador es específico del tool
-# (# termux-shim: $APP_NAME), así un shim del otro tool del proyecto (codex y
-# cursor-agent comparten los mismos nombres de navegador) no se borra, y un
-# binario real que el usuario haya instalado después no se toca. Un shim con el
+# (# termux-shim: $APP_NAME), así un shim de otro tool del proyecto
+# no se borra, y un binario real que el usuario haya instalado después no se toca. Un shim con el
 # marcador genérico viejo (pre-ownership) no matchea: se conserva (los hooks lo
 # migran al marcador específico en el próximo install).
 _remove_registered_shims() {
@@ -1082,7 +1080,7 @@ download() {
       ;;
     manifest_json)
       # DOWNLOAD_URL_TEMPLATE (con {ARCH}) tiene prioridad: el path del
-      # manifest puede no ser descargable directo (ej: CDN de kiro-cli).
+      # manifest puede no ser descargable directo.
       url=$(expand_template "${DOWNLOAD_URL_TEMPLATE:-$DOWNLOAD_URL}")
       ;;
     url_template)
@@ -1221,11 +1219,11 @@ _patch_elf() {
     exit 1
   }
   # Dos invocaciones separadas (rpath → interpreter), no una combinada:
-  # patchelf 0.19.1 corrompe ELFs grandes no-PIE (ET_EXEC con debug_info, ej.
-  # el node embebido de cursor-agent) cuando --set-interpreter y --set-rpath se
-  # combinan en una sola llamada: el grow simultáneo de .dynstr e .interp genera
-  # un segmento LOAD que se solapa con el del código y el loader muere (SIGSEGV
-  # antes de resolver libs). El split en dos pasos reubica correctamente.
+  # patchelf 0.19.1 corrompe ELFs grandes no-PIE (ET_EXEC con debug_info)
+  # cuando --set-interpreter y --set-rpath se combinan en una sola llamada:
+  # el grow simultáneo de .dynstr e .interp genera un segmento LOAD que se solapa
+  # con el del código y el loader muere (SIGSEGV antes de resolver libs).
+  # El split en dos pasos reubica correctamente.
   patchelf --set-rpath "$RPATH" "$target" || {
     err "Falló patchelf (rpath) sobre $target"; exit 1
   }
@@ -1253,8 +1251,8 @@ patch_interpreter() {
   BIN_CHECKSUM_PATCHED=$(checksum_of "$BIN_FILE")
 
   # Binarios compañeros del bundle (EXTRA_BINS en el .conf): el binario
-  # principal los invoca por PATH (ej: kiro-cli → kiro-cli-chat), así que
-  # deben quedar con el mismo overlay glibc o crashean/fallan con ENOENT.
+  # principal los invoca por PATH, así que deben quedar con el mismo overlay
+  # glibc o crashean/fallan con ENOENT.
   local extra
   for extra in $EXTRA_BINS; do
     [[ -f "$LIBEXEC_DIR/$extra" ]] || {
