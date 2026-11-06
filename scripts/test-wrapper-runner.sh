@@ -159,17 +159,17 @@ if ! PREFIX="$verify_prefix" bash "$verify_repo/verify.sh" opencode > "$test_roo
   cat "$test_root/verify.out" >&2
   fail 'verify.sh rechazó el bundle sintético íntegro'
 fi
-grep -Fq 'Runner presente, ejecutable e íntegro: runner.sh' "$test_root/verify.out" ||
-  fail 'verify.sh no informó integridad del runner'
+grep -Fq 'Runner present, executable, and verified: runner.sh' "$test_root/verify.out" ||
+  fail 'verify.sh did not report runner integrity'
 if grep -Fq 'WRAPPER_RUNNER' "$test_root/verify.out"; then
-  fail 'verify.sh reportó un problema con WRAPPER_RUNNER'
+  fail 'verify.sh reported an issue with WRAPPER_RUNNER'
 fi
-printf 'PASS: verify.sh acepta runner y wrapper sintéticos íntegros\n'
+printf 'PASS: verify.sh accepts verified synthetic runner and wrapper\n'
 
 printf '\n' >> "$verify_runner"
 if PREFIX="$verify_prefix" bash "$verify_repo/verify.sh" opencode > "$test_root/verify-tampered.out" 2>&1; then
-  fail 'verify.sh aceptó un runner modificado'
+  fail 'verify.sh accepted tampered runner'
 fi
-grep -Fq 'Checksum SHA256 incorrecto para el runner runner.sh' "$test_root/verify-tampered.out" ||
-  fail 'verify.sh no detectó el cambio del runner'
-printf 'PASS: verify.sh detecta cambios posteriores del runner\n'
+grep -Fq 'Incorrect SHA256 checksum for runner runner.sh' "$test_root/verify-tampered.out" ||
+  fail 'verify.sh did not detect runner modification'
+printf 'PASS: verify.sh detects subsequent runner modification\n'

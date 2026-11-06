@@ -5,7 +5,7 @@ set -eu
 TMPDIR="${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}"
 export TMPDIR
 if [ ! -d "$TMPDIR" ] || [ ! -w "$TMPDIR" ]; then
-  printf 'ERROR: TMPDIR no es un directorio escribible: %s\n' "$TMPDIR" >&2
+  printf 'ERROR: TMPDIR is not a writable directory: %s\n' "$TMPDIR" >&2
   exit 1
 fi
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
@@ -23,20 +23,20 @@ elif [ $# -ge 1 ]; then
   binary="$1"
   shift 1
 else
-  printf 'ERROR: Argumentos insuficientes para opencode-runner.sh\n' >&2
+  printf 'ERROR: Insufficient arguments for opencode-runner.sh\n' >&2
   exit 1
 fi
 
 case "$binary" in
   /*) ;;
   *)
-    printf 'ERROR: La ruta del binario debe ser absoluta: %s\n' "$binary" >&2
+    printf 'ERROR: Binary path must be absolute: %s\n' "$binary" >&2
     exit 1
     ;;
 esac
 
 if [ ! -f "$binary" ] || [ ! -x "$binary" ]; then
-  printf 'ERROR: El binario no existe o no es ejecutable: %s\n' "$binary" >&2
+  printf 'ERROR: Binary does not exist or is not executable: %s\n' "$binary" >&2
   exit 1
 fi
 
@@ -44,12 +44,12 @@ if [ -n "$loader" ]; then
   case "$loader" in
     /*) ;;
     *)
-      printf 'ERROR: La ruta del loader debe ser absoluta: %s\n' "$loader" >&2
+      printf 'ERROR: Loader path must be absolute: %s\n' "$loader" >&2
       exit 1
       ;;
   esac
   if [ ! -f "$loader" ] || [ ! -x "$loader" ]; then
-    printf 'ERROR: El loader no existe o no es ejecutable: %s\n' "$loader" >&2
+    printf 'ERROR: Loader does not exist or is not executable: %s\n' "$loader" >&2
     exit 1
   fi
 fi
@@ -116,15 +116,15 @@ fi
 
 case "$first_positional" in
   upgrade|update)
-    printf 'ERROR: El actualizador interno está deshabilitado en Termux. Usá: aicli update opencode\n' >&2
+    printf 'ERROR: Internal updater is disabled on Termux. Use: aicli update opencode\n' >&2
     exit 1
     ;;
   uninstall)
-    printf 'ERROR: La desinstalación en Termux se administra con aicli. Usá: aicli remove opencode\n' >&2
+    printf 'ERROR: Uninstallation on Termux is managed with aicli. Use: aicli remove opencode\n' >&2
     exit 1
     ;;
   service)
-    printf "ERROR: El daemon en segundo plano ('opencode service') no es compatible con el loader glibc de Termux. Ejecutá 'opencode' directamente o usá 'opencode serve' junto con 'opencode --server <url>'.\n" >&2
+    printf "ERROR: Background daemon ('opencode service') is not supported by Termux glibc loader. Run 'opencode' directly or use 'opencode serve' with 'opencode --server <url>'.\n" >&2
     exit 1
     ;;
 esac
@@ -255,7 +255,7 @@ reap_stale_runners() {
     if [ "$server_stopped" -eq 1 ]; then
       rm -rf "$d"
     else
-      printf 'WARN: No se pudo terminar el servidor huérfano (PID %s) tras SIGTERM en %s\n' "$o_server_pid" "$d" >&2
+      printf 'WARN: Failed to terminate orphaned server (PID %s) after SIGTERM in %s\n' "$o_server_pid" "$d" >&2
     fi
   done
 }
@@ -372,7 +372,7 @@ pw=""
 poll_count=0
 while [ "$poll_count" -lt 150 ]; do
   if ! kill -0 "$server_pid" 2>/dev/null && [ ! -d "/proc/$server_pid" ]; then
-    printf 'ERROR: El servidor OpenCode terminó prematuramente:\n' >&2
+    printf 'ERROR: OpenCode server exited prematurely:\n' >&2
     if [ -f "$runner_tmp/server.log" ]; then
       grep -v '^server password ' "$runner_tmp/server.log" | tail -n 20 >&2 || true
     fi
@@ -393,7 +393,7 @@ while [ "$poll_count" -lt 150 ]; do
 done
 
 if [ -z "$port" ] || [ -z "$pw" ]; then
-  printf 'ERROR: Timeout esperando inicio del servidor OpenCode:\n' >&2
+  printf 'ERROR: Timeout waiting for OpenCode server startup:\n' >&2
   if [ -f "$runner_tmp/server.log" ]; then
     grep -v '^server password ' "$runner_tmp/server.log" | tail -n 20 >&2 || true
   fi
@@ -408,13 +408,13 @@ if [ -f "$manifest_file" ]; then
 fi
 
 info_json=$(printf 'user = "opencode:%s"\n' "$pw" | curl -sS -f --config - "http://127.0.0.1:$port/api/info") || {
-  printf 'ERROR: Falló la validación HTTP de /api/info en el servidor OpenCode.\n' >&2
+  printf 'ERROR: HTTP validation of /api/info failed on OpenCode server.\n' >&2
   exit_code=1
   exit 1
 }
 
 printf '%s' "$info_json" | jq -e --arg v "$expected_version" --argjson p "$server_pid" '($v == "" or .version == $v) and .pid == $p' >/dev/null || {
-  printf 'ERROR: /api/info no coincide con versión o PID del servidor.\n' >&2
+  printf 'ERROR: /api/info does not match server version or PID.\n' >&2
   exit_code=1
   exit 1
 }

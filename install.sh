@@ -27,24 +27,24 @@ err()  { log "${RED}ERROR${NC}: $*" >&2; }
 
 usage() {
   cat <<EOF
-Instalador genérico de CLIs de IA para Termux (overlay glibc, sin proot)
+Generic installer for AI CLIs on Termux (glibc overlay, no PRoot)
 
-Uso: install.sh <herramienta> [opciones]
+Usage: install.sh <tool> [options]
 
-Herramientas disponibles:
+Available tools:
 $(list_tools)
 
-Opciones:
-  -h, --help                 Mostrar esta ayuda
-  -v, --version <version>    Instalar una versión específica
-                             (ej: 1.18.9; acepta -prerelease/+build, ej: 0.146.0+android1)
-  -u, --uninstall            Desinstalar
-  -r, --reinstall            Forzar reinstalación
-      --update               Actualizar a la última versión disponible si
-                             ya hay una versión anterior instalada
-      --sha256 <hash>        Pinear el checksum del tarball explícitamente
-      --require-attestation  Abortar si no se puede verificar la attestation
-                             de GitHub (solo herramientas con ATTEST_PREDICATE)
+Options:
+  -h, --help                 Show this help message
+  -v, --version <version>    Install a specific version
+                             (e.g., 1.18.9; accepts -prerelease/+build, e.g., 0.146.0+android1)
+  -u, --uninstall            Uninstall
+  -r, --reinstall            Force reinstallation
+      --update               Update to the latest available version if an earlier
+                             version is already installed
+      --sha256 <hash>        Pin tarball checksum explicitly
+      --require-attestation  Abort if GitHub release attestation cannot be verified
+                             (only for tools with ATTEST_PREDICATE)
 EOF
   exit 0
 }
@@ -57,12 +57,12 @@ list_tools() {
   fi
 }
 
-[[ $# -lt 1 ]] && { err "Falta el nombre de la herramienta."; usage; }
+[[ $# -lt 1 ]] && { err "Missing tool name."; usage; }
 
 TOOL="$1"; shift
 
 if [[ ! "$TOOL" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-  err "Nombre de herramienta inválido: '$TOOL'"
+  err "Invalid tool name: '$TOOL'"
   exit 1
 fi
 
@@ -89,14 +89,14 @@ while [[ $# -gt 0 ]]; do
     --update) UPDATE=true; shift ;;
     --resolve-version) RESOLVE_VERSION=true; shift ;;
     *)
-      err "Opción desconocida: $1"
-      err "Usá --help para ver las opciones."
+      err "Unknown option: $1"
+      err "Use --help to see available options."
       exit 2 ;;
   esac
 done
 
 [[ "$UPDATE" != true || -z "$REQUESTED_VERSION" ]] || {
-  err "--update es incompatible con -v (--update siempre va a la última versión)."
+  err "--update is incompatible with -v (--update always targets the latest version)."
   exit 2
 }
 
@@ -108,18 +108,18 @@ if [[ "$RESOLVE_VERSION" == true ]]; then
   [[ -n "$REQUESTED_VERSION" ]] && bad+=" -v"
   [[ -n "$PINNED_CHECKSUM" ]] && bad+=" --sha256"
   if [[ -n "$bad" ]]; then
-    err "--resolve-version (interfaz máquina interna) es incompatible con:$bad"
-    err "Su contrato: imprimir 'TARGET_VERSION=<versión>' en stdout y nada más."
+    err "--resolve-version (internal machine interface) is incompatible with:$bad"
+    err "Contract: print 'TARGET_VERSION=<version>' on stdout and nothing else."
     exit 2
   fi
 fi
 
 CONF="$REGISTRY_DIR/$TOOL.conf"
 if [[ ! -f "$CONF" ]]; then
-  err "Herramienta desconocida: '$TOOL'"
-  err "Disponibles:"
+  err "Unknown tool: '$TOOL'"
+  err "Available:"
   list_tools >&2
-  err "Para agregar '$TOOL': creá $REGISTRY_DIR/$TOOL.conf"
+  err "To add '$TOOL': create $REGISTRY_DIR/$TOOL.conf"
   exit 1
 fi
 
@@ -148,12 +148,12 @@ WRAPPER_DEFAULT_ARGS=""
 source "$CONF"
 
 if [[ ! "$DOWNLOAD_MAX_TIME" =~ ^[1-9][0-9]{0,4}$ ]]; then
-  err "$CONF: DOWNLOAD_MAX_TIME debe ser un entero entre 1 y 99999 segundos."
+  err "$CONF: DOWNLOAD_MAX_TIME must be an integer between 1 and 99999 seconds."
   exit 1
 fi
 
 if ! release_policy_fields_valid "$VERSION_MAJOR" "$RELEASE_CHANNEL"; then
-  err "$CONF: VERSION_MAJOR debe ser un entero decimal canónico y RELEASE_CHANNEL debe ser vacío o stable."
+  err "$CONF: VERSION_MAJOR must be a canonical decimal integer and RELEASE_CHANNEL must be empty or stable."
   exit 1
 fi
 
@@ -166,44 +166,44 @@ _name_is_valid() {
 }
 for _field in APP_NAME ELF_NAME; do
   _name_is_valid "${!_field}" || {
-    err "$CONF: '$_field' inválido: '${!_field}' (solo [a-zA-Z0-9._-], sin '.' ni '..')."
+    err "$CONF: '$_field' invalid: '${!_field}' (only [a-zA-Z0-9._-], no '.' or '..')."
     exit 1
   }
 done
 if [[ -n "$WRAPPER_RUNNER" ]]; then
   _name_is_valid "$WRAPPER_RUNNER" || {
-    err "$CONF: WRAPPER_RUNNER inválido: '$WRAPPER_RUNNER' (debe ser un basename seguro)."
+    err "$CONF: WRAPPER_RUNNER invalid: '$WRAPPER_RUNNER' (must be a safe basename)."
     exit 1
   }
 fi
 while IFS= read -r _env_name; do
   [[ -z "$_env_name" || "$_env_name" == \#* ]] && continue
   [[ "$_env_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || {
-    err "$CONF: WRAPPER_UNSET_ENV inválido: '$_env_name' (debe contener identificadores de entorno)."
+    err "$CONF: WRAPPER_UNSET_ENV invalid: '$_env_name' (must contain valid environment identifiers)."
     exit 1
   }
 done <<< "$WRAPPER_UNSET_ENV"
 for _bad in '"' "'" '$' '`'; do
   if printf '%s' "$DISPLAY_NAME" | grep -qF "$_bad"; then
-    err "$CONF: DISPLAY_NAME inválido: contiene comillas, \$ , backtick o caracteres de control."
+    err "$CONF: DISPLAY_NAME invalid: contains quotes, \$, backticks, or control characters."
     exit 1
   fi
 done
   # Match newline via case pattern; grep -F with \n is treated as multiple empty patterns.
 case "$DISPLAY_NAME" in
   *$'\n'*|*$'\r'*|*[$'\x01'-$'\x1f'$'\x7f']*)
-    err "$CONF: DISPLAY_NAME inválido: contiene comillas, \$ , backtick o caracteres de control."
+    err "$CONF: DISPLAY_NAME invalid: contains quotes, \$, backticks, or control characters."
     exit 1 ;;
 esac
 
 if [[ -n "$EXTRA_BINS" ]]; then
   if [[ "$NEEDS_PATCHELF" != true ]]; then
-    err "$CONF: EXTRA_BINS requiere NEEDS_PATCHELF=true (los binarios compañeros también necesitan el overlay glibc)."
+    err "$CONF: EXTRA_BINS requires NEEDS_PATCHELF=true (companion binaries also require the glibc overlay)."
     exit 1
   fi
   for _extra in $EXTRA_BINS; do
     _name_is_valid "$_extra" || {
-      err "$CONF: EXTRA_BINS inválido: '$_extra' (solo [a-zA-Z0-9._-], sin '.' ni '..')."
+      err "$CONF: EXTRA_BINS invalid: '$_extra' (only [a-zA-Z0-9._-], no '.' or '..')."
       exit 1
     }
   done
@@ -211,11 +211,11 @@ fi
 
 if [[ -n "$ENTRY_POINT" ]]; then
   _name_is_valid "$ENTRY_POINT" || {
-    err "$CONF: ENTRY_POINT inválido: '$ENTRY_POINT' (solo [a-zA-Z0-9._-], sin '.' ni '..')."
+    err "$CONF: ENTRY_POINT invalid: '$ENTRY_POINT' (only [a-zA-Z0-9._-], no '.' or '..')."
     exit 1
   }
   if [[ "$NEEDS_PATCHELF" != true ]]; then
-    err "$CONF: ENTRY_POINT requiere NEEDS_PATCHELF=true (el script lanza el ELF del overlay glibc)."
+    err "$CONF: ENTRY_POINT requires NEEDS_PATCHELF=true (the script launches the glibc overlay ELF)."
     exit 1
   fi
 fi
@@ -223,33 +223,33 @@ fi
 if [[ -n "$ALIASES" ]]; then
   for _alias in $ALIASES; do
     _name_is_valid "$_alias" || {
-      err "$CONF: ALIASES inválido: '$_alias' (solo [a-zA-Z0-9._-], sin '.' ni '..')."
+      err "$CONF: ALIASES invalid: '$_alias' (only [a-zA-Z0-9._-], no '.' or '..')."
       exit 1
     }
     if [[ "$_alias" == "$APP_NAME" ]]; then
-      err "$CONF: ALIASES no puede repetir APP_NAME ('$APP_NAME' ya es el wrapper)."
+      err "$CONF: ALIASES cannot repeat APP_NAME ('$APP_NAME' is already the wrapper)."
       exit 1
     fi
   done
 fi
 
 if [[ "$EXEC_DIRECT" == true && "$NEEDS_PATCHELF" == true ]]; then
-  err "$CONF: EXEC_DIRECT=true requiere NEEDS_PATCHELF=false (el binario corre nativo, sin overlay glibc)."
+  err "$CONF: EXEC_DIRECT=true requires NEEDS_PATCHELF=false (binary runs natively, without glibc overlay)."
   exit 1
 fi
 
 case "$RELEASE_SOURCE" in
   github)
     [[ -n "$REPO" && -n "$ARCHIVE_TEMPLATE" ]] || {
-      err "$CONF: RELEASE_SOURCE=github requiere REPO y ARCHIVE_TEMPLATE."; exit 1; }
+      err "$CONF: RELEASE_SOURCE=github requires REPO and ARCHIVE_TEMPLATE."; exit 1; }
     ;;
   manifest_json)
     [[ -n "$MANIFEST_URL$MANIFEST_URL_AARCH64$MANIFEST_URL_X86_64" ]] || {
-      err "$CONF: RELEASE_SOURCE=manifest_json requiere MANIFEST_URL (o MANIFEST_URL_AARCH64/_X86_64)."; exit 1; }
+      err "$CONF: RELEASE_SOURCE=manifest_json requires MANIFEST_URL (or MANIFEST_URL_AARCH64/_X86_64)."; exit 1; }
     ;;
   url_template)
     [[ -n "$DOWNLOAD_URL_TEMPLATE" ]] || {
-      err "$CONF: RELEASE_SOURCE=url_template requiere DOWNLOAD_URL_TEMPLATE."; exit 1; }
+      err "$CONF: RELEASE_SOURCE=url_template requires DOWNLOAD_URL_TEMPLATE."; exit 1; }
     ;;
 esac
 
@@ -275,7 +275,7 @@ cleanup() {
 
   if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
     if [[ $rc -ne 0 && "$INSTALL_DONE" != true ]]; then
-      warn "Instalación fallida ($DISPLAY_NAME): restaurando versión anterior..."
+      warn "Installation failed ($DISPLAY_NAME): restoring previous version..."
       _remove_orphan_shims "$BACKUP_DIR/shims.txt"
       _remove_orphan_aliases "$BACKUP_DIR/$(basename "$MANIFEST")"
       rm -rf "$LIBEXEC_DIR"
@@ -289,7 +289,7 @@ cleanup() {
       rm -rf "$BACKUP_DIR"
     fi
   elif [[ $rc -ne 0 && "$INSTALL_DONE" != true && "$FRESH_INSTALL" == true ]]; then
-    warn "Instalación fallida ($DISPLAY_NAME): limpiando archivos incompletos..."
+    warn "Installation failed ($DISPLAY_NAME): cleaning up incomplete files..."
     _remove_registered_shims
     rm -rf "$LIBEXEC_DIR"
     rm -f "$WRAPPER"
@@ -325,8 +325,8 @@ validate_requested_version() {
 
   PARSED_REQUESTED_VERSION=$(parse_version_tag "$REQUESTED_VERSION")
   [[ -n "$PARSED_REQUESTED_VERSION" ]] || {
-    err "Versión inválida: '$REQUESTED_VERSION'"
-    err "Formato esperado: X.Y.Z (opcional: -prerelease y/o +build, ej: 0.146.0+android1)"
+    err "Invalid version: '$REQUESTED_VERSION'"
+    err "Expected format: X.Y.Z (optional: -prerelease and/or +build, e.g., 0.146.0+android1)"
     exit 2
   }
 
@@ -334,13 +334,13 @@ validate_requested_version() {
     local requested_major
     requested_major=$(release_version_major "$PARSED_REQUESTED_VERSION")
     if [[ "$requested_major" != "$VERSION_MAJOR" ]]; then
-      err "$DISPLAY_NAME solo admite major $VERSION_MAJOR; la versión solicitada es $PARSED_REQUESTED_VERSION."
+      err "$DISPLAY_NAME only supports major $VERSION_MAJOR; requested version is $PARSED_REQUESTED_VERSION."
       exit 2
     fi
   fi
 
   if [[ "$RELEASE_CHANNEL" == stable ]] && ! release_version_is_stable "$PARSED_REQUESTED_VERSION"; then
-    err "$DISPLAY_NAME solo admite releases estables; la versión solicitada incluye un prerelease."
+    err "$DISPLAY_NAME only supports stable releases; requested version includes a prerelease."
     exit 2
   fi
 }
@@ -485,14 +485,14 @@ expand_template() {
 
 preflight() {
   if [[ "$RESOLVE_VERSION" != true && ! -d /data/data/com.termux ]]; then
-    err "Esto solo funciona en Termux (no se detectó /data/data/com.termux)."
+    err "This only runs on Termux (/data/data/com.termux not detected)."
     exit 1
   fi
   case "$(uname -m)" in
     aarch64) ARCH="arm64" ;;
     x86_64)  ARCH="amd64" ;;
     *)
-      err "Arquitectura no soportada: $(uname -m). Se soporta aarch64 y x86_64."
+      err "Unsupported architecture: $(uname -m). Only aarch64 and x86_64 are supported."
       exit 1 ;;
   esac
 
@@ -516,14 +516,14 @@ preflight() {
     command -v sha512sum >/dev/null 2>&1 || missing+=(sha512sum)
   fi
   if [[ ${#missing[@]} -gt 0 ]]; then
-    err "Faltan herramientas: ${missing[*]}"
-    err "Instalá con: pkg install curl tar coreutils gawk jq"
+    err "Missing tools: ${missing[*]}"
+    err "Install with: pkg install curl tar coreutils gawk jq"
     exit 1
   fi
 }
 
 uninstall() {
-  info "Desinstalando $DISPLAY_NAME..."
+  info "Uninstalling $DISPLAY_NAME..."
   local extras aliases
   extras=$(installed_extra_bins)
   aliases=$(installed_aliases)
@@ -532,8 +532,8 @@ uninstall() {
   rm -f "$WRAPPER"
   _remove_extra_wrappers "$extras"
   _remove_aliases "$aliases"
-  info "$DISPLAY_NAME eliminado."
-  info "Para remover dependencias si no las necesitás: pkg remove glibc-runner patchelf glibc-repo"
+  info "$DISPLAY_NAME removed."
+  info "To remove unused dependencies: pkg remove glibc-runner patchelf glibc-repo"
   exit 0
 }
 
@@ -583,7 +583,7 @@ github_latest_release_with_asset() {
     esac
 
     if ! selected=$(release_select_from_page "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" < "$body" 2>/dev/null); then
-      err "GitHub API devolvió una lista inválida o assets ambiguos para '$asset_name'."
+      err "GitHub API returned an invalid list or ambiguous assets for '$asset_name'."
       rm -f "$body"
       exit 1
     fi
@@ -594,14 +594,14 @@ github_latest_release_with_asset() {
     fi
 
     if ! page_count=$(jq -er 'if type == "array" then length else error("release response is not an array") end' "$body" 2>/dev/null); then
-      err "GitHub API devolvió una lista de releases inválida."
+      err "GitHub API returned an invalid releases list."
       rm -f "$body"
       exit 1
     fi
     rm -f "$body"
     [[ "$page_count" -gt 0 ]] || break
     if [[ "$page" -eq 10 ]]; then
-      err "No se encontró un release elegible en las primeras diez páginas de GitHub API."
+      err "No eligible release found in the first ten pages of GitHub API."
       exit 1
     fi
     page=$((page + 1))
@@ -619,15 +619,15 @@ resolve_version() {
         asset_name=$(expand_template "$ARCHIVE_TEMPLATE")
         RELEASE_JSON=$(github_latest_release_with_asset "$asset_name")
         if [[ -z "$RELEASE_JSON" ]]; then
-          err "Ningún release de $REPO contiene el asset '$asset_name'."
-          err "Usá -v <version> para instalar una versión específica."
+          err "No release in $REPO contains asset '$asset_name'."
+          err "Use -v <version> to install a specific version."
           exit 1
         fi
         local raw
         raw=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
         VERSION=$(parse_version_tag "$raw")
         [[ -n "$VERSION" ]] || {
-          err "No se pudo extraer la versión de GitHub API (tag: '${raw:-vacío}')"
+          err "Could not extract version from GitHub API (tag: '${raw:-empty}')"
           exit 1
         }
       fi
@@ -639,12 +639,12 @@ resolve_version() {
           RELEASE_JSON=$(github_release_json "tags/$TAG")
         fi
         if ! release_validate_object "$RELEASE_JSON" "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" "$TAG"; then
-          err "El release $TAG no cumple la política de versión/canal o no contiene un asset único '$asset_name'."
+          err "Release $TAG does not meet version/channel policy or does not contain unique asset '$asset_name'."
           exit 1
         fi
         expected_url="https://github.com/$REPO/releases/download/$TAG/$asset_name"
         if ! DOWNLOAD_URL=$(printf '%s' "$RELEASE_JSON" | release_asset_url "$asset_name" "$expected_url" 2>/dev/null); then
-          err "La URL del asset '$asset_name' no coincide con el release $TAG."
+          err "Asset URL for '$asset_name' does not match release $TAG."
           exit 1
         fi
       fi
@@ -657,12 +657,12 @@ resolve_version() {
         x86_64)  [[ -n "$MANIFEST_URL_X86_64" ]]  && manifest_url="$MANIFEST_URL_X86_64" ;;
       esac
       [[ -n "$manifest_url" ]] || {
-        err "Sin MANIFEST_URL para esta arquitectura ($(uname -m)) en $CONF."
+        err "No MANIFEST_URL for this architecture ($(uname -m)) in $CONF."
         exit 1
       }
       local expanded_url version_key url_key checksum_key
       expanded_url=$(expand_template "$manifest_url")
-      info "Consultando manifest remoto..."
+      info "Fetching remote manifest..."
       local manifest_json
       manifest_json=$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 --retry-all-errors "$expanded_url" 2>/dev/null || true)
       [[ -n "$manifest_json" ]] || { err "No se pudo descargar el manifest desde $expanded_url"; exit 1; }
@@ -673,7 +673,7 @@ resolve_version() {
       VERSION=$(json_get "$manifest_json" "$version_key")
       VERSION=$(parse_version_tag "$VERSION")
       [[ -n "$VERSION" ]] || {
-        err "El manifest remoto trae una versión inválida: '$(json_get "$manifest_json" "$version_key")'"
+        err "Remote manifest returned an invalid version: '$(json_get "$manifest_json" "$version_key")'"
         exit 1
       }
       DOWNLOAD_URL=$(json_get "$manifest_json" "$url_key")
@@ -681,14 +681,14 @@ resolve_version() {
       REMOTE_CHECKSUM=$(printf '%s' "$REMOTE_CHECKSUM" | tr 'A-F' 'a-f')
 
       [[ -n "$VERSION" && -n "$REMOTE_CHECKSUM" ]] || {
-        err "El manifest remoto está incompleto o malformado."
-        err "  version:  ${VERSION:-(vacío)}"
-        err "  checksum: ${REMOTE_CHECKSUM:-(vacío)}"
+        err "Remote manifest is incomplete or malformed."
+        err "  version:  ${VERSION:-(empty)}"
+        err "  checksum: ${REMOTE_CHECKSUM:-(empty)}"
         exit 1
       }
       [[ -n "$DOWNLOAD_URL" || -n "$DOWNLOAD_URL_TEMPLATE" ]] || {
-        err "El manifest remoto no provee URL de descarga."
-        err "  Definí DOWNLOAD_URL_TEMPLATE en $CONF para resolver la URL."
+        err "Remote manifest does not provide download URL."
+        err "  Define DOWNLOAD_URL_TEMPLATE in $CONF to resolve download URL."
         exit 1
       }
 
@@ -696,8 +696,8 @@ resolve_version() {
         local req
         req=$(parse_version_tag "$REQUESTED_VERSION")
         [[ "$req" == "$VERSION" ]] || {
-          warn "La versión disponible ($VERSION) no coincide con la solicitada ($req)."
-          warn "Solo está disponible la última versión en el manifest remoto."
+          warn "Available version ($VERSION) does not match requested version ($req)."
+          warn "Only the latest version is available in remote manifest."
         }
       fi
       TAG="v$VERSION"
@@ -709,17 +709,17 @@ resolve_version() {
       else
         VERSION=$(latest_hashfile_version)
         if [[ -z "$VERSION" ]]; then
-          err "$DISPLAY_NAME: no hay ninguna versión registrada en $HASH_FILE."
-          err "Agregá el hash de la versión actual (instrucciones dentro de $HASH_FILE) o usá -v <version>."
+          err "$DISPLAY_NAME: no version registered in $HASH_FILE."
+          err "Add current version checksum (instructions inside $HASH_FILE) or use -v <version>."
           exit 1
         fi
-        info "$DISPLAY_NAME: usando última versión registrada ($VERSION)."
+        info "$DISPLAY_NAME: using latest registered version ($VERSION)."
       fi
       TAG="v$VERSION"
       ;;
 
     *)
-      err "RELEASE_SOURCE desconocido en $CONF: '$RELEASE_SOURCE'"
+      err "Unknown RELEASE_SOURCE in $CONF: '$RELEASE_SOURCE'"
       exit 1
       ;;
     esac
@@ -727,44 +727,44 @@ resolve_version() {
   local resolved_major
   resolved_major=$(release_version_major "$VERSION")
   if [[ -n "$VERSION_MAJOR" && "$resolved_major" != "$VERSION_MAJOR" ]]; then
-    err "La versión resuelta $VERSION no pertenece al major $VERSION_MAJOR de $DISPLAY_NAME."
+    err "Resolved version $VERSION does not belong to major $VERSION_MAJOR of $DISPLAY_NAME."
     exit 1
   fi
   if [[ "$RELEASE_CHANNEL" == stable ]] && ! release_version_is_stable "$VERSION"; then
-    err "La versión resuelta $VERSION no pertenece al canal estable de $DISPLAY_NAME."
+    err "Resolved version $VERSION does not belong to stable channel of $DISPLAY_NAME."
     exit 1
   fi
 
-  info "Versión objetivo: $VERSION ($DISPLAY_NAME)"
+  info "Target version: $VERSION ($DISPLAY_NAME)"
 }
 
 resolve_expected_checksum() {
   if [[ -n "$PINNED_CHECKSUM" ]]; then
     EXPECTED_CHECKSUM=$(printf '%s' "$PINNED_CHECKSUM" | tr 'A-F' 'a-f' | tr -d '[:space:]')
-    warn "Usando checksum pasado con --sha256 (verificalo vos mismo)."
+    warn "Using checksum passed via --sha256 (verify it yourself)."
   else
     case "$CHECKSUM_SOURCE" in
       hashfile)
         EXPECTED_CHECKSUM=$(lookup_hashfile "$APP_NAME/$TAG")
         if [[ -z "$EXPECTED_CHECKSUM" ]]; then
-          err "No hay $CHECKSUM_ALGO registrado para $APP_NAME/$TAG en $HASH_FILE."
-          [[ ! -f "$HASH_FILE" ]] && err "Tampoco existe $HASH_FILE (¿clonaste el repo completo?)."
+          err "No $CHECKSUM_ALGO registered for $APP_NAME/$TAG in $HASH_FILE."
+          [[ ! -f "$HASH_FILE" ]] && err "$HASH_FILE does not exist either (did you clone the full repository?)."
           err ""
-          err "Fail-closed: no se instala sin verificar. Opciones:"
-          err "  1. Agregá el hash a sha256.txt (instrucciones dentro del archivo)."
-          err "  2. Instalá una versión registrada: -v <version>"
-          err "  3. Pineá el hash: --sha256 <hash>"
+          err "Fail-closed: installation aborted without verification. Options:"
+          err "  1. Add hash to sha256.txt (instructions inside file)."
+          err "  2. Install a registered version: -v <version>"
+          err "  3. Pin checksum explicitly: --sha256 <hash>"
           exit 1
         fi
         ;;
       manifest)
         EXPECTED_CHECKSUM="${REMOTE_CHECKSUM:-}"
-        [[ -n "$EXPECTED_CHECKSUM" ]] || { err "El manifest remoto no tiene checksum"; exit 1; }
+        [[ -n "$EXPECTED_CHECKSUM" ]] || { err "Remote manifest does not contain a checksum"; exit 1; }
         ;;
       release_digest)
         EXPECTED_CHECKSUM=$(lookup_hashfile "$APP_NAME/$TAG")
         if [[ -n "$EXPECTED_CHECKSUM" ]]; then
-          warn "Usando hash pineado en sha256.txt para $APP_NAME/$TAG."
+          warn "Using pinned checksum from sha256.txt for $APP_NAME/$TAG."
         else
           local release_json="$RELEASE_JSON"
           if [[ -z "$release_json" ]]; then
@@ -776,16 +776,16 @@ resolve_expected_checksum() {
             | jq -r --arg n "$archive_name" '.assets[]? | select(.name == $n) | .digest // empty' \
               2>/dev/null | head -1 || true)
           [[ -n "$digest" ]] || {
-            err "No se pudo obtener el digest SHA256 del asset '$archive_name' en $APP_NAME/$TAG."
-            err "Opciones: registrá el hash en sha256.txt o usá --sha256 <hash>."
+            err "Could not retrieve SHA256 digest for asset '$archive_name' in $APP_NAME/$TAG."
+            err "Options: register hash in sha256.txt or use --sha256 <hash>."
             exit 1
           }
           EXPECTED_CHECKSUM="${digest#sha256:}"
-          info "Digest SHA256 del release obtenido desde la GitHub API."
+          info "SHA256 release digest retrieved from GitHub API."
         fi
         ;;
       *)
-        err "CHECKSUM_SOURCE desconocido en $CONF: '$CHECKSUM_SOURCE'"
+        err "Unknown CHECKSUM_SOURCE in $CONF: '$CHECKSUM_SOURCE'"
         exit 1 ;;
     esac
   fi
@@ -793,7 +793,7 @@ resolve_expected_checksum() {
   local expected_len
   case "$CHECKSUM_ALGO" in sha256) expected_len=64 ;; sha512) expected_len=128 ;; esac
   if [[ ! "$EXPECTED_CHECKSUM" =~ ^[0-9a-f]{${expected_len}}$ ]]; then
-    err "El checksum esperado no tiene el formato correcto ($CHECKSUM_ALGO, ${expected_len} chars hex):"
+    err "Expected checksum format is incorrect ($CHECKSUM_ALGO, ${expected_len} hex chars):"
     err "  '$EXPECTED_CHECKSUM'"
     exit 1
   fi
@@ -807,13 +807,13 @@ check_current() {
   if [[ -n "$installed_tag" ]]; then
     if [[ "$installed_tag" == "$TAG" && -x "$BIN_FILE" && -x "$WRAPPER" ]]; then
       if [[ "$UPDATE" == true ]]; then
-        info "$DISPLAY_NAME ya está actualizado a la última versión ($VERSION)."
+        info "$DISPLAY_NAME is already up to date ($VERSION)."
       else
-        info "$DISPLAY_NAME $VERSION ya está instalado. Usá -r para reinstalar."
+        info "$DISPLAY_NAME $VERSION is already installed. Use -r to reinstall."
       fi
       exit 0
     fi
-    info "Versión instalada: $installed_tag → actualizando a $TAG"
+    info "Installed version: $installed_tag -> updating to $TAG"
     return 0
   fi
 
@@ -822,32 +822,32 @@ check_current() {
   version_core=$(normalize_version "$VERSION")
   if [[ -n "$installed" && "$installed" == "$version_core" && -x "$BIN_FILE" && -x "$WRAPPER" ]]; then
     if [[ "$UPDATE" == true ]]; then
-      info "$DISPLAY_NAME ya está actualizado a la última versión ($VERSION)."
+      info "$DISPLAY_NAME is already up to date ($VERSION)."
     else
-      info "$DISPLAY_NAME $VERSION ya está instalado. Usá -r para reinstalar."
+      info "$DISPLAY_NAME $VERSION is already installed. Use -r to reinstall."
     fi
     exit 0
   fi
-  [[ -n "$installed" ]] && info "Versión instalada: $installed → actualizando a $VERSION"
+  [[ -n "$installed" ]] && info "Installed version: $installed -> updating to $VERSION"
   return 0
 }
 
 install_deps() {
-  info "Instalando dependencias (glibc-repo, glibc-runner, patchelf, file, jq, curl)..."
-  pkg update -y >/dev/null 2>&1 || warn "pkg update falló; continuando con índices actuales."
+  info "Installing dependencies (glibc-repo, glibc-runner, patchelf, file, jq, curl)..."
+  pkg update -y >/dev/null 2>&1 || warn "pkg update failed; continuing with existing package indexes."
   local deps=(glibc-repo glibc-runner file jq curl)
   [[ "$NEEDS_PATCHELF" == true ]] && deps+=(patchelf)
   if ! pkg install "${deps[@]}" -y; then
-    err "Falló la instalación de dependencias."
-    err "Verificá que Termux esté actualizado: pkg update && pkg upgrade"
+    err "Failed to install dependencies."
+    err "Ensure Termux is up to date: pkg update && pkg upgrade"
     exit 1
   fi
   if [[ "$NEEDS_PATCHELF" == true && ! -f "$LOADER" ]]; then
-    err "Loader glibc no encontrado: $LOADER"
-    err "Ejecutá: pkg install glibc-repo glibc-runner"
+    err "Glibc loader not found: $LOADER"
+    err "Run: pkg install glibc-repo glibc-runner"
     exit 1
   fi
-  info "Loader glibc: $LOADER"
+  info "Glibc loader: $LOADER"
 }
 
 download() {
@@ -870,9 +870,9 @@ download() {
   mkdir -p "$tmp_dir"
   TMP_FILE=$(mktemp "$tmp_dir/$APP_NAME-install-XXXXXX.tar.gz")
 
-  info "Descargando $DISPLAY_NAME $VERSION..."
+  info "Downloading $DISPLAY_NAME $VERSION..."
   if ! curl -fL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time "$DOWNLOAD_MAX_TIME" --retry 3 --retry-delay 2 --retry-all-errors -o "$TMP_FILE" "$url"; then
-    err "Falló la descarga desde $(printf '%s' "$url" | tr -d '[:cntrl:]')"
+    err "Download failed from $(printf '%s' "$url" | tr -d '[:cntrl:]')"
     exit 1
   fi
 }
@@ -880,16 +880,16 @@ download() {
 verify_tarball() {
   TARBALL_CHECKSUM=$(checksum_of "$TMP_FILE")
   if [[ "$TARBALL_CHECKSUM" != "$EXPECTED_CHECKSUM" ]]; then
-    err "${CHECKSUM_ALGO^^} MISMATCH del tarball!"
-    err "  Esperado: $EXPECTED_CHECKSUM"
-    err "  Obtenido: $TARBALL_CHECKSUM"
-    err "No se instala nada."
+    err "Tarball ${CHECKSUM_ALGO^^} MISMATCH!"
+    err "  Expected: $EXPECTED_CHECKSUM"
+    err "  Actual:   $TARBALL_CHECKSUM"
+    err "Installation aborted."
     exit 1
   fi
-  info "${CHECKSUM_ALGO^^} del tarball verificado: ${TARBALL_CHECKSUM:0:24}..."
+  info "Tarball ${CHECKSUM_ALGO^^} verified: ${TARBALL_CHECKSUM:0:24}..."
 
   if ! file "$TMP_FILE" 2>/dev/null | grep -qi 'gzip compressed'; then
-    err "El archivo descargado no es un tarball gzip:"
+    err "Downloaded file is not a gzip tarball:"
     file "$TMP_FILE" >&2 || true
     exit 1
   fi
@@ -902,32 +902,32 @@ verify_attestation() {
   ATTEST_STATUS="omitida"
   if ! command -v gh >/dev/null 2>&1; then
     [[ "$REQUIRE_ATTEST" == true ]] && {
-      err "--require-attestation pero gh no está instalado: pkg install gh"
+      err "--require-attestation specified but gh is not installed: pkg install gh"
       exit 1
     }
-    info "gh no instalado: se omite la attestation (pkg install gh para habilitarla)."
+    info "gh is not installed: skipping attestation (pkg install gh to enable)."
     return 0
   fi
 
-  info "Verificando release attestation de GitHub..."
+  info "Verifying GitHub release attestation..."
   local out
   if out=$(gh attestation verify "$TMP_FILE" \
              --repo "${ATTEST_REPO:-$REPO}" \
              --predicate-type "$ATTEST_PREDICATE" 2>&1); then
     ATTEST_STATUS="verificada"
-    info "Attestation válida: tarball publicado por $REPO."
+    info "Attestation valid: tarball published by $REPO."
     return 0
   fi
 
   ATTEST_STATUS="fallida"
   [[ "$REQUIRE_ATTEST" == true ]] && {
-    err "Falló la verificación de la attestation:"
+    err "Attestation verification failed:"
     printf '%s\n' "$out" >&2
     exit 1
   }
-  warn "No se pudo verificar la attestation (¿gh sin autenticar?)."
-  warn "El checksum ya fue verificado; continuando."
-  warn "Detalle: $(printf '%s' "$out" | head -1)"
+  warn "Could not verify attestation (unauthenticated gh?)."
+  warn "Checksum already verified; proceeding."
+  warn "Detail: $(printf '%s' "$out" | head -1)"
 }
 
 extract_install() {
@@ -945,14 +945,14 @@ extract_install() {
   done < <(find "$EXTRACT_DIR" -type f -name "$ELF_NAME" 2>/dev/null)
 
   if [[ -z "$found" ]]; then
-    err "No se encontró un ELF 64-bit ($EXPECTED_ELF_ARCH) llamado '$ELF_NAME' en el tarball."
-    err "Contenido del tarball:"
+    err "Could not find a 64-bit ELF ($EXPECTED_ELF_ARCH) named '$ELF_NAME' in tarball."
+    err "Tarball contents:"
     find "$EXTRACT_DIR" -type f 2>/dev/null | head -20 >&2
     exit 1
   fi
 
   BIN_CHECKSUM_ORIG=$(checksum_of "$found")
-  info "Binario localizado (${CHECKSUM_ALGO} original: ${BIN_CHECKSUM_ORIG:0:16}...)"
+  info "Binary located (${CHECKSUM_ALGO} original: ${BIN_CHECKSUM_ORIG:0:16}...)"
 
   if [[ -d "$LIBEXEC_DIR" ]]; then
     BACKUP_DIR="$(dirname "$LIBEXEC_DIR")/.$APP_NAME.backup.$$"
@@ -973,54 +973,54 @@ extract_install() {
   fi
   chmod 755 "$BIN_FILE"
   rm -rf "$EXTRACT_DIR"; EXTRACT_DIR=""
-  info "Binario instalado en $BIN_FILE"
+  info "Binary installed in $BIN_FILE"
 }
 
 _patch_elf() {
   local target="$1"
   file "$target" 2>/dev/null | grep -qi "ELF 64-bit.*$EXPECTED_ELF_ARCH" || {
-    err "No es un ELF 64-bit ($EXPECTED_ELF_ARCH) lo que se intenta parchear: $target"
-    err "Revisá ELF_NAME/EXTRA_BINS en registry/$APP_NAME.conf"
+    err "Target to patch is not a 64-bit ELF ($EXPECTED_ELF_ARCH): $target"
+    err "Check ELF_NAME/EXTRA_BINS in registry/$APP_NAME.conf"
     exit 1
   }
   # Separate patchelf calls: patchelf 0.19.1 corrupts non-PIE ELFs when --set-interpreter and --set-rpath are combined.
   patchelf --set-rpath "$RPATH" "$target" || {
-    err "Falló patchelf (rpath) sobre $target"; exit 1
+    err "patchelf (rpath) failed on $target"; exit 1
   }
   patchelf --set-interpreter "$LOADER" "$target" || {
-    err "Falló patchelf (interpreter) sobre $target"; exit 1
+    err "patchelf (interpreter) failed on $target"; exit 1
   }
   local got_interp got_rpath
   got_interp=$(patchelf --print-interpreter "$target" 2>/dev/null || true)
   got_rpath=$(patchelf --print-rpath "$target" 2>/dev/null || true)
   [[ "$got_interp" == "$LOADER" ]] || {
-    err "patchelf no aplicó el interpreter correctamente a $target."
-    err "  Esperado: $LOADER"; err "  Obtenido: ${got_interp:-<vacío>}"; exit 1
+    err "patchelf did not set interpreter correctly on $target."
+    err "  Expected: $LOADER"; err "  Found:    ${got_interp:-<empty>}"; exit 1
   }
   [[ "$got_rpath" == *"$RPATH"* ]] || {
-    err "patchelf no aplicó el rpath correctamente a $target."
-    err "  Esperado contener: $RPATH"; err "  Obtenido: ${got_rpath:-<vacío>}"; exit 1
+    err "patchelf did not set rpath correctly on $target."
+    err "  Expected to contain: $RPATH"; err "  Found:               ${got_rpath:-<empty>}"; exit 1
   }
 }
 
 patch_interpreter() {
   [[ "$NEEDS_PATCHELF" == true ]] || return 0
 
-  info "Aplicando patchelf (interpreter + rpath → overlay glibc)..."
+  info "Applying patchelf (interpreter + rpath -> glibc overlay)..."
   _patch_elf "$BIN_FILE"
   BIN_CHECKSUM_PATCHED=$(checksum_of "$BIN_FILE")
 
   local extra
   for extra in $EXTRA_BINS; do
     [[ -f "$LIBEXEC_DIR/$extra" ]] || {
-      err "EXTRA_BINS: '$extra' no existe en el tarball instalado ($LIBEXEC_DIR)."
-      err "Revisá registry/$APP_NAME.conf."; exit 1
+      err "EXTRA_BINS: '$extra' does not exist in installed tarball ($LIBEXEC_DIR)."
+      err "Check registry/$APP_NAME.conf."; exit 1
     }
     _patch_elf "$LIBEXEC_DIR/$extra"
     EXTRA_PATCHED+="$extra=$(checksum_of "$LIBEXEC_DIR/$extra") "
   done
 
-  info "Interpreter y rpath verificados."
+  info "Interpreter and rpath verified."
 }
 
 ensure_nsswitch() {
@@ -1028,12 +1028,12 @@ ensure_nsswitch() {
   [[ -f "$ns" ]] && return 0
   mkdir -p "$(dirname "$ns")"
   printf 'hosts: files dns\n' > "$ns"
-  info "Creado $ns (resolución DNS de glibc)."
+  info "Created $ns (glibc DNS resolution)."
 }
 
 run_pre_wrapper_hook() {
   if declare -f pre_wrapper_hook >/dev/null 2>&1; then
-    info "Ejecutando pre_wrapper_hook..."
+    info "Running pre_wrapper_hook..."
     pre_wrapper_hook
   fi
 }
@@ -1047,7 +1047,7 @@ _write_wrapper() {
   if [[ "$use_runner" == true && -n "$WRAPPER_RUNNER" ]]; then
     runner_path="$LIBEXEC_DIR/$WRAPPER_RUNNER"
     if [[ ! -f "$runner_path" || ! -x "$runner_path" || -L "$runner_path" ]]; then
-      err "WRAPPER_RUNNER no existe como archivo ejecutable del bundle: $runner_path"
+      err "WRAPPER_RUNNER does not exist as an executable file in bundle: $runner_path"
       exit 1
     fi
   fi
@@ -1079,7 +1079,7 @@ _write_wrapper() {
     for (( i=0; i<${#default_toks[@]}; i++ )); do
       tok="${default_toks[i]}"
       [[ "$tok" =~ ^(--?)?[a-zA-Z0-9_][a-zA-Z0-9_.,=+-]*$ ]] || {
-        err "WRAPPER_DEFAULT_ARGS inválido en $CONF: '$tok' (solo tokens [a-zA-Z0-9_.,=+-] con '-'/'--' inicial opcional, sin espacios ni metacaracteres)."
+        err "Invalid WRAPPER_DEFAULT_ARGS in $CONF: '$tok' (only [a-zA-Z0-9_.,=+-] tokens with optional leading '-'/'--', no spaces or metacharacters)."
         exit 1
       }
       default_args+=" $tok"
@@ -1103,7 +1103,7 @@ _write_wrapper() {
     local item deny_items=""
     for item in $WRAPPER_DENY_ARGS; do
       [[ "$item" =~ ^[a-zA-Z0-9_-]+$ ]] || {
-        err "WRAPPER_DENY_ARGS inválido en $CONF: '$item' (solo [a-zA-Z0-9_-])"
+        err "Invalid WRAPPER_DENY_ARGS in $CONF: '$item' (only [a-zA-Z0-9_-])"
         exit 1
       }
       deny_items+=" $item"
@@ -1158,8 +1158,8 @@ create_wrapper() {
   if [[ -n "$ENTRY_POINT" ]]; then
     local entry_file="$LIBEXEC_DIR/$ENTRY_POINT"
     if [[ ! -f "$entry_file" || ! -x "$entry_file" ]]; then
-      err "ENTRY_POINT: '$ENTRY_POINT' no existe o no es ejecutable en $LIBEXEC_DIR."
-      err "Revisá registry/$APP_NAME.conf."
+      err "ENTRY_POINT: '$ENTRY_POINT' does not exist or is not executable in $LIBEXEC_DIR."
+      err "Check registry/$APP_NAME.conf."
       exit 1
     fi
     exec_target="$entry_file"
@@ -1167,29 +1167,29 @@ create_wrapper() {
   fi
 
   _write_wrapper "$WRAPPER" "$BIN_FILE" "$exec_target"
-  info "Wrapper creado en $WRAPPER"
+  info "Wrapper created at $WRAPPER"
 
   local extra
   for extra in $EXTRA_BINS; do
     _write_wrapper "$PREFIX/bin/$extra" "$LIBEXEC_DIR/$extra" "$LIBEXEC_DIR/$extra" false
-    info "Wrapper creado en $PREFIX/bin/$extra"
+    info "Wrapper created at $PREFIX/bin/$extra"
   done
 
   local alias_name target
   for alias_name in $ALIASES; do
     target="$PREFIX/bin/$alias_name"
     if [[ -L "$target" && "$(readlink "$target")" == "$WRAPPER" ]]; then
-      info "Alias ya presente (reinstall): $target → $WRAPPER"
+      info "Alias already present (reinstall): $target -> $WRAPPER"
       continue
     fi
     if [[ -e "$target" || -L "$target" ]]; then
-      err "ALIASES: '$alias_name' ya existe en $PREFIX/bin y no es un symlink a $WRAPPER."
-      err "Fail-closed: no se pisa un binario existente."
-      err "Renombrá o remové $target, o quitá el alias del .conf."
+      err "ALIASES: '$alias_name' already exists in $PREFIX/bin and is not a symlink to $WRAPPER."
+      err "Fail-closed: will not overwrite existing binary."
+      err "Rename or remove $target, or remove alias from .conf."
       exit 1
     fi
     ln -s "$WRAPPER" "$target"
-    info "Alias creado: $target → $WRAPPER"
+    info "Alias created: $target -> $WRAPPER"
   done
 }
 
@@ -1233,25 +1233,25 @@ runner_checksum_sha256=$runner_checksum_sha256
 ${extra_line}installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   chmod 644 "$MANIFEST"
-  info "Manifest de integridad escrito en $MANIFEST"
+  info "Integrity manifest written to $MANIFEST"
 }
 
 verify_install() {
-  info "Verificando la instalación..."
+  info "Verifying installation..."
   local out
   if ! out=$("$WRAPPER" --version 2>&1); then
-    err "El wrapper no pudo ejecutar $DISPLAY_NAME."
-    err "Salida: $(printf '%s' "$out" | head -3)"
-    err "Probá cerrar y reabrir Termux, o revisá 'bash verify.sh $APP_NAME'."
+    err "Wrapper failed to execute $DISPLAY_NAME."
+    err "Output: $(printf '%s' "$out" | head -3)"
+    err "Try restarting Termux, or check 'bash verify.sh $APP_NAME'."
     exit 1
   fi
   local got version_core
   got=$(normalize_version "$out")
   version_core=$(normalize_version "$VERSION")
   [[ -n "$got" && "$got" != "$version_core" ]] && \
-    warn "Versión reportada ($got) ≠ esperada ($VERSION)."
+    warn "Reported version ($got) != expected ($VERSION)."
   INSTALL_DONE=true
-  info "$DISPLAY_NAME ${got:-$VERSION} funcionando correctamente."
+  info "$DISPLAY_NAME ${got:-$VERSION} is working properly."
 }
 
 show_summary() {
@@ -1273,7 +1273,7 @@ show_summary() {
 
 run_post_install_hook() {
   if declare -f post_install_hook >/dev/null 2>&1; then
-    info "Ejecutando post_install_hook..."
+    info "Running post_install_hook..."
     post_install_hook
   fi
 }

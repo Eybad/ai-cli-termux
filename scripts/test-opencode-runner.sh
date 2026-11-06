@@ -98,10 +98,10 @@ test_blocked() {
   fi
 }
 
-test_blocked "upgrade" "El actualizador interno está deshabilitado en Termux. Usá: aicli update opencode"
-test_blocked "update" "El actualizador interno está deshabilitado en Termux. Usá: aicli update opencode"
-test_blocked "uninstall" "La desinstalación en Termux se administra con aicli. Usá: aicli remove opencode"
-test_blocked "service" "El daemon en segundo plano ('opencode service') no es compatible"
+test_blocked "upgrade" "Internal updater is disabled on Termux. Use: aicli update opencode"
+test_blocked "update" "Internal updater is disabled on Termux. Use: aicli update opencode"
+test_blocked "uninstall" "Uninstallation on Termux is managed with aicli. Use: aicli remove opencode"
+test_blocked "service" "Background daemon ('opencode service') is not supported"
 
 printf 'PASS: subcomandos bloqueados devuelven exit code 1 y mensajes esperados\n'
 
@@ -290,7 +290,7 @@ wait "$stubborn_pid" 2>/dev/null || true
 
 [[ -d "$stubborn_dir" ]] || fail "reap_stale_runners no conservó el directorio del servidor renuente"
 [[ -f "$stubborn_dir/owner.env" ]] || fail "reap_stale_runners no conservó owner.env"
-grep -Fq "WARN: No se pudo terminar el servidor huérfano" "$warn_log" || fail "reap_stale_runners no emitió WARN en stderr"
+grep -Fq "WARN: Failed to terminate orphaned server" "$warn_log" || fail "reap_stale_runners did not emit expected WARN on stderr"
 rm -rf "$stubborn_dir"
 
 printf 'PASS: reap_stale_runners limpia huérfanos con SIGTERM, respeta sesiones vivas y es conservador\n'
