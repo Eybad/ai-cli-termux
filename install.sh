@@ -1122,6 +1122,7 @@ _write_wrapper() {
   fi
 
   cat > "$wrapper_path" <<WRAPPER_EOF
+#!$PREFIX/bin/bash
 set -euo pipefail
 
 BIN="$bin_path"

@@ -60,8 +60,19 @@ export RUNNER_ARGS_FILE="$args_file"
 export RUNNER_SECRET_FILE="$secret_file"
 export RUNNER_CONFIG_FILE="$config_file"
 _write_wrapper "$WRAPPER" "$BIN_FILE" "$BIN_FILE"
+expected_shebang="#!$PREFIX/bin/bash"
+actual_shebang=$(sed -n '1p' "$WRAPPER")
+[[ "$actual_shebang" == "$expected_shebang" ]] ||
+  fail "el wrapper no declaró el intérprete Bash de PREFIX"
+ln -s "$BASH" "$PREFIX/bin/bash"
+wrapper_stderr="$test_root/wrapper-stderr"
 TEST_WRAPPER_SECRET=inherited TEST_WRAPPER_CONFIG=inherited \
-  bash "$WRAPPER" 'argument with spaces' '--option=two words'
+  sh -c 'exec "$1" "$2" "$3"' sh "$WRAPPER" \
+    'argument with spaces' '--option=two words' 2> "$wrapper_stderr"
+[[ ! -s "$wrapper_stderr" ]] || {
+  cat "$wrapper_stderr" >&2
+  fail 'el wrapper produjo errores al ejecutarse desde sh'
+}
 
 cat > "$test_root/expected-args" <<EOF
 $LOADER
@@ -75,7 +86,7 @@ EOF
 cmp -s "$test_root/expected-args" "$args_file" || fail 'el runner no recibió el argv separado y completo'
 grep -Fxq '<unset>' "$secret_file" || fail 'WRAPPER_UNSET_ENV no limpió la variable heredada'
 grep -Fxq 'configured' "$config_file" || fail 'WRAPPER_ENV no se aplicó después de limpiar el entorno'
-printf 'PASS: runner recibe argv exacto y entorno saneado\n'
+printf 'PASS: wrapper declara Bash y el runner recibe argv exacto con entorno saneado\n'
 
 APP_NAME=opencode
 VERSION=2.2.5
