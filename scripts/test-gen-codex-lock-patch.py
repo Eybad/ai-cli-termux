@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
+import contextlib
 import importlib.util
+import io
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -332,6 +335,261 @@ class TestDynamicApply(unittest.TestCase):
                     ])
             finally:
                 gen.MIN_DYNAMIC_SITES = old_min
+
+
+ROLLOUT_LIB = "pub use writer_lock::WriterLockCoordinator;\n"
+
+# Mirrors 0.169.0 rollout/src/writer_lock_tests.rs: File receivers whose names
+# elude SITE_RE, with the coordination.try_lock() call wrapped across lines.
+ROLLOUT_WRITER_LOCK_TESTS = """use super::COORDINATION_LOCK_FILE;
+use std::fs;
+use tempfile::TempDir;
+
+#[test]
+fn rejects_competing_owners() {
+    let home = TempDir::new().expect("temp dir");
+    let opening = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(home.path().join(COORDINATION_LOCK_FILE))
+        .expect("open coordination");
+    opening.lock_shared().expect("another writer is opening");
+    let file = std::fs::File::open("f")?;
+    file.try_lock()?;
+    Ok(())
+}
+
+#[test]
+fn publication_skips_live_writers() {
+    let coordination = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("coord")
+        .expect("open coordination");
+    assert!(matches!(
+        coordination.try_lock(),
+        Err(std::io::ErrorKind::WouldBlock)
+    ));
+    coordination
+        .try_lock()
+        .expect("publication releases coordination");
+}
+"""
+
+
+def build_rollout(root: Path, tests_extra: str = ""):
+    (root / "rollout/src").mkdir(parents=True)
+    (root / "rollout/src/lib.rs").write_text(ROLLOUT_LIB)
+    (root / "rollout/src/writer_lock_tests.rs").write_text(
+        ROLLOUT_WRITER_LOCK_TESTS + tests_extra
+    )
+
+
+class TestExplicitReceivers(unittest.TestCase):
+    def test_scan_includes_explicit_receivers_with_wrapped_call(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            build_rollout(root)
+            sites = [
+                (rel, recv, method)
+                for rel, recv, method in gen.scan_sites(root)
+                if rel == "rollout/src/writer_lock_tests.rs"
+            ]
+            counts = Counter((recv, method) for _, recv, method in sites)
+            self.assertEqual(counts[("opening", "lock_shared")], 1)
+            self.assertEqual(counts[("coordination", "try_lock")], 2)
+            self.assertEqual(counts[("file", "try_lock")], 1)
+
+    def test_dynamic_patches_explicit_receivers(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            build_rollout(root)
+            old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+            gen.MIN_DYNAMIC_SITES = 8
+            try:
+                rc = gen.main([
+                    "--apply",
+                    "--dynamic",
+                    "--src", str(root),
+                    "--dist-version", "0.1.0+android1",
+                ])
+                self.assertEqual(rc, 0)
+                text = (root / "rollout/src/writer_lock_tests.rs").read_text()
+                self.assertIn(
+                    'crate::file_lock_shim::lock_shared(&opening).expect("another writer is opening");',
+                    text,
+                )
+                self.assertIn("crate::file_lock_shim::try_lock(&coordination),", text)
+                self.assertIn(
+                    "crate::file_lock_shim::try_lock(&coordination)\n        .expect(",
+                    text,
+                )
+                self.assertIn("crate::file_lock_shim::try_lock(&file)?;", text)
+                self.assertNotIn("opening.lock_shared()", text)
+                self.assertNotIn("(&coordination))", text)
+                self.assertNotIn("(&opening))", text)
+                self.assertIn("mod file_lock_shim", (root / "rollout/src/lib.rs").read_text())
+                self.assertIn('version = "0.1.0+android1"', (root / "Cargo.toml").read_text())
+                before = {
+                    p.relative_to(root): p.read_bytes()
+                    for p in root.rglob("*")
+                    if p.is_file()
+                }
+                rc_again = gen.main([
+                    "--apply",
+                    "--dynamic",
+                    "--src", str(root),
+                    "--dist-version", "0.1.0+android1",
+                ])
+                self.assertEqual(rc_again, 0)
+                after = {
+                    p.relative_to(root): p.read_bytes()
+                    for p in root.rglob("*")
+                    if p.is_file()
+                }
+                self.assertEqual(before, after)
+            finally:
+                gen.MIN_DYNAMIC_SITES = old_min
+
+    def test_dynamic_leak_aborts_on_receiver_outside_allowlisted_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            beta_lib = root / "beta/src/lib.rs"
+            beta_lib.write_text(
+                beta_lib.read_text()
+                + '\npub fn leak() { let opening = std::fs::File::open("x")?; opening.lock_shared()?; }\n'
+            )
+            old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+            gen.MIN_DYNAMIC_SITES = 5
+            try:
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit):
+                        gen.main([
+                            "--apply",
+                            "--dynamic",
+                            "--src", str(root),
+                            "--dist-version", "0.1.0+android1",
+                        ])
+                self.assertIn("gate de fugas fallido", err.getvalue())
+                self.assertIn("opening.lock_shared()", err.getvalue())
+            finally:
+                gen.MIN_DYNAMIC_SITES = old_min
+
+    def test_dynamic_leak_aborts_on_unlisted_receiver_in_allowlisted_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            build_rollout(
+                root,
+                tests_extra='\nfn leak() { let fd = std::fs::File::open("x")?; fd.lock_shared()?; }\n',
+            )
+            old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+            gen.MIN_DYNAMIC_SITES = 8
+            try:
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit):
+                        gen.main([
+                            "--apply",
+                            "--dynamic",
+                            "--src", str(root),
+                            "--dist-version", "0.1.0+android1",
+                        ])
+                self.assertIn("gate de fugas fallido", err.getvalue())
+                self.assertIn("fd.lock_shared()", err.getvalue())
+            finally:
+                gen.MIN_DYNAMIC_SITES = old_min
+
+    def test_dynamic_aborts_on_explicit_receiver_in_string_or_comment(self):
+        cases = [
+            ("string", '\nfn note() { let _ = "opening.lock_shared()"; }\n'),
+            ("raw_string", '\nfn note() { let _ = r#"coordination.try_lock()"#; }\n'),
+            ("inline_block_comment", '\nfn note() { let x = 1; /* opening.lock_shared() */ let _ = x; }\n'),
+            (
+                "nested_block_comment",
+                '\nfn note() {\n/* outer /* inner */\nopening.lock_shared()\n*/\n}\n',
+            ),
+            ("line_comment", '\nfn note() {\n    // coordination.try_lock()\n}\n'),
+        ]
+        for label, extra in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td) / "codex-rs"
+                    build_tree(root)
+                    build_rollout(root, tests_extra=extra)
+                    target = root / "rollout/src/writer_lock_tests.rs"
+                    original = target.read_text()
+                    old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+                    gen.MIN_DYNAMIC_SITES = 8
+                    try:
+                        with self.assertRaises(SystemExit):
+                            gen.main([
+                                "--apply",
+                                "--dynamic",
+                                "--src", str(root),
+                                "--dist-version", "0.1.0+android1",
+                            ])
+                        self.assertEqual(target.read_text(), original)
+                    finally:
+                        gen.MIN_DYNAMIC_SITES = old_min
+
+    def test_explicit_pattern_ignores_field_and_path_access(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            build_rollout(
+                root,
+                tests_extra=(
+                    "\nfn helpers<'a>(h: &'a Holder) {\n"
+                    "    let r#type = '\"';\n"
+                    "    let _ = r#type;\n"
+                    "    let _ = h.coordination.try_lock();\n"
+                    "    let _ = foo::coordination.try_lock();\n"
+                    "}\n"
+                ),
+            )
+            old_min = getattr(gen, "MIN_DYNAMIC_SITES", 10)
+            gen.MIN_DYNAMIC_SITES = 8
+            try:
+                rc = gen.main([
+                    "--apply",
+                    "--dynamic",
+                    "--src", str(root),
+                    "--dist-version", "0.1.0+android1",
+                ])
+                self.assertEqual(rc, 0)
+                text = (root / "rollout/src/writer_lock_tests.rs").read_text()
+                self.assertIn("let _ = h.coordination.try_lock();", text)
+                self.assertIn("let _ = foo::coordination.try_lock();", text)
+                self.assertNotIn("h.crate::", text)
+                self.assertNotIn("foo::crate::", text)
+                self.assertIn("crate::file_lock_shim::try_lock(&coordination),", text)
+            finally:
+                gen.MIN_DYNAMIC_SITES = old_min
+
+    def test_scan_does_not_double_count_if_explicit_matches_site_re(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "codex-rs"
+            build_tree(root)
+            build_rollout(root)
+            old_explicit = dict(gen.EXPLICIT_FILE_RECEIVERS)
+            gen.EXPLICIT_FILE_RECEIVERS = {
+                **old_explicit,
+                "rollout/src/writer_lock_tests.rs": ("opening", "coordination", "file"),
+            }
+            try:
+                sites = [
+                    (recv, method)
+                    for rel, recv, method in gen.scan_sites(root)
+                    if rel == "rollout/src/writer_lock_tests.rs"
+                ]
+                self.assertEqual(Counter(sites)[("file", "try_lock")], 1)
+            finally:
+                gen.EXPLICIT_FILE_RECEIVERS = old_explicit
 
 
 if __name__ == "__main__":

@@ -31,6 +31,14 @@ METHODS = ("try_lock", "lock", "lock_shared", "try_lock_shared")
 
 MIN_DYNAMIC_SITES = 10
 
+# Receivers holding std::fs::File that elude SITE_RE's (file|dir) name hint
+# (0.169.0 rollout/src/writer_lock_tests.rs opens a File as `opening`).
+# Pinned per file on purpose: any other receiver or file still fails the
+# leak gate closed.
+EXPLICIT_FILE_RECEIVERS = {
+    "rollout/src/writer_lock_tests.rs": ("opening", "coordination"),
+}
+
 SITE_RE = re.compile(r"\b((?:[\w]+\.)*\w*(?:file|dir)\w*)\.(try_lock|lock|lock_shared|try_lock_shared)\(")
 
 EXCLUSIVE_FILE_LOCK_RE = re.compile(r"\b((?:[\w]+\.)*\w+)\.(lock_shared|try_lock_shared)\(")
@@ -199,12 +207,162 @@ def workspace_version(src: Path) -> str:
     raise SystemExit(f"ERROR: [workspace.package] version no encontrado en {cargo}")
 
 
+def explicit_receiver_pattern(rel: str):
+    """Return pattern for a file's allowlisted File receivers."""
+    recv_alt = "|".join(map(re.escape, EXPLICIT_FILE_RECEIVERS[rel]))
+    return re.compile(
+        rf"(?<!\.)(?<!::)\b({recv_alt})\s*\.\s*({'|'.join(METHODS)})\s*\(\s*\)"
+    )
+
+
+def _scan_block_comment(text: str, start: int) -> int:
+    i = start + 2
+    n = len(text)
+    depth = 1
+    while i < n and depth > 0:
+        if text[i] == "/" and i + 1 < n and text[i + 1] == "*":
+            depth += 1
+            i += 2
+        elif text[i] == "*" and i + 1 < n and text[i + 1] == "/":
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
+def _scan_raw_string(text: str, start: int):
+    if start > 0 and (text[start - 1].isalnum() or text[start - 1] == "_"):
+        return None
+    n = len(text)
+    if text[start] == "r":
+        j = start + 1
+    elif text[start] in ("b", "c") and start + 1 < n and text[start + 1] == "r":
+        j = start + 2
+    else:
+        return None
+    hashes = 0
+    while j < n and text[j] == "#":
+        hashes += 1
+        j += 1
+    if j >= n or text[j] != '"':
+        return None
+    closing = '"' + "#" * hashes
+    end = text.find(closing, j + 1)
+    return n if end == -1 else end + len(closing)
+
+
+def _scan_quoted_string(text: str, start: int) -> int:
+    i = start + 1
+    n = len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == '"':
+            return i + 1
+        else:
+            i += 1
+    return n
+
+
+def _scan_char_literal(text: str, start: int):
+    # Match only closed char literals so Rust lifetimes ('a, 'static) stay intact.
+    n = len(text)
+    if start + 2 < n and text[start + 1] not in ("'", "\\", "\n", "\r") and text[start + 2] == "'":
+        return start + 3
+    if start + 1 >= n or text[start + 1] != "\\":
+        return None
+    k = start + 2
+    if k >= n:
+        return None
+    if text[k] == "u" and k + 1 < n and text[k + 1] == "{":
+        k += 2
+        while k < n and text[k] not in ("}", "'", "\n", "\r"):
+            k += 1
+        if k + 1 < n and text[k] == "}" and text[k + 1] == "'":
+            return k + 2
+        return None
+    if text[k] == "x" and k + 3 < n and text[k + 3] == "'":
+        return k + 4
+    if text[k] in ("n", "r", "t", "0", "\\", "'", '"') and k + 1 < n and text[k + 1] == "'":
+        return k + 2
+    return None
+
+
+def _append_masked(out, span: str):
+    out.extend("\n" if ch == "\n" else " " for ch in span)
+
+
+def mask_rust_non_code(text: str) -> str:
+    """Replace Rust comments, strings, and char literals with spaces, preserving newlines."""
+    out = []
+    n = len(text)
+    i = 0
+    while i < n:
+        c = text[i]
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            end = text.find("\n", i + 2)
+            end = n if end == -1 else end
+            _append_masked(out, text[i:end])
+            i = end
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            end = _scan_block_comment(text, i)
+            _append_masked(out, text[i:end])
+            i = end
+            continue
+        if c in ("r", "b", "c"):
+            end = _scan_raw_string(text, i)
+            if end is not None:
+                _append_masked(out, text[i:end])
+                i = end
+                continue
+        if c == '"':
+            end = _scan_quoted_string(text, i)
+            _append_masked(out, text[i:end])
+            i = end
+            continue
+        if c == "'":
+            end = _scan_char_literal(text, i)
+            if end is not None:
+                _append_masked(out, text[i:end])
+                i = end
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def scan_explicit_sites(src: Path, rel: str):
+    """Sites on allowlisted receivers, including calls wrapped across lines.
+
+    Masks comments, strings, and char literals so non-code text never counts
+    as a site; apply_explicit_replacements later fails closed if raw matches
+    differ.
+    """
+    p = src / rel
+    if not p.is_file():
+        return []
+    lines = []
+    for line in read_lines(p):
+        if "mod file_lock_shim" in line:
+            break
+        lines.append(line)
+    masked = mask_rust_non_code("\n".join(lines))
+    pattern = explicit_receiver_pattern(rel)
+    return [(rel, m.group(1), m.group(2)) for m in pattern.finditer(masked)]
+
+
 def scan_sites(src: Path):
     """Scan call sites (rel_path, receiver, method) outside comments and shims."""
     sites = []
     for p in sorted(src.rglob("*.rs")):
         if "target" in p.parts:
             continue
+        rel = str(p.relative_to(src))
+        allowed = EXPLICIT_FILE_RECEIVERS.get(rel, ())
+        if allowed:
+            sites.extend(scan_explicit_sites(src, rel))
         in_shim = False
         for i, line in enumerate(read_lines(p), start=1):
             if "mod file_lock_shim" in line:
@@ -215,7 +373,9 @@ def scan_sites(src: Path):
                 continue
             clean = strip_line_comment(line)
             for m in SITE_RE.finditer(clean):
-                sites.append((str(p.relative_to(src)), m.group(1), m.group(2)))
+                if m.group(1) in allowed:
+                    continue
+                sites.append((rel, m.group(1), m.group(2)))
     return sites
 
 
@@ -272,6 +432,7 @@ def check_call_site_leaks(src: Path):
         if "target" in p.parts:
             continue
         rel = str(p.relative_to(src))
+        allowed = EXPLICIT_FILE_RECEIVERS.get(rel, ())
         in_shim = False
         for line_no, line in enumerate(read_lines(p), start=1):
             if "mod file_lock_shim" in line:
@@ -284,6 +445,8 @@ def check_call_site_leaks(src: Path):
             for m in EXCLUSIVE_FILE_LOCK_RE.finditer(clean):
                 recv = m.group(1)
                 method = m.group(2)
+                if recv in allowed:
+                    continue
                 if not re.search(r"(?:file|dir)", recv, re.IGNORECASE):
                     leaks.append(
                         f"{rel}:{line_no}: llamada a {recv}.{method}() elude SITE_RE (método exclusivo de File)"
@@ -292,6 +455,8 @@ def check_call_site_leaks(src: Path):
                 for m in ANY_LOCK_RE.finditer(clean):
                     recv = m.group(1)
                     method = m.group(2)
+                    if recv in allowed:
+                        continue
                     if not re.search(r"(?:file|dir)", recv, re.IGNORECASE):
                         leaks.append(
                             f"{rel}:{line_no}: posible lock de archivo con receiver '{recv}' que elude SITE_RE ({method})"
@@ -319,6 +484,28 @@ def derive_crate_roots(src: Path, site_files):
     return roots
 
 
+def apply_explicit_replacements(p: Path, rel: str, expected: int):
+    """Rewrite allowlisted-receiver sites on raw text and return the count.
+
+    Raw matches must equal the non-code-masked count: a receiver appearing
+    in a comment or string would rewrite prose, so fail closed instead.
+    """
+    pattern = explicit_receiver_pattern(rel)
+    raw = p.read_text(encoding="utf-8")
+    raw_matches = len(pattern.findall(raw))
+    if raw_matches != expected:
+        raise SystemExit(
+            f"ERROR: {rel}: {raw_matches} matches crudos contra "
+            f"{expected} limpios; receiver permitido en comentario o string"
+        )
+
+    def repl(m):
+        return f"crate::file_lock_shim::{m.group(2)}(&{m.group(1)})"
+
+    p.write_text(pattern.sub(repl, raw), encoding="utf-8")
+    return expected
+
+
 def apply_replacements(src: Path, sites):
     """Replace (receiver, method) pairs with file_lock_shim calls."""
     by_file = {}
@@ -326,40 +513,48 @@ def apply_replacements(src: Path, sites):
         by_file.setdefault(rel, []).append((recv, method))
     for rel, pairs in by_file.items():
         p = src / rel
-        lines = read_lines(p)
-        ordered = sorted(set(pairs), key=lambda r: len(r[0]), reverse=True)
-        alts = []
-        for i, (recv, method) in enumerate(ordered):
-            alts.append(f"(?P<r{i}>{re.escape(recv)})\\.(?P<m{i}>{method})\\(\\)")
-        pattern = re.compile(r"\b(?:" + "|".join(alts) + ")")
-
-        def repl(m):
-            for i, (recv, method) in enumerate(ordered):
-                if m.group(f"r{i}") is not None:
-                    return f"crate::file_lock_shim::{method}(&{recv})"
-            raise AssertionError("unreachable alternation match")
-
+        allowed = EXPLICIT_FILE_RECEIVERS.get(rel, ())
+        explicit_pairs = Counter((r, m) for r, m in pairs if r in allowed)
+        line_pairs = [pair for pair in set(pairs) if pair[0] not in allowed]
         total = 0
-        for i, line in enumerate(lines):
-            if is_comment(line):
-                continue
-            if "lock" not in line:
-                continue
-            prefix = strip_line_comment(line)
-            if prefix == line:
-                new_line, n = pattern.subn(repl, line)
-            else:
-                new_line, n = pattern.subn(repl, prefix)
-                new_line += line[len(prefix):]
-            if n:
-                lines[i] = new_line
-                total += n
+        if explicit_pairs:
+            total += apply_explicit_replacements(p, rel, sum(explicit_pairs.values()))
+        lines = None
+        if line_pairs:
+            lines = read_lines(p)
+            ordered = sorted(line_pairs, key=lambda r: len(r[0]), reverse=True)
+            alts = []
+            for i, (recv, method) in enumerate(ordered):
+                alts.append(f"(?P<r{i}>{re.escape(recv)})\\.(?P<m{i}>{method})\\(\\)")
+            pattern = re.compile(r"\b(?:" + "|".join(alts) + ")")
+
+            def repl(m):
+                for i, (recv, method) in enumerate(ordered):
+                    if m.group(f"r{i}") is not None:
+                        return f"crate::file_lock_shim::{method}(&{recv})"
+                raise AssertionError("unreachable alternation match")
+
+            for i, line in enumerate(lines):
+                if is_comment(line):
+                    continue
+                if "lock" not in line:
+                    continue
+                prefix = strip_line_comment(line)
+                if prefix == line:
+                    new_line, n = pattern.subn(repl, line)
+                else:
+                    new_line, n = pattern.subn(repl, prefix)
+                    new_line += line[len(prefix):]
+                if n:
+                    lines[i] = new_line
+                    total += n
         expected = sum(c for _, c in Counter(pairs).items())
         if total != expected:
             raise SystemExit(
                 f"ERROR: {rel}: se reemplazaron {total} call sites, esperado {expected}"
             )
-        write_lines(p, lines)
+        if lines is not None:
+            write_lines(p, lines)
 
 
 def insert_shim(src: Path, roots):
