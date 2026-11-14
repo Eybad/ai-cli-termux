@@ -112,6 +112,8 @@ if [ "$first_positional" = "help" ] || [ "$first_positional" = "serve" ]; then
   is_exec_direct=1
 elif [ "$first_positional" = "debug" ] && [ "$second_positional" = "paths" ]; then
   is_exec_direct=1
+elif [ "$first_positional" = "mcp" ] && [ "$second_positional" = "add" ]; then
+  is_exec_direct=1
 fi
 
 case "$first_positional" in
@@ -145,22 +147,32 @@ fi
 
 get_proc_stat() {
   [ -r "/proc/$1/stat" ] || return 1
-  awk '{
-    n = split($0, a, ") ")
-    if (n < 2) exit 1
-    split(a[2], b, " ")
-    print b[1], b[2], b[20]
-  }' "/proc/$1/stat" 2>/dev/null
+  { IFS= read -r _stat_line < "/proc/$1/stat"; } 2>/dev/null || return 1
+  case "$_stat_line" in
+    *") "*) _stat_rest="${_stat_line##*) }" ;;
+    *) return 1 ;;
+  esac
+  _old_ifs="$IFS"
+  IFS=' '
+  case "$-" in
+    *f*) _had_noglob=1 ;;
+    *) _had_noglob=0; set -f ;;
+  esac
+  # Word splitting is intentional for space-delimited /proc/<pid>/stat fields.
+  # shellcheck disable=SC2086
+  set -- $_stat_rest
+  [ "$_had_noglob" -eq 0 ] && set +f
+  IFS="$_old_ifs"
+  [ $# -ge 20 ] || return 1
+  _stat_state="$1"
+  _stat_ppid="$2"
+  shift 19
+  printf '%s %s %s\n' "$_stat_state" "$_stat_ppid" "$1"
 }
 
 get_proc_starttime() {
-  [ -r "/proc/$1/stat" ] || return 1
-  awk '{
-    n = split($0, a, ") ")
-    if (n < 2) exit 1
-    split(a[2], b, " ")
-    print b[20]
-  }' "/proc/$1/stat" 2>/dev/null
+  _stat_out=$(get_proc_stat "$1") || return 1
+  printf '%s\n' "${_stat_out##* }"
 }
 
 proc_alive_matching() {
@@ -224,9 +236,10 @@ reap_stale_runners() {
       continue
     fi
 
-    s_state=$(printf '%s\n' "$s_stat" | awk '{print $1}')
-    s_ppid=$(printf '%s\n' "$s_stat" | awk '{print $2}')
-    s_start=$(printf '%s\n' "$s_stat" | awk '{print $3}')
+    s_state="${s_stat%% *}"
+    _s_tail="${s_stat#* }"
+    s_ppid="${_s_tail%% *}"
+    s_start="${_s_tail#* }"
 
     [ "$s_ppid" != "$o_runner_pid" ] || continue
     [ "$s_start" = "$o_server_start" ] || continue
@@ -380,9 +393,23 @@ while [ "$poll_count" -lt 150 ]; do
     exit 1
   fi
 
-  if [ -f "$runner_tmp/server.log" ]; then
-    port=$(sed -n 's#^server listening on http://127\.0\.0\.1:\([0-9]*\)#\1#p' "$runner_tmp/server.log" | tail -n 1)
-    pw=$(sed -n 's#^server password \(.*\)#\1#p' "$runner_tmp/server.log" | tail -n 1)
+  if [ -s "$runner_tmp/server.log" ]; then
+    port=""
+    pw=""
+    while IFS= read -r _log_line || [ -n "$_log_line" ]; do
+      case "$_log_line" in
+        'server listening on http://127.0.0.1:'*)
+          _cand_port="${_log_line#'server listening on http://127.0.0.1:'}"
+          case "$_cand_port" in
+            ''|*[!0-9]*) ;;
+            *) port="$_cand_port" ;;
+          esac
+          ;;
+        'server password '*)
+          pw="${_log_line#'server password '}"
+          ;;
+      esac
+    done < "$runner_tmp/server.log"
     if [ -n "$port" ] && [ -n "$pw" ]; then
       break
     fi
@@ -404,7 +431,15 @@ fi
 expected_version=""
 manifest_file="${binary%/*}/manifest.txt"
 if [ -f "$manifest_file" ]; then
-  expected_version=$(sed -n 's/^version=v*\([0-9.]*\).*/\1/p' "$manifest_file" | head -n 1)
+  while IFS='=' read -r _mkey _mval || [ -n "$_mkey" ]; do
+    if [ "$_mkey" = "version" ]; then
+      while [ "${_mval#v}" != "$_mval" ]; do
+        _mval="${_mval#v}"
+      done
+      expected_version="${_mval%%[!0-9.]*}"
+      break
+    fi
+  done < "$manifest_file"
 fi
 
 info_json=$(printf 'user = "opencode:%s"\n' "$pw" | curl -sS -f --config - "http://127.0.0.1:$port/api/info") || {
