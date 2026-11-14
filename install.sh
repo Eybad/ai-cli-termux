@@ -419,6 +419,30 @@ _remove_aliases() {
   done
 }
 
+_shim_used_by_other_tool() {
+  local shim_name="$1" other_shims other_dir other_base
+  for other_shims in "$PREFIX/libexec"/*/shims.txt; do
+    [[ -f "$other_shims" ]] || continue
+    other_dir="${other_shims%/*}"
+    other_base="${other_dir##*/}"
+    case "$other_base" in
+      .*|"$APP_NAME") continue ;;
+    esac
+    [[ -f "$other_dir/manifest.txt" ]] || continue
+    if grep -qxF "$shim_name" "$other_shims" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+_shim_is_owned() {
+  local shim_path="$1"
+  [[ -f "$shim_path" && ! -L "$shim_path" ]] || return 1
+  grep -qF "termux-shim: ai-cli-termux" "$shim_path" 2>/dev/null \
+    || grep -qF "termux-shim: $APP_NAME" "$shim_path" 2>/dev/null
+}
+
 _remove_registered_shims() {
   local shims_file="$LIBEXEC_DIR/shims.txt"
   [[ -f "$shims_file" ]] || return 0
@@ -426,8 +450,9 @@ _remove_registered_shims() {
   while IFS= read -r name; do
     [[ -z "$name" || "$name" == \#* ]] && continue
     _name_is_valid "$name" || continue
+    _shim_used_by_other_tool "$name" && continue
     shim="$PREFIX/bin/$name"
-    if [[ -f "$shim" ]] && grep -qF "termux-shim: $APP_NAME" "$shim" 2>/dev/null; then
+    if _shim_is_owned "$shim"; then
       rm -f "$shim"
     fi
   done < "$shims_file"
@@ -441,8 +466,9 @@ _remove_orphan_shims() {
     [[ -z "$name" || "$name" == \#* ]] && continue
     _name_is_valid "$name" || continue
     grep -qxF "$name" "$prev_file" && continue
+    _shim_used_by_other_tool "$name" && continue
     shim="$PREFIX/bin/$name"
-    if [[ -f "$shim" ]] && grep -qF "termux-shim: $APP_NAME" "$shim" 2>/dev/null; then
+    if _shim_is_owned "$shim"; then
       rm -f "$shim"
     fi
   done < "$LIBEXEC_DIR/shims.txt"
@@ -539,48 +565,90 @@ uninstall() {
 
 [[ "$UNINSTALL" == true ]] && uninstall
 
-github_release_json() {
-  local ref="$1"
-  local body code auth_header=()
+_github_api_fetch() {
+  local url="$1" out_file="$2" allow_404="${3:-false}"
+  local code auth_header=()
   local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer $token")
-  body=$(mktemp)
   code=$(curl -sS --proto '=https' --tlsv1.2 -L \
            --connect-timeout 10 --max-time 300 \
            --retry 3 --retry-delay 2 --retry-all-errors \
            -H 'Accept: application/vnd.github+json' \
            "${auth_header[@]}" \
-           -o "$body" -w '%{http_code}' \
-           "https://api.github.com/repos/$REPO/releases/$ref" 2>/dev/null || echo 000)
+           -o "$out_file" -w '%{http_code}' \
+           "$url" 2>/dev/null || echo 000)
   case "$code" in
-    200) cat "$body"; rm -f "$body" ;;
-    403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$body"; exit 1 ;;
-    000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$body"; exit 1 ;;
-    *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$body"; exit 1 ;;
+    200) return 0 ;;
+    404)
+      if [[ "$allow_404" == true ]]; then
+        return 1
+      fi
+      err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$out_file"; exit 1 ;;
+    403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$out_file"; exit 1 ;;
+    000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$out_file"; exit 1 ;;
+    *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$out_file"; exit 1 ;;
   esac
+}
+
+github_release_json() {
+  local ref="$1" body
+  body=$(mktemp)
+  _github_api_fetch "https://api.github.com/repos/$REPO/releases/$ref" "$body"
+  cat "$body"
+  rm -f "$body"
 }
 
 github_latest_release_with_asset() {
   local asset_name="$1"
-  local body code auth_header=() page=1 page_count selected=""
-  local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-  [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer $token")
+  local body page=1 page_count selected="" resp_type=""
+
+  body=$(mktemp)
+  if _github_api_fetch "https://api.github.com/repos/$REPO/releases/latest" "$body" true; then
+    resp_type=$(jq -r 'type' "$body" 2>/dev/null || true)
+    case "$resp_type" in
+      object)
+        if ! selected=$(jq -c '[.]' "$body" | release_select_from_page "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" 2>/dev/null); then
+          err "GitHub API returned an invalid release or ambiguous assets for '$asset_name'."
+          rm -f "$body"
+          exit 1
+        fi
+        if [[ -n "$selected" ]]; then
+          printf '%s\n' "$selected"
+          rm -f "$body"
+          return 0
+        fi
+        ;;
+      array)
+        if ! selected=$(release_select_from_page "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" < "$body" 2>/dev/null); then
+          err "GitHub API returned an invalid list or ambiguous assets for '$asset_name'."
+          rm -f "$body"
+          exit 1
+        fi
+        if [[ -n "$selected" ]]; then
+          printf '%s\n' "$selected"
+          rm -f "$body"
+          return 0
+        fi
+        page_count=$(jq -er 'length' "$body" 2>/dev/null || echo 0)
+        if [[ "$page_count" -eq 0 ]]; then
+          rm -f "$body"
+          return 0
+        fi
+        # URL-blind mocks return page 1 on the first call; continue at page 2.
+        page=2
+        ;;
+      *)
+        err "GitHub API returned an invalid releases response."
+        rm -f "$body"
+        exit 1
+        ;;
+    esac
+  fi
+  rm -f "$body"
 
   while (( page <= 10 )); do
     body=$(mktemp)
-    code=$(curl -sS --proto '=https' --tlsv1.2 -L \
-             --connect-timeout 10 --max-time 300 \
-             --retry 3 --retry-delay 2 --retry-all-errors \
-             -H 'Accept: application/vnd.github+json' \
-             "${auth_header[@]}" \
-             -o "$body" -w '%{http_code}' \
-             "https://api.github.com/repos/$REPO/releases?per_page=100&page=$page" 2>/dev/null || echo 000)
-    case "$code" in
-      200) ;;
-      403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$body"; exit 1 ;;
-      000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$body"; exit 1 ;;
-      *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$body"; exit 1 ;;
-    esac
+    _github_api_fetch "https://api.github.com/repos/$REPO/releases?per_page=30&page=$page" "$body"
 
     if ! selected=$(release_select_from_page "$asset_name" "$VERSION_MAJOR" "$RELEASE_CHANNEL" < "$body" 2>/dev/null); then
       err "GitHub API returned an invalid list or ambiguous assets for '$asset_name'."
@@ -670,15 +738,28 @@ resolve_version() {
       version_key=$(expand_template "$MANIFEST_KEY_VERSION")
       url_key=$(expand_template "$MANIFEST_KEY_URL")
       checksum_key=$(expand_template "$MANIFEST_KEY_CHECKSUM")
-      VERSION=$(json_get "$manifest_json" "$version_key")
-      VERSION=$(parse_version_tag "$VERSION")
+
+      local v_expr u_expr c_expr manifest_fields="" raw_version="" _extra=""
+      # shellcheck disable=SC2016
+      [[ "$version_key" == .* ]]  && v_expr="(${version_key} // \"\")"  || v_expr='(.[$kv] // "")'
+      # shellcheck disable=SC2016
+      [[ "$url_key" == .* ]]      && u_expr="(${url_key} // \"\")"      || u_expr='(.[$ku] // "")'
+      # shellcheck disable=SC2016
+      [[ "$checksum_key" == .* ]] && c_expr="(${checksum_key} // \"\")" || c_expr='(.[$kc] // "")'
+
+      if ! manifest_fields=$(printf '%s' "$manifest_json" | jq -er \
+        --arg kv "$version_key" --arg ku "$url_key" --arg kc "$checksum_key" \
+        "if type != \"object\" then error(\"manifest is not a JSON object\") else [$v_expr, $u_expr, ($c_expr | tostring | ascii_downcase)] | map(tostring) | if any(.[]; contains(\"\n\") or contains(\"\r\") or contains(\"\u001f\")) then error(\"invalid control characters in manifest\") else join(\"\u001f\") end end" 2>/dev/null); then
+        err "Remote manifest is incomplete or malformed."
+        exit 1
+      fi
+      IFS=$'\x1f' read -r raw_version DOWNLOAD_URL REMOTE_CHECKSUM _extra <<< "$manifest_fields" || true
+      [[ -z "$_extra" ]] || { err "Remote manifest is incomplete or malformed."; exit 1; }
+      VERSION=$(parse_version_tag "$raw_version")
       [[ -n "$VERSION" ]] || {
-        err "Remote manifest returned an invalid version: '$(json_get "$manifest_json" "$version_key")'"
+        err "Remote manifest returned an invalid version: '$raw_version'"
         exit 1
       }
-      DOWNLOAD_URL=$(json_get "$manifest_json" "$url_key")
-      REMOTE_CHECKSUM=$(json_get "$manifest_json" "$checksum_key")
-      REMOTE_CHECKSUM=$(printf '%s' "$REMOTE_CHECKSUM" | tr 'A-F' 'a-f')
 
       [[ -n "$VERSION" && -n "$REMOTE_CHECKSUM" ]] || {
         err "Remote manifest is incomplete or malformed."
@@ -833,21 +914,40 @@ check_current() {
 }
 
 install_deps() {
-  info "Installing dependencies (glibc-repo, glibc-runner, patchelf, file, jq, curl)..."
+  local deps=() cmd
+  for cmd in file jq curl; do
+    command -v "$cmd" >/dev/null 2>&1 || deps+=("$cmd")
+  done
+  if [[ "$NEEDS_PATCHELF" == true ]] && ! command -v patchelf >/dev/null 2>&1; then
+    deps+=(patchelf)
+  fi
+  if [[ "$EXEC_DIRECT" != true && ! -f "$LOADER" ]]; then
+    deps+=(glibc-repo glibc-runner)
+  fi
+
+  if [[ ${#deps[@]} -eq 0 ]]; then
+    if [[ "$EXEC_DIRECT" != true ]]; then
+      info "Dependencies satisfied (glibc loader: $LOADER)."
+    else
+      info "Dependencies satisfied."
+    fi
+    return 0
+  fi
+
+  info "Installing missing dependencies (${deps[*]})..."
   pkg update -y >/dev/null 2>&1 || warn "pkg update failed; continuing with existing package indexes."
-  local deps=(glibc-repo glibc-runner file jq curl)
-  [[ "$NEEDS_PATCHELF" == true ]] && deps+=(patchelf)
   if ! pkg install "${deps[@]}" -y; then
     err "Failed to install dependencies."
     err "Ensure Termux is up to date: pkg update && pkg upgrade"
     exit 1
   fi
-  if [[ "$NEEDS_PATCHELF" == true && ! -f "$LOADER" ]]; then
+  if [[ "$EXEC_DIRECT" != true && ! -f "$LOADER" ]]; then
     err "Glibc loader not found: $LOADER"
     err "Run: pkg install glibc-repo glibc-runner"
     exit 1
   fi
-  info "Glibc loader: $LOADER"
+  [[ "$EXEC_DIRECT" != true ]] && info "Glibc loader: $LOADER"
+  return 0
 }
 
 download() {
@@ -967,9 +1067,15 @@ extract_install() {
 
   mkdir -p "$LIBEXEC_DIR"
   local root; root=$(dirname "$found")
-  cp -a "$root/." "$LIBEXEC_DIR/"
-  if [[ ! -f "$BIN_FILE" ]]; then
-    cp -a "$found" "$BIN_FILE"
+  (
+    shopt -s dotglob nullglob
+    items=("$root"/*)
+    if (( ${#items[@]} > 0 )); then
+      mv -f -- "${items[@]}" "$LIBEXEC_DIR/" 2>/dev/null || cp -a "$root/." "$LIBEXEC_DIR/"
+    fi
+  )
+  if [[ ! -f "$BIN_FILE" && -f "$found" ]]; then
+    mv -f "$found" "$BIN_FILE" 2>/dev/null || cp -a "$found" "$BIN_FILE"
   fi
   chmod 755 "$BIN_FILE"
   rm -rf "$EXTRACT_DIR"; EXTRACT_DIR=""
@@ -1024,11 +1130,49 @@ patch_interpreter() {
 }
 
 ensure_nsswitch() {
+  [[ "$EXEC_DIRECT" != true ]] || return 0
   local ns="$GLIBC_PREFIX/etc/nsswitch.conf"
   [[ -f "$ns" ]] && return 0
-  mkdir -p "$(dirname "$ns")"
+  mkdir -p "${ns%/*}"
   printf 'hosts: files dns\n' > "$ns"
   info "Created $ns (glibc DNS resolution)."
+}
+
+_is_ip_literal() {
+  local ip="$1"
+  [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && return 0
+  [[ "$ip" == *:* && "$ip" =~ ^[0-9a-fA-F:]+(%[a-zA-Z0-9._-]+)?$ ]] && return 0
+  return 1
+}
+
+ensure_glibc_resolv() {
+  [[ "$EXEC_DIRECT" != true ]] || return 0
+  local resolv="$GLIBC_PREFIX/etc/resolv.conf"
+  [[ -s "$resolv" ]] && return 0
+  if [[ -L "$resolv" ]]; then
+    warn "Skipping $resolv: dangling or empty symlink (left untouched)."
+    return 0
+  fi
+  mkdir -p "${resolv%/*}"
+  local dns1="" dns2="" servers=()
+  if command -v getprop >/dev/null 2>&1; then
+    dns1=$(getprop net.dns1 2>/dev/null | tr -d '[:space:]' || true)
+    dns2=$(getprop net.dns2 2>/dev/null | tr -d '[:space:]' || true)
+  fi
+  _is_ip_literal "$dns1" && servers+=("$dns1")
+  if [[ "$dns2" != "$dns1" ]] && _is_ip_literal "$dns2"; then
+    servers+=("$dns2")
+  fi
+  if [[ ${#servers[@]} -eq 0 ]]; then
+    servers=(8.8.8.8 1.1.1.1)
+  fi
+  {
+    local s
+    for s in "${servers[@]}"; do
+      printf 'nameserver %s\n' "$s"
+    done
+  } > "$resolv"
+  info "Created $resolv (glibc DNS resolution)."
 }
 
 run_pre_wrapper_hook() {
@@ -1304,6 +1448,7 @@ main() {
   extract_install
   patch_interpreter
   ensure_nsswitch
+  ensure_glibc_resolv
   run_pre_wrapper_hook
   create_wrapper
   verify_install

@@ -43,9 +43,17 @@ esac
 normalize_version() { grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<< "${1:-}" | head -1 || true; }
 
 manifest_get() {
-  local key="$1" mf="$2"
+  local key="$1" mf="$2" line
   [[ -f "$mf" ]] || return 0
-  awk -F= -v k="$key" '{ sub(/\r$/, "") } $1==k { sub(/^[^=]*=/,""); print; exit }' "$mf"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    case "$line" in
+      "$key"=*)
+        printf '%s\n' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$mf"
 }
 
 lookup_hashfile() {
