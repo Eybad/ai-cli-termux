@@ -22,19 +22,30 @@ warn() { printf '%sWARN%s: %s\n' "$ORANGE" "$NC" "$*" >&2; }
 err()  { printf '%sERROR%s: %s\n' "$RED" "$NC" "$*" >&2; }
 
 conf_get() {
-  local file="$1" key="$2"
-  awk -F= -v k="$key" '
-    $1 == k {
-      v = $0; sub(/^[^=]*=/, "", v)
-      sub(/#.*$/, "", v)
-      gsub(/[ \t]+$/, "", v)
-      gsub(/^[ \t]+/, "", v)
-      gsub(/^"|"$/, "", v)
-      gsub(/[\001-\037\177]/, " ", v)
-      gsub(/  +/, " ", v)
-      print v
-      exit
-    }' "$file" | sed 's/ $//'
+  local file="$1" key="$2" line v
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "$key"=*)
+        v="${line#*=}"
+        v="${v%$'\r'}"
+        v="${v%%#*}"
+        v="${v#"${v%%[! $'\t']*}"}"
+        v="${v%"${v##*[! $'\t']}"}"
+        v="${v#\"}"
+        v="${v%\"}"
+        if [[ "$v" == *[$'\x01'-$'\x1f'$'\x7f']* ]]; then
+          v="${v//[$'\x01'-$'\x1f'$'\x7f']/ }"
+        fi
+        while [[ "$v" == *"  "* ]]; do
+          v="${v//  / }"
+        done
+        v="${v% }"
+        printf '%s\n' "$v"
+        return 0
+        ;;
+    esac
+  done < "$file"
 }
 
 list_registry() {
@@ -42,7 +53,8 @@ list_registry() {
   [[ -d "$REGISTRY_DIR" ]] || return 0
   for f in "$REGISTRY_DIR"/*.conf; do
     [[ -f "$f" ]] || continue
-    name=$(basename "$f" .conf)
+    name="${f##*/}"
+    name="${name%.conf}"
     [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || continue
     printf '%s\n' "$name"
   done
@@ -62,9 +74,17 @@ validate_tool() {
 }
 
 manifest_get() {
-  local key="$1" mf="$2"
+  local key="$1" mf="$2" line
   [[ -f "$mf" ]] || return 0
-  awk -F= -v k="$key" '{ sub(/\r$/, "") } $1==k { sub(/^[^=]*=/,""); print; exit }' "$mf"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    case "$line" in
+      "$key"=*)
+        printf '%s\n' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$mf"
 }
 
 check_repo() {
@@ -81,7 +101,7 @@ usage_short() {
 aicli — AI CLI manager for Termux (install, update, audit; no PRoot)
 
 Usage: aicli <subcommand> [options]
-  aicli list [--offline] [--json] [<tool>]
+  aicli list [--offline] [--refresh] [--json] [<tool>]
   aicli install <tool> [-v X.Y.Z | --sha256 <hash> | --require-attestation]
   aicli update <tool> | aicli update --all | remove <tool> | verify <tool>
   aicli help [<subcommand>|<tool>] | doctor | completion <bash|zsh|fish>
@@ -117,8 +137,8 @@ Subcommands:
   verify <tool>             Audit installation integrity (10 steps)
   list [options]            List CLIs: status, installed version, and
                             available updates
-                            (--offline: no network · --json: machine output ·
-                             [<tool>]: filter by tool)
+                            (--offline: no network · --refresh: bypass cache ·
+                             --json: machine output · [<tool>]: filter by tool)
   help [<sub>|<tool>]       General help, subcommand help, or tool details
   doctor                    Environment diagnostics (repo, wrapper, dependencies)
   completion <shell>        Generate shell completions for bash|zsh|fish (stdout)
@@ -219,7 +239,7 @@ EOF
       ;;
     list)
       cat <<'EOF'
-aicli list [--offline] [--json] [<tool>]
+aicli list [--offline] [--refresh] [--json] [<tool>]
 
 Lists registry CLIs with local status (installed/not installed, manifest
 version) and, if network is available, update status (UPDATE column:
@@ -227,6 +247,7 @@ yes | no | n/a). Network errors degrade gracefully to n/a without failing.
 
 Flags:
   --offline   Do not query network (skips update check)
+  --refresh   Bypass and refresh cached upstream version checks
   --json      Machine-readable output (JSON array of tools) for scripts/agents
   <tool>      Filter by specific tool name
 
@@ -345,68 +366,118 @@ cmd_help() {
   return 2
 }
 
-RESOLVE_CACHE_TTL=300
+RESOLVE_CACHE_TTL="${AICLI_CACHE_TTL:-900}"
+if [[ ! "$RESOLVE_CACHE_TTL" =~ ^(0|[1-9][0-9]*)$ ]] || (( ${#RESOLVE_CACHE_TTL} > 10 )); then
+  RESOLVE_CACHE_TTL=900
+fi
 RESOLVE_CACHE_DIR=""
+_CACHE_VAL=""
 
-_cache_is_valid() {
-  local cache_file="$1"
-  test -f "$cache_file" || return 1
-  test -L "$cache_file" && return 1
-  local expiry now_ts
-  expiry=$(awk 'NR==1{print; exit}' "$cache_file" 2>/dev/null) || return 1
+_tool_app_name() {
+  local tool="$1" app=""
+  app=$(conf_get "$REGISTRY_DIR/$tool.conf" APP_NAME)
+  printf '%s\n' "${app:-$tool}"
+}
+
+_cache_read_entry() {
+  local cache_file="$1" now_ts="${2:-${EPOCHSECONDS:-$(date +%s)}}"
+  _CACHE_VAL=""
+  [[ -f "$cache_file" && ! -L "$cache_file" ]] || return 1
+  local expiry="" val=""
+  {
+    IFS= read -r expiry || return 1
+    IFS= read -r val || [[ -n "$val" ]] || return 1
+  } < "$cache_file"
   case "$expiry" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  now_ts=$(date +%s)
-  test "$now_ts" -lt "$expiry"
-}
-
-_cache_get() {
-  local cache_file="$1"
-  test -f "$cache_file" || return 1
-  test -L "$cache_file" && return 1
-  awk 'NR==2{print; exit}' "$cache_file" 2>/dev/null
+  (( now_ts < expiry )) || return 1
+  _CACHE_VAL="$val"
+  return 0
 }
 
 _cache_set() {
   local cache_file="$1" value="$2"
-  test -L "$cache_file" && return 1
-  mkdir -p "$(dirname "$cache_file")"
-  local now_ts expiry
-  now_ts=$(date +%s)
+  [[ -n "$value" ]] || { rm -f "$cache_file"; return 0; }
+  [[ -L "$cache_file" ]] && return 1
+  local cache_dir="${cache_file%/*}"
+  [[ -d "$cache_dir" ]] || mkdir -p "$cache_dir"
+  local now_ts="${3:-${EPOCHSECONDS:-$(date +%s)}}" expiry tmp_file
   expiry=$((now_ts + RESOLVE_CACHE_TTL))
-  printf '%s\n%s\n' "$expiry" "$value" > "$cache_file"
+  tmp_file=$(mktemp "${cache_file}.tmp.XXXXXX") || return 1
+  if printf '%s\n%s\n' "$expiry" "$value" > "$tmp_file" && mv -f "$tmp_file" "$cache_file"; then
+    return 0
+  fi
+  rm -f "$tmp_file"
+  return 1
 }
 
 _cleanup_resolve_cache() {
-  test -d "$RESOLVE_CACHE_DIR" || return 0
-  local f
+  [[ -d "$RESOLVE_CACHE_DIR" && ! -L "$RESOLVE_CACHE_DIR" ]] || return 0
+  local now_ts
+  if [[ $# -ge 1 ]]; then
+    now_ts="$1"
+    shift
+  else
+    now_ts="${EPOCHSECONDS:-$(date +%s)}"
+  fi
+  local f skip skip_match expiry
+  for f in "$RESOLVE_CACHE_DIR"/*.tmp.*; do
+    [[ -e "$f" || -L "$f" ]] && rm -f "$f"
+  done
   for f in "$RESOLVE_CACHE_DIR"/*.latest; do
-    test -f "$f" || continue
-    if test -L "$f" || ! _cache_is_valid "$f"; then
+    [[ -f "$f" ]] || continue
+    if [[ -L "$f" ]]; then
       rm -f "$f"
+      continue
     fi
+    skip_match=false
+    for skip in "$@"; do
+      if [[ "$f" == "$skip" ]]; then
+        skip_match=true
+        break
+      fi
+    done
+    [[ "$skip_match" == true ]] && continue
+    expiry=""
+    IFS= read -r expiry < "$f" 2>/dev/null || expiry=""
+    case "$expiry" in
+      ''|*[!0-9]*) rm -f "$f"; continue ;;
+    esac
+    (( now_ts >= expiry )) && rm -f "$f"
   done
 }
 
 resolve_all_latest() {
   local -n _tools_ref=$1
+  local refresh="${2:-false}"
 
-  if test -z "$RESOLVE_CACHE_DIR" || ! test -d "$RESOLVE_CACHE_DIR"; then
+  if [[ -z "$RESOLVE_CACHE_DIR" || ! -d "$RESOLVE_CACHE_DIR" ]]; then
     RESOLVE_CACHE_DIR="${TMPDIR:-$PREFIX/tmp}/aicli_resolve"
+    if [[ -L "$RESOLVE_CACHE_DIR" || ( -e "$RESOLVE_CACHE_DIR" && ( ! -d "$RESOLVE_CACHE_DIR" || ! -O "$RESOLVE_CACHE_DIR" ) ) ]]; then
+      RESOLVE_CACHE_DIR="${RESOLVE_CACHE_DIR}_${EUID:-$(id -u)}"
+    fi
     mkdir -p "$RESOLVE_CACHE_DIR"
-    chmod 700 "$RESOLVE_CACHE_DIR"
+    [[ -O "$RESOLVE_CACHE_DIR" ]] && chmod 700 "$RESOLVE_CACHE_DIR"
   fi
 
-  local tool cache_file pids=()
+  local now_ts="${EPOCHSECONDS:-$(date +%s)}"
+  local tool app cache_file result_file pids=() checked_files=()
   for tool in "${_tools_ref[@]}"; do
-    test -f "$PREFIX/libexec/$tool/manifest.txt" || continue
+    app=$(_tool_app_name "$tool")
+    [[ -f "$PREFIX/libexec/$app/manifest.txt" ]] || continue
     cache_file="$RESOLVE_CACHE_DIR/${tool}.latest"
+    result_file="$RESOLVE_CACHE_DIR/${tool}.result"
+    checked_files+=("$cache_file")
 
-    if _cache_is_valid "$cache_file"; then
-      _cache_get "$cache_file" > "$RESOLVE_CACHE_DIR/${tool}.result"
+    if [[ "$refresh" != true ]] && _cache_read_entry "$cache_file" "$now_ts"; then
+      rm -f "$result_file"
+      printf '%s' "$_CACHE_VAL" > "$result_file"
       continue
     fi
+
+    [[ "$refresh" == true ]] && rm -f "$cache_file"
+    rm -f "$result_file"
 
     (
       version=$(timeout 20 bash "$INSTALL_SH" "$tool" --resolve-version 2>/dev/null || true)
@@ -414,32 +485,41 @@ resolve_all_latest() {
         TARGET_VERSION=*) version="${version#TARGET_VERSION=}" ;;
         *) version="" ;;
       esac
-      _cache_set "$cache_file" "$version"
-      printf '%s' "$version" > "$RESOLVE_CACHE_DIR/${tool}.result"
+      if [[ -n "$version" ]]; then
+        _cache_set "$cache_file" "$version" "$now_ts" || true
+      else
+        rm -f "$cache_file"
+      fi
+      printf '%s' "$version" > "$result_file"
     ) &
     pids+=("$!")
   done
 
   local p
   for p in "${pids[@]:-}"; do
-    test -n "$p" && wait "$p" || true
+    [[ -n "$p" ]] && wait "$p" || true
   done
 
-  _cleanup_resolve_cache
+  _cleanup_resolve_cache "$now_ts" ${checked_files[@]+"${checked_files[@]}"}
 }
 
 json_escape() {
-  local s="$1" i ch hex
+  local s="$1" i ch hex oct
   local IFS=$' \t\n'
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
   s=${s//$'\n'/\\n}
   s=${s//$'\r'/\\r}
   s=${s//$'\t'/\\t}
+  if [[ "$s" != *[^[:print:]]* ]]; then
+    printf '%s' "$s"
+    return 0
+  fi
   for ((i = 1; i <= 31; i++)); do
     case "$i" in 9|10|13) continue ;; esac
     printf -v hex '%02x' "$i"
-    printf -v ch '%b' "\\0$(printf '%03o' "$i")"
+    printf -v oct '%03o' "$i"
+    printf -v ch '%b' "\\0$oct"
     s=${s//$ch/\\u00$hex}
   done
   printf -v ch '%b' '\177'
@@ -447,17 +527,19 @@ json_escape() {
   # Escape non-UTF-8 high bytes (0x80-0xff) as \u00xx for valid JSON output.
   for ((i = 128; i <= 255; i++)); do
     printf -v hex '%02x' "$i"
-    printf -v ch '%b' "\\$(printf '%03o' "$i")"
+    printf -v oct '%03o' "$i"
+    printf -v ch '%b' "\\$oct"
     s=${s//$ch/\\u00$hex}
   done
   printf '%s' "$s"
 }
 
 cmd_list() {
-  local offline=false json=false filter="" tool
+  local offline=false json=false refresh=false filter="" tool
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --offline) offline=true ;;
+      --refresh) refresh=true ;;
       --json) json=true ;;
       -h|--help) help_sub list; return 0 ;;
       --*) err "Unknown option for list: $1"; return 2 ;;
@@ -486,12 +568,18 @@ cmd_list() {
   }
 
   if [[ "$offline" != true ]]; then
-    resolve_all_latest names
+    resolve_all_latest names "$refresh"
+  elif [[ "$refresh" == true ]]; then
+    local cache_dir="${RESOLVE_CACHE_DIR:-${TMPDIR:-$PREFIX/tmp}/aicli_resolve}"
+    for tool in "${names[@]}"; do
+      rm -f "$cache_dir/${tool}.latest" "$cache_dir/${tool}.result"
+    done
   fi
 
   for tool in "${names[@]}"; do
     f="$REGISTRY_DIR/$tool.conf"
     app=$(conf_get "$f" APP_NAME)
+    [[ -n "$app" ]] || app="$tool"
     display=$(conf_get "$f" DISPLAY_NAME)
     desc=$(conf_get "$f" DESCRIPTION)
     mf="$PREFIX/libexec/$app/manifest.txt"
@@ -502,7 +590,9 @@ cmd_list() {
       installed_at=$(manifest_get installed_at "$mf")
       installed="si"
       if [[ "$offline" != true ]]; then
-        latest=$(cat "$RESOLVE_CACHE_DIR/${tool}.result" 2>/dev/null || true)
+        if [[ -f "$RESOLVE_CACHE_DIR/${tool}.result" ]]; then
+          IFS= read -r latest < "$RESOLVE_CACHE_DIR/${tool}.result" || true
+        fi
         if [[ -n "$latest" ]]; then
           if [[ -n "$version" && "$latest" == "$version" ]]; then
             update="no"
@@ -612,9 +702,10 @@ cmd_update() {
       err "--all does not accept additional arguments."
       return 2
     }
-    local tool failed=0 updated=0 skipped=0
+    local tool app failed=0 updated=0 skipped=0
     for tool in $(list_registry); do
-      if [[ ! -f "$PREFIX/libexec/$tool/manifest.txt" ]]; then
+      app=$(_tool_app_name "$tool")
+      if [[ ! -f "$PREFIX/libexec/$app/manifest.txt" ]]; then
         info "$tool: not installed — skipped"
         skipped=$((skipped + 1))
         continue
@@ -714,7 +805,7 @@ cmd_doctor() {
 
   local t app mf tag
   for t in $(list_registry); do
-    app=$(conf_get "$REGISTRY_DIR/$t.conf" APP_NAME)
+    app=$(_tool_app_name "$t")
     mf="$PREFIX/libexec/$app/manifest.txt"
     if [[ -f "$mf" ]]; then
       tag=$(manifest_get tag "$mf")
@@ -752,24 +843,23 @@ _aicli() {
   local cur sub
   cur="\${COMP_WORDS[COMP_CWORD]}"
   sub="\${COMP_WORDS[1]}"
-  case "\$COMP_CWORD" in
-    1)
-      COMPREPLY=( \$(compgen -W "$SUBCOMMANDS $tools --version --help --no-color" -- "\$cur") )
-      ;;
-    2)
-      case "\$sub" in
-        install|remove|verify|list)
-          COMPREPLY=( \$(compgen -W "$tools" -- "\$cur") )
-          ;;
-        update)
-          COMPREPLY=( \$(compgen -W "$tools --all" -- "\$cur") )
-          ;;
-        completion)
-          COMPREPLY=( \$(compgen -W "bash zsh fish" -- "\$cur") )
-          ;;
-      esac
-      ;;
-  esac
+  if [[ "\$COMP_CWORD" -eq 1 ]]; then
+    COMPREPLY=( \$(compgen -W "$SUBCOMMANDS $tools --version --help --no-color" -- "\$cur") )
+  elif [[ "\$sub" == "list" ]]; then
+    COMPREPLY=( \$(compgen -W "$tools --offline --refresh --json" -- "\$cur") )
+  elif [[ "\$COMP_CWORD" -eq 2 ]]; then
+    case "\$sub" in
+      install|remove|verify)
+        COMPREPLY=( \$(compgen -W "$tools" -- "\$cur") )
+        ;;
+      update)
+        COMPREPLY=( \$(compgen -W "$tools --all" -- "\$cur") )
+        ;;
+      completion)
+        COMPREPLY=( \$(compgen -W "bash zsh fish" -- "\$cur") )
+        ;;
+    esac
+  fi
 }
 complete -F _aicli aicli
 EOF
@@ -784,10 +874,13 @@ _aicli() {
     compadd $SUBCOMMANDS $tools --version --help --no-color
   elif (( CURRENT == 3 )); then
     case "\$words[2]" in
-      install|remove|verify|list) compadd $tools ;;
+      install|remove|verify) compadd $tools ;;
+      list) compadd $tools --offline --refresh --json ;;
       update) compadd $tools --all ;;
       completion) compadd bash zsh fish ;;
     esac
+  elif (( CURRENT > 3 )) && [[ "\$words[2]" == "list" ]]; then
+    compadd $tools --offline --refresh --json
   fi
 }
 compdef _aicli aicli
@@ -802,6 +895,7 @@ complete -c aicli -f -a "$SUBCOMMANDS $tools --version --help --no-color" -d 'ai
 for t in install update remove verify list
   complete -c aicli -n "__fish_seen_subcommand_from \$t" -f -a "$tools" -d 'AI CLI'
 end
+complete -c aicli -n "__fish_seen_subcommand_from list" -f -a "--offline --refresh --json" -d 'List options'
 complete -c aicli -n "__fish_seen_subcommand_from update" -f -a "--all" -d 'Update all installed CLIs'
 complete -c aicli -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 EOF

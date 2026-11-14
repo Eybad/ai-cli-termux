@@ -61,7 +61,7 @@ Install and manage AI command-line interfaces — [OpenCode](https://github.com/
 
 | Command | Description |
 |---|---|
-| `aicli list [--offline] [--json] [<tool>]` | Displays local status and upstream update availability. |
+| `aicli list [--offline] [--refresh] [--json] [<tool>]` | Displays local status and upstream update availability. |
 | `aicli install <tool> [-v <ver>] [--sha256 <hash>]` | Installs a tool or specific version with verified checksum. |
 | `aicli update <tool \| --all>` | Updates one or all installed tools while preserving manifests. |
 | `aicli remove <tool>` | Uninstalls binaries, shims, and manifest records. |
