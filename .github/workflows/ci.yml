@@ -53,8 +53,8 @@ jobs:
           # consumidas por el instalador) es falso positivo; -S error solo
           # falla ante errores reales.
           shellcheck -s bash -S error registry/*.conf
-          # Tests de OpenCode y wrapper runner:
-          shellcheck -x scripts/test-opencode-releases.sh scripts/test-opencode-runner.sh scripts/test-wrapper-runner.sh
+          # Tests de OpenCode, wrapper runner y optimizaciones:
+          shellcheck -x scripts/test-opencode-releases.sh scripts/test-opencode-runner.sh scripts/test-wrapper-runner.sh scripts/test-aicli-optimizations.sh
           # Lib de hooks: código real (lleva directivas shellcheck en cabecera).
           shopt -s nullglob
           lib_files=(registry/lib/*.sh)
@@ -213,3 +213,4 @@ jobs:
           bash scripts/test-opencode-releases.sh
           bash scripts/test-opencode-runner.sh
           bash scripts/test-wrapper-runner.sh
+          bash scripts/test-aicli-optimizations.sh
