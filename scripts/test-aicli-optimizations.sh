@@ -500,17 +500,17 @@ case "\$url" in
   */releases/latest)
     if [ "\${MOCK_LATEST_MODE:-hit}" = "hit" ]; then
       cat > "\$out_file" <<'JSON'
-{"tag_name":"v2.5.0","draft":false,"prerelease":false,"assets":[{"name":"opencode-linux-arm64.tar.gz","digest":"sha256:aaa","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.5.0/opencode-linux-arm64.tar.gz"}]}
+{"tag_name":"v2.5.0","draft":false,"prerelease":false,"assets":[{"name":"opencode-linux-arm64.tar.gz","digest":"sha256:aaa","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.5.0/opencode-linux-arm64.tar.gz"},{"name":"opencode-linux-x64.tar.gz","digest":"sha256:aaa","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.5.0/opencode-linux-x64.tar.gz"}]}
 JSON
     else
       cat > "\$out_file" <<'JSON'
-{"tag_name":"v1.19.5","draft":false,"prerelease":false,"assets":[{"name":"opencode-linux-arm64.tar.gz","digest":"sha256:bbb","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v1.19.5/opencode-linux-arm64.tar.gz"}]}
+{"tag_name":"v1.19.5","draft":false,"prerelease":false,"assets":[{"name":"opencode-linux-arm64.tar.gz","digest":"sha256:bbb","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v1.19.5/opencode-linux-arm64.tar.gz"},{"name":"opencode-linux-x64.tar.gz","digest":"sha256:bbb","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v1.19.5/opencode-linux-x64.tar.gz"}]}
 JSON
     fi
     ;;
   *"per_page=30&page=1"*)
     cat > "\$out_file" <<'JSON'
-[{"tag_name":"v2.4.9","draft":false,"prerelease":false,"assets":[{"name":"opencode-linux-arm64.tar.gz","digest":"sha256:ccc","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.4.9/opencode-linux-arm64.tar.gz"}]}]
+[{"tag_name":"v2.4.9","draft":false,"prerelease":false,"assets":[{"name":"opencode-linux-arm64.tar.gz","digest":"sha256:ccc","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.4.9/opencode-linux-arm64.tar.gz"},{"name":"opencode-linux-x64.tar.gz","digest":"sha256:ccc","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.4.9/opencode-linux-x64.tar.gz"}]}]
 JSON
     ;;
   *)
@@ -602,7 +602,7 @@ case "\$url" in
     ;;
   *"per_page=30&page=1"*)
     cat > "\$out_file" <<'JSON'
-[{"tag_name":"v2.4.8","draft":false,"prerelease":false,"assets":[{"name":"opencode-linux-arm64.tar.gz","digest":"sha256:ddd","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.4.8/opencode-linux-arm64.tar.gz"}]}]
+[{"tag_name":"v2.4.8","draft":false,"prerelease":false,"assets":[{"name":"opencode-linux-arm64.tar.gz","digest":"sha256:ddd","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.4.8/opencode-linux-arm64.tar.gz"},{"name":"opencode-linux-x64.tar.gz","digest":"sha256:ddd","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v2.4.8/opencode-linux-x64.tar.gz"}]}]
 JSON
     printf '200'
     ;;
