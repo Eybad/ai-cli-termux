@@ -78,10 +78,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage ;;
     -v|--version)
-      [[ $# -ge 2 ]] || { err "--version requiere un argumento"; exit 2; }
+      [[ $# -ge 2 ]] || { err "--version requires an argument"; exit 2; }
       REQUESTED_VERSION="$2"; shift 2 ;;
     --sha256)
-      [[ $# -ge 2 ]] || { err "--sha256 requiere un argumento"; exit 2; }
+      [[ $# -ge 2 ]] || { err "--sha256 requires an argument"; exit 2; }
       PINNED_CHECKSUM="$2"; shift 2 ;;
     --require-attestation) REQUIRE_ATTEST=true; shift ;;
     -u|--uninstall) UNINSTALL=true; shift ;;
@@ -158,7 +158,7 @@ if ! release_policy_fields_valid "$VERSION_MAJOR" "$RELEASE_CHANNEL"; then
 fi
 
 for _field in APP_NAME DISPLAY_NAME RELEASE_SOURCE CHECKSUM_ALGO CHECKSUM_SOURCE ELF_NAME; do
-  [[ -n "${!_field:-}" ]] || { err "$CONF: el campo '$_field' es obligatorio."; exit 1; }
+  [[ -n "${!_field:-}" ]] || { err "$CONF: field '$_field' is required."; exit 1; }
 done
 
 _name_is_valid() {
@@ -265,7 +265,7 @@ FRESH_INSTALL=false
 INSTALL_DONE=false
 VERSION=""; TAG=""; TARBALL_CHECKSUM=""; BIN_CHECKSUM_ORIG=""; BIN_CHECKSUM_PATCHED=""
 EXTRA_PATCHED=""
-ATTEST_STATUS="omitida"
+ATTEST_STATUS="skipped"
 RELEASE_JSON=""
 
 cleanup() {
@@ -492,7 +492,7 @@ checksum_of() {
   case "$CHECKSUM_ALGO" in
     sha256) sha256sum "$1" | cut -d' ' -f1 ;;
     sha512) sha512sum "$1" | cut -d' ' -f1 ;;
-    *) err "Algoritmo de checksum desconocido: $CHECKSUM_ALGO"; exit 1 ;;
+    *) err "Unknown checksum algorithm: $CHECKSUM_ALGO"; exit 1 ;;
   esac
 }
 
@@ -583,10 +583,10 @@ _github_api_fetch() {
       if [[ "$allow_404" == true ]]; then
         return 1
       fi
-      err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$out_file"; exit 1 ;;
-    403|429) err "GitHub API: HTTP $code (rate limit). Usá -v <version>"; rm -f "$out_file"; exit 1 ;;
-    000)     err "Sin conexión a GitHub API. Usá -v <version>"; rm -f "$out_file"; exit 1 ;;
-    *)       err "GitHub API: HTTP $code. Usá -v <version>"; rm -f "$out_file"; exit 1 ;;
+      err "GitHub API: HTTP $code. Use -v <version>"; rm -f "$out_file"; exit 1 ;;
+    403|429) err "GitHub API: HTTP $code (rate limit). Use -v <version>"; rm -f "$out_file"; exit 1 ;;
+    000)     err "No connection to GitHub API. Use -v <version>"; rm -f "$out_file"; exit 1 ;;
+    *)       err "GitHub API: HTTP $code. Use -v <version>"; rm -f "$out_file"; exit 1 ;;
   esac
 }
 
@@ -733,7 +733,7 @@ resolve_version() {
       info "Fetching remote manifest..."
       local manifest_json
       manifest_json=$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 --retry-all-errors "$expanded_url" 2>/dev/null || true)
-      [[ -n "$manifest_json" ]] || { err "No se pudo descargar el manifest desde $expanded_url"; exit 1; }
+      [[ -n "$manifest_json" ]] || { err "Failed to download manifest from $expanded_url"; exit 1; }
 
       version_key=$(expand_template "$MANIFEST_KEY_VERSION")
       url_key=$(expand_template "$MANIFEST_KEY_URL")
@@ -996,10 +996,10 @@ verify_tarball() {
 }
 
 verify_attestation() {
-  ATTEST_STATUS="no-aplica"
+  ATTEST_STATUS="n/a"
   [[ -z "$ATTEST_PREDICATE" ]] && return 0
 
-  ATTEST_STATUS="omitida"
+  ATTEST_STATUS="skipped"
   if ! command -v gh >/dev/null 2>&1; then
     [[ "$REQUIRE_ATTEST" == true ]] && {
       err "--require-attestation specified but gh is not installed: pkg install gh"
@@ -1014,12 +1014,12 @@ verify_attestation() {
   if out=$(gh attestation verify "$TMP_FILE" \
              --repo "${ATTEST_REPO:-$REPO}" \
              --predicate-type "$ATTEST_PREDICATE" 2>&1); then
-    ATTEST_STATUS="verificada"
+    ATTEST_STATUS="verified"
     info "Attestation valid: tarball published by $REPO."
     return 0
   fi
 
-  ATTEST_STATUS="fallida"
+  ATTEST_STATUS="failed"
   [[ "$REQUIRE_ATTEST" == true ]] && {
     err "Attestation verification failed:"
     printf '%s\n' "$out" >&2
@@ -1257,8 +1257,8 @@ _write_wrapper() {
       'if [[ $# -gt 0 ]]; then' \
       "  for a in ${deny_items# }; do" \
       '    [[ "$1" == "$a" ]] || continue' \
-      "    echo \"ERROR: el comando '\$a' está deshabilitado para $DISPLAY_NAME.\" >&2" \
-      "    echo \"Las actualizaciones se gestionan con el instalador:\" >&2" \
+      "    echo \"ERROR: command '\$a' is disabled for $DISPLAY_NAME.\" >&2" \
+      "    echo \"Updates are managed by the installer:\" >&2" \
       "    echo \"  bash install.sh $APP_NAME --update\" >&2" \
       '    exit 1' \
       '  done' \
@@ -1273,13 +1273,13 @@ BIN="$bin_path"
 EXEC_TARGET="$exec_target"
 
 if [[ ! -f "\$BIN" ]]; then
-  echo "ERROR: $DISPLAY_NAME no encontrado en \$BIN" >&2
-  echo "Reinstalá con: bash install.sh $APP_NAME -r" >&2
+  echo "ERROR: $DISPLAY_NAME not found at \$BIN" >&2
+  echo "Reinstall with: bash install.sh $APP_NAME -r" >&2
   exit 1
 fi
 if [[ ! -x "\$BIN" ]]; then
-  echo "ERROR: $DISPLAY_NAME sin permiso de ejecución en \$BIN" >&2
-  echo "Reinstalá con: bash install.sh $APP_NAME -r" >&2
+  echo "ERROR: $DISPLAY_NAME lacks execute permission at \$BIN" >&2
+  echo "Reinstall with: bash install.sh $APP_NAME -r" >&2
   exit 1
 fi
 
@@ -1401,19 +1401,21 @@ verify_install() {
 
 show_summary() {
   local attest_display="$ATTEST_STATUS"
-  [[ "$ATTEST_STATUS" == "no-aplica" ]] && attest_display="N/A (sin attestation configurada)"
+  [[ "$ATTEST_STATUS" == "n/a" ]] && attest_display="N/A (no attestation configured)"
+  local mode_label="glibc overlay, no PRoot"
+  [[ "$EXEC_DIRECT" == true ]] && mode_label="native, no PRoot"
 
   printf '\n'
-  printf '%s%s %s instalado en Termux (overlay glibc, sin proot)%s\n' \
-    "$GREEN" "$DISPLAY_NAME" "$VERSION" "$NC"
+  printf '%s%s %s installed on Termux (%s)%s\n' \
+    "$GREEN" "$DISPLAY_NAME" "$VERSION" "$mode_label" "$NC"
   printf '\n'
-  printf '%sIntegridad:%s\n' "$MUTED" "$NC"
+  printf '%sIntegrity:%s\n' "$MUTED" "$NC"
   printf '  tarball %-7s  %s\n' "$CHECKSUM_ALGO" "$TARBALL_CHECKSUM"
   printf '  attestation      %s\n' "$attest_display"
   printf '\n'
-  printf '%sUso:%s  %s%s%s\n' "$MUTED" "$NC" "$GREEN" "$APP_NAME" "$NC"
+  printf '%sUsage:%s  %s%s%s\n' "$MUTED" "$NC" "$GREEN" "$APP_NAME" "$NC"
   printf '\n'
-  printf '%sVerificar:  bash verify.sh %s%s\n' "$MUTED" "$APP_NAME" "$NC"
+  printf '%sVerify:  bash verify.sh %s%s\n' "$MUTED" "$APP_NAME" "$NC"
 }
 
 run_post_install_hook() {

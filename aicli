@@ -89,9 +89,9 @@ manifest_get() {
 
 check_repo() {
   [[ -f "$INSTALL_SH" && -f "$VERIFY_SH" && -d "$REGISTRY_DIR" ]] || {
-    err "No se encuentra el repositorio ai-cli-termux en: $REPO_DIR"
-    err "Opciones: corré aicli desde el clon del repo, definí AI_CLI_TERMUX_DIR,"
-    err "o ejecutá 'aicli self-install' desde el clon (instala el wrapper)."
+    err "ai-cli-termux repository not found at: $REPO_DIR"
+    err "Options: run aicli from the repo clone, set AI_CLI_TERMUX_DIR,"
+    err "or run 'aicli self-install' from the clone (installs the wrapper)."
     exit 1
   }
 }
