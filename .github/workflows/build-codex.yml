@@ -353,9 +353,19 @@ jobs:
             '   NDK aplica gc-sections; sin RETAIN el símbolo puede quedar fuera' \
             '   del binario si la ref del prebuilt se resuelve por la libc' \
             '   dinámica en vez de por el .a (el nm-check del CI lo detecta). */' \
+            'static uintptr_t shim_page_size(void) {' \
+            '  static uintptr_t cached = 0;' \
+            '  uintptr_t page = __atomic_load_n(&cached, __ATOMIC_RELAXED);' \
+            '  if (__builtin_expect(page == 0, 0)) {' \
+            '    long ps = sysconf(_SC_PAGESIZE);' \
+            '    page = ps > 0 ? (uintptr_t)ps : 4096;' \
+            '    __atomic_store_n(&cached, page, __ATOMIC_RELAXED);' \
+            '  }' \
+            '  return page;' \
+            '}' \
             '__attribute__((used, retain))' \
             'static size_t shim_inner_range(uintptr_t addr, size_t len, uintptr_t *out_start) {' \
-            '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
+            '  uintptr_t page = shim_page_size();' \
             '  uintptr_t first = (addr + page - 1) & ~(page - 1);' \
             '  uintptr_t last = (addr + len) & ~(page - 1);' \
             '  if (last <= first) return 0;' \
@@ -366,7 +376,7 @@ jobs:
             'int mprotect(void *addr, size_t len, int prot);' \
             '__attribute__((used, retain))' \
             'int mprotect(void *addr, size_t len, int prot) {' \
-            '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
+            '  uintptr_t page = shim_page_size();' \
             '  uintptr_t a = (uintptr_t)addr;' \
             '  uintptr_t first, last;' \
             '  if (prot == 0) { /* PROT_NONE: destructivo, sin expansión */' \
@@ -388,7 +398,7 @@ jobs:
             'int madvise(void *addr, size_t len, int advice);' \
             '__attribute__((used, retain))' \
             'int madvise(void *addr, size_t len, int advice) {' \
-            '  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);' \
+            '  uintptr_t page = shim_page_size();' \
             '  uintptr_t a = (uintptr_t)addr;' \
             '  uintptr_t first, last;' \
             '  if (advice == MADV_DONTNEED || advice == MADV_FREE) { /* destructivo */' \
@@ -571,6 +581,8 @@ jobs:
           cp "$BIN" stage/codex
           cp "$HOST" stage/codex-code-mode-host
           cp "$LIB" stage/libc++_shared.so
+          # Strip only DWARF debug info while keeping .symtab for backtraces and post_install_hook symbol checks.
+          "$NDK_TC/llvm-strip" --strip-debug stage/codex stage/codex-code-mode-host
           # RUNPATH=$ORIGIN: el loader bionic encuentra libc++_shared.so junto al binario.
           patchelf --set-rpath '$ORIGIN' stage/codex
           patchelf --print-rpath stage/codex | grep -q '\$ORIGIN' || { echo "ERROR: rpath no aplicado"; exit 1; }
