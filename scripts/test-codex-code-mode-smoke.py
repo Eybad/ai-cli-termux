@@ -8,6 +8,7 @@ import unittest
 
 SMOKE = Path(__file__).with_name("smoke-codex-code-mode.py")
 HOST = '''
+import os
 import struct
 import sys
 import time
@@ -184,10 +185,13 @@ else:
     completed = encode_string(1, "Synthetic execution failure") if MODE == "execution_error" else b""
     outcome_fields = encode_string(1, "cell-1") + encode_bytes(2, content_item) + encode_bytes(5, completed)
 
+if MODE == "bad_exit_closed_stdin":
+    os.close(0)
+
 send_grpc_message(3, encode_bytes(2, outcome_fields))
 send_frame(FRAME_HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 3, b"")
 
-if MODE == "bad_exit":
+if MODE in ("bad_exit", "bad_exit_closed_stdin"):
     sys.exit(11)
 if MODE == "shutdown_stall":
     time.sleep(30)
@@ -253,6 +257,11 @@ class CodeModeSmokeTests(unittest.TestCase):
 
     def test_nonzero_exit_after_true_fails(self):
         result = self.run_host("bad_exit")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exited with status 11", result.stderr)
+
+    def test_nonzero_exit_with_closed_stdin_reports_exit_status(self):
+        result = self.run_host("bad_exit_closed_stdin")
         self.assertEqual(result.returncode, 1)
         self.assertIn("exited with status 11", result.stderr)
 

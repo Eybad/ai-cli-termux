@@ -184,17 +184,26 @@ class GrpcStdioClient:
         )
 
     def send_goaway(self):
-        self.write_raw(build_frame(FRAME_GOAWAY, 0, 0, struct.pack(">II", 0, 0)))
+        try:
+            self.write_raw(build_frame(FRAME_GOAWAY, 0, 0, struct.pack(">II", 0, 0)))
+        except BrokenPipeError:
+            pass
 
     def _consume_frame(self):
         frame_type, flags, stream_id, payload = self.read_frame()
         if frame_type == FRAME_SETTINGS:
             if not (flags & FLAG_ACK):
-                self.write_raw(build_frame(FRAME_SETTINGS, FLAG_ACK, 0))
+                try:
+                    self.write_raw(build_frame(FRAME_SETTINGS, FLAG_ACK, 0))
+                except BrokenPipeError:
+                    pass
             return
         if frame_type == FRAME_PING:
             if not (flags & FLAG_ACK):
-                self.write_raw(build_frame(FRAME_PING, FLAG_ACK, 0, payload))
+                try:
+                    self.write_raw(build_frame(FRAME_PING, FLAG_ACK, 0, payload))
+                except BrokenPipeError:
+                    pass
             return
         if frame_type == FRAME_WINDOW_UPDATE:
             return
@@ -220,10 +229,13 @@ class GrpcStdioClient:
             if data:
                 self.buffers.setdefault(stream_id, bytearray()).extend(data)
                 increment = struct.pack(">I", len(data))
-                self.write_raw(
-                    build_frame(FRAME_WINDOW_UPDATE, 0, 0, increment)
-                    + build_frame(FRAME_WINDOW_UPDATE, 0, stream_id, increment)
-                )
+                try:
+                    self.write_raw(
+                        build_frame(FRAME_WINDOW_UPDATE, 0, 0, increment)
+                        + build_frame(FRAME_WINDOW_UPDATE, 0, stream_id, increment)
+                    )
+                except BrokenPipeError:
+                    pass
             if flags & FLAG_END_STREAM:
                 self.ended.add(stream_id)
 
@@ -343,7 +355,10 @@ def execute(host, source, timeout):
         client.wait_stream_end(3)
 
         client.send_goaway()
-        process.stdin.close()
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("Host shutdown timed out")
@@ -351,7 +366,10 @@ def execute(host, source, timeout):
             raise ValueError(f"Host exited with status {process.returncode}")
     finally:
         if not process.stdin.closed:
-            process.stdin.close()
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
         if process.poll() is None:
             process.kill()
         process.wait()
